@@ -27,6 +27,7 @@ from veadk.cli.cli_kb import kb
 from veadk.cli.cli_pipeline import pipeline
 from veadk.cli.cli_prompt import prompt
 from veadk.cli.cli_rl import rl_group
+from veadk.cli.cli_run import run
 from veadk.cli.cli_update import update
 from veadk.cli.cli_uploadevalset import uploadevalset
 from veadk.cli.cli_web import web
@@ -61,6 +62,7 @@ veadk.add_command(clean)
 veadk.add_command(rl_group)
 veadk.add_command(agentkit)
 veadk.add_command(harness)
+veadk.add_command(run)
 
 if __name__ == "__main__":
     veadk()
