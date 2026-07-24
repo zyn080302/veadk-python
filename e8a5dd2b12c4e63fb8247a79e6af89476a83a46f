@@ -1,0 +1,26 @@
+examples/harness/harness_agent.py
+  s_04e6347230b97c::t_8f4c76c70a8274 23-161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e8a5dd2b12c4e63fb8247a79e6af89476a83a46f",
+  "prompts": {},
+  "humans": {
+    "h_609ff870cc1341": {
+      "author": "yanan.zhangyn <yanan.zhangyn@bytedance.com>"
+    }
+  },
+  "sessions": {
+    "s_04e6347230b97c": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a295d7b1af56e2bb4aa1e30",
+        "model": "gpt-5.5__dev"
+      },
+      "human_author": null
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

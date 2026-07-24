@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "8202d6ec4e75f023ac3a115a61414b34ab221c9d",
+  "prompts": {},
+  "humans": {
+    "h_609ff870cc1341": {
+      "author": "yanan.zhangyn <yanan.zhangyn@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

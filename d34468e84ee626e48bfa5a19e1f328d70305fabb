@@ -1,0 +1,18 @@
+veadk/extensions/harness/README.zh.md
+  h_609ff870cc1341 5
+veadk/extensions/harness/README.md
+  h_609ff870cc1341 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d34468e84ee626e48bfa5a19e1f328d70305fabb",
+  "prompts": {},
+  "humans": {
+    "h_609ff870cc1341": {
+      "author": "yanan.zhangyn <yanan.zhangyn@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
