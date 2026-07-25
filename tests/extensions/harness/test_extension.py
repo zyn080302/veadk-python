@@ -29,13 +29,25 @@ def test_harness_sidecar_dependency_is_optional_extra_only() -> None:
         )
     )
 
-    base_dependencies = pyproject["project"].get("dependencies", [])
-    sidecar_extra = pyproject["project"]["optional-dependencies"]["harness-sidecar"]
+    project = pyproject["project"]
+    base_dependencies = project.get("dependencies", [])
+    sidecar_extra = project["optional-dependencies"]["harness-sidecar"]
+    all_requirements = [
+        *base_dependencies,
+        *(
+            requirement
+            for extra in project["optional-dependencies"].values()
+            for requirement in extra
+        ),
+    ]
 
     assert not any(
-        "agentkit-sdk-python[harness-sidecar]" in item for item in base_dependencies
+        "agentkit-sdk-python[harness-sidecar]" in item for item in all_requirements
     )
-    assert any("agentkit-sdk-python[harness-sidecar]" in item for item in sidecar_extra)
+    assert not any(
+        "bytedance.agentkit_harness_sidecar" in item for item in all_requirements
+    )
+    assert sidecar_extra == ["agentkit-sdk-python>=0.8.1"]
 
 
 def test_harness_extension_builds_runner_plugins() -> None:
@@ -144,6 +156,25 @@ def test_sidecar_startup_can_fail_open(monkeypatch) -> None:
     extension = HarnessExtension(sidecar={"enabled": True, "fail_open": True})
 
     assert extension.sidecar_status == "degraded"
+    assert extension.plugins()
+
+
+def test_local_runtime_request_is_inactive_and_plugins_stay_available(
+    monkeypatch,
+) -> None:
+    from agentkit.toolkit.harness import HarnessSidecarRuntimeUnavailable
+
+    def unavailable(*_args, **_kwargs):
+        raise HarnessSidecarRuntimeUnavailable("cloud-only")
+
+    monkeypatch.setattr(
+        "veadk.extensions.harness.sidecar._public_start_function",
+        lambda: unavailable,
+    )
+
+    extension = HarnessExtension(sidecar={"enabled": True, "fail_open": True})
+
+    assert extension.sidecar_status == "inactive"
     assert extension.plugins()
 
 

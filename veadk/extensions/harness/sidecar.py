@@ -23,7 +23,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_INSTALL_HINT = 'pip install "veadk-python[harness-sidecar]"'
+_INSTALL_HINT = (
+    'install "veadk-python[harness-sidecar]" for the public lifecycle API; '
+    "the private Runtime is supplied only by AgentKit managed cloud runtimes"
+)
 
 
 class HarnessSidecarDependencyError(RuntimeError):
@@ -69,6 +72,8 @@ class ManagedHarnessSidecar:
         if self.binding is not None:
             return str(self.binding.spec.status)
         if self.error is not None:
+            if _runtime_is_cloud_only(self.error):
+                return "inactive"
             return "degraded"
         return "not_started" if self.enabled else "disabled"
 
@@ -175,6 +180,14 @@ def _public_start_function():
 
 def _truthy(value: str | None) -> bool:
     return bool(value and value.strip().lower() in {"1", "true", "yes", "on"})
+
+
+def _runtime_is_cloud_only(error: Exception) -> bool:
+    try:
+        from agentkit.toolkit.harness import HarnessSidecarRuntimeUnavailable
+    except (ImportError, AttributeError):
+        return error.__class__.__name__ == "HarnessSidecarRuntimeUnavailable"
+    return isinstance(error, HarnessSidecarRuntimeUnavailable)
 
 
 __all__ = [

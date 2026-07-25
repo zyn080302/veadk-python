@@ -90,7 +90,7 @@ harness = [
     "headroom",
 ]
 harness-sidecar = [
-    "agentkit-sdk-python[harness-sidecar]>=0.8.1",
+    "agentkit-sdk-python>=0.8.1",
 ]
 cli = []
 dev = [
