@@ -354,16 +354,23 @@ class FeishuChannelExtension:
 
     @staticmethod
     def default_session_id_factory(message: Any) -> str:
+        # veadk-feishu-thread-session: per-topic session continuity. Anchor on the
+        # THREAD id (``conversation.thread_id``) so every message in one Feishu 话题
+        # shares one session and keeps conversation context. The OLD logic put
+        # ``reply_to_message_id`` in the thread chain — when ``conversation.thread_id``
+        # was empty and the message was a reply, the session became that per-reply
+        # id, i.e. a fresh context-less session every turn (the "second message lost
+        # the first's context" bug). Never use reply_to/message_id; when there is no
+        # thread, fall back to the whole chat (also stable), never a per-message id.
         thread_id = _coalesce(
             _read_attr(message, "conversation", "thread_id"),
             getattr(message, "thread_id", None),
-            getattr(message, "reply_to_message_id", None),
         )
         chat_id = _coalesce(
-            getattr(message, "chat_id", None),
             _read_attr(message, "conversation", "chat_id"),
+            getattr(message, "chat_id", None),
         )
-        return thread_id or chat_id or getattr(message, "message_id", "")
+        return thread_id or chat_id or ""
 
     @staticmethod
     def default_response_formatter(text: str) -> dict[str, str]:
@@ -487,21 +494,39 @@ class FeishuChannelExtension:
 
             async def stream_to_feishu(stream):
                 for converted_message in converted_messages:
+                    # veadk-feishu-dedup: append partials, skip aggregated final echo.
+                    # ADK SSE emits incremental ``partial=True`` chunks for a text
+                    # turn and then a final aggregated event carrying the FULL turn
+                    # text. Appending both duplicates the message (the whole final
+                    # report was shown twice). Append the streamed chunks and skip
+                    # the aggregated echo; still append a non-partial event that had
+                    # no preceding partials (a standalone, non-streamed message) so
+                    # nothing is dropped. ``streamed`` resets on any non-text event
+                    # (e.g. a function_call), which marks the turn boundary.
+                    streamed = False
                     async for event in self.runner.run_async(
                         user_id=context.user_id,
                         session_id=context.session_id,
                         new_message=converted_message,
                         run_config=run_config,
                     ):
-                        if not getattr(event, "partial", False):
+                        text = ""
+                        if event.content and event.content.parts:
+                            text = "".join(
+                                part.text
+                                for part in event.content.parts
+                                if not getattr(part, "thought", False) and part.text
+                            )
+                        if not text:
+                            streamed = False
                             continue
-                        if not (event.content and event.content.parts):
-                            continue
-                        for part in event.content.parts:
-                            if getattr(part, "thought", False):
-                                continue
-                            if part.text:
-                                await stream.append(part.text)
+                        if bool(getattr(event, "partial", False)):
+                            await stream.append(text)
+                            streamed = True
+                        else:
+                            if not streamed:
+                                await stream.append(text)
+                            streamed = False
 
             await self._maybe_await(
                 self.channel.stream(

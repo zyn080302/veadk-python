@@ -192,6 +192,32 @@ class FakeStreamingRunner:
         )
 
 
+class FakeAggregatingStreamingRunner(FakeStreamingRunner):
+    async def run_async(self, user_id, session_id, new_message, run_config=None):
+        self.run_async_calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "new_message": new_message,
+                "run_config": run_config,
+            }
+        )
+        yield SimpleNamespace(
+            partial=True,
+            content=SimpleNamespace(parts=[SimpleNamespace(text="hel", thought=False)]),
+        )
+        yield SimpleNamespace(
+            partial=True,
+            content=SimpleNamespace(parts=[SimpleNamespace(text="lo", thought=False)]),
+        )
+        yield SimpleNamespace(
+            partial=False,
+            content=SimpleNamespace(
+                parts=[SimpleNamespace(text="hello", thought=False)]
+            ),
+        )
+
+
 def build_message(**overrides):
     message = SimpleNamespace(
         id="om_001",
@@ -264,6 +290,14 @@ async def test_extension_falls_back_to_chat_id_when_thread_missing():
     assert runner.calls[0]["session_id"] == "oc_chat"
 
 
+def test_default_session_id_ignores_per_reply_message_ids():
+    first = build_message(reply_to_message_id="om_parent_1")
+    second = build_message(reply_to_message_id="om_parent_2")
+
+    assert FeishuChannelExtension.default_session_id_factory(first) == "oc_chat"
+    assert FeishuChannelExtension.default_session_id_factory(second) == "oc_chat"
+
+
 @pytest.mark.anyio
 async def test_extension_ignores_empty_message_by_default():
     runner = FakeRunner()
@@ -298,6 +332,21 @@ async def test_extension_streaming_uses_markdown_producer_controller():
         }
     ]
     assert len(runner.run_async_calls) == 1
+    assert channel.stream_calls == [("oc_chat", ["hel", "lo"], {"reply_to": "om_001"})]
+
+
+@pytest.mark.anyio
+async def test_extension_streaming_skips_aggregated_final_echo():
+    runner = FakeAggregatingStreamingRunner()
+    channel = FakeStreamChannel()
+    extension = FeishuChannelExtension(
+        runner=runner,
+        channel=channel,
+        streaming=True,
+    )
+
+    await extension._on_message(build_message())
+
     assert channel.stream_calls == [("oc_chat", ["hel", "lo"], {"reply_to": "om_001"})]
 
 
