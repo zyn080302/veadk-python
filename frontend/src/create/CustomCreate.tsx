@@ -38,10 +38,23 @@ import {
 import {
   type CreateModeProps,
   type AgentDraft,
+  type HarnessSidecarOptionId,
+  type HarnessSidecarProfileId,
   type McpTool,
   type SelectedSkill,
   emptyDraft,
 } from "./types";
+import {
+  HARNESS_SIDECAR_OPTIONS,
+  HARNESS_SIDECAR_PROFILES,
+  harnessIntentFromOptimizations,
+  harnessProfileDefaultOptimizations,
+  harnessSidecarOptionLabel,
+  harnessSidecarProfileLabel,
+  releaseDraftFromDebugVariant,
+  selectedHarnessProfile,
+  selectedHarnessOptimizations,
+} from "./harnessSidecarOptions";
 import {
   A2A_REGISTRY_DEFAULTS,
   A2A_REGISTRY_ENV,
@@ -1989,7 +2002,8 @@ interface DebugVariant {
   modelName: string;
   description: string;
   instruction: string;
-  optimizations: string[];
+  profile: HarnessSidecarProfileId;
+  optimizations: HarnessSidecarOptionId[];
   configOpen: boolean;
   phase: DebugPhase;
   runtimeSnapshot: string;
@@ -2106,7 +2120,7 @@ function debugVariantSnapshot(
   draftSnapshot: string,
   variant: Pick<
     DebugVariant,
-    "modelName" | "description" | "instruction" | "optimizations"
+    "modelName" | "description" | "instruction" | "profile" | "optimizations"
   >,
 ): string {
   return JSON.stringify({
@@ -2114,6 +2128,7 @@ function debugVariantSnapshot(
     modelName: variant.modelName,
     description: variant.description,
     instruction: variant.instruction,
+    profile: variant.profile,
     optimizations: variant.optimizations,
   });
 }
@@ -2121,13 +2136,14 @@ function debugVariantSnapshot(
 function debugVariantConfigurationKey(
   variant: Pick<
     DebugVariant,
-    "modelName" | "description" | "instruction" | "optimizations"
+    "modelName" | "description" | "instruction" | "profile" | "optimizations"
   >,
 ): string {
   return JSON.stringify({
     modelName: variant.modelName.trim(),
     description: variant.description.trim(),
     instruction: variant.instruction.trim(),
+    profile: variant.profile,
     optimizations: variant.optimizations,
   });
 }
@@ -2147,6 +2163,8 @@ function DebugComparisonWorkspace({
   onToggleConfig,
   onCompleteConfig,
   onConfigChange,
+  onProfileChange,
+  onOptimizationChange,
   onOpenTrace,
 }: {
   enabled: boolean;
@@ -2167,8 +2185,15 @@ function DebugComparisonWorkspace({
     field: "modelName" | "description" | "instruction",
     value: string,
   ) => void;
+  onProfileChange: (id: string, profile: HarnessSidecarProfileId) => void;
+  onOptimizationChange: (
+    id: string,
+    optionId: HarnessSidecarOptionId,
+    selected: boolean,
+  ) => void;
   onOpenTrace: (id: string) => void;
 }) {
+  const harnessOptions = HARNESS_SIDECAR_OPTIONS;
   const runningVariants = variants.filter((variant) => {
     if (variant.phase !== "ready") return false;
     return (
@@ -2214,12 +2239,17 @@ function DebugComparisonWorkspace({
               const starting = variant.phase === "starting";
               const ready = variant.phase === "ready" && !stale;
               const busy = starting || variant.phase === "sending";
+              const selectedProfile = HARNESS_SIDECAR_PROFILES.find(
+                (profile) => profile.id === variant.profile,
+              );
               const traceAvailable =
                 ready &&
                 variant.phase !== "sending" &&
                 variant.messages.some((message) => message.role === "assistant");
               const startDisabled =
-                busy || variant.configOpen || configurationUnavailable;
+                busy ||
+                variant.configOpen ||
+                configurationUnavailable;
               const disabledReason = !modelName
                 ? "请先选择模型"
                 : !description
@@ -2468,22 +2498,90 @@ function DebugComparisonWorkspace({
                             }
                           />
                         </label>
-                        <fieldset className="cw-ab-optimizations-disabled">
+                        <fieldset className="cw-ab-optimizations">
                           <legend>
                             <span>优化选项</span>
-                            <em>待开放</em>
+                            <em>当前版本已集成</em>
                           </legend>
+                          <div className="cw-ab-profile-field">
+                            <span className="cw-ab-profile-label">优化场景</span>
+                            <RadioGroup<HarnessSidecarProfileId>
+                              className="cw-ab-profile-options"
+                              aria-label="优化场景"
+                              value={variant.profile}
+                              onChange={(profile) =>
+                                onProfileChange(variant.id, profile)
+                              }
+                            >
+                              {HARNESS_SIDECAR_PROFILES.map((profile) => (
+                                <div
+                                  key={profile.id}
+                                  className={`cw-ab-profile-option ${
+                                    variant.profile === profile.id ? "is-on" : ""
+                                  } ${
+                                    !variant.configOpen || busy
+                                      ? "is-disabled"
+                                      : ""
+                                  }`}
+                                  title={profile.description}
+                                >
+                                  <RadioGroup.Item
+                                    value={profile.id}
+                                    block
+                                    className="cw-ab-profile-control"
+                                    disabled={!variant.configOpen || busy}
+                                  >
+                                    <span className="cw-ab-profile-copy">
+                                      <strong>{profile.displayName}</strong>
+                                      <small>{profile.description}</small>
+                                    </span>
+                                  </RadioGroup.Item>
+                                </div>
+                              ))}
+                            </RadioGroup>
+                            <span className="cw-ab-profile-help">
+                              {variant.profile === "default"
+                                ? "按需勾选组件；不勾选时不启动 Sidecar。"
+                                : `${selectedProfile?.description ?? "该场景"} 已勾选默认组件，可按需调整。`}
+                            </span>
+                          </div>
                           <div className="cw-ab-optimization-list">
-                            {DEBUG_OPTIMIZATIONS.map((item) => (
+                            {harnessOptions.map((item) => {
+                              const optionId = item.id as HarnessSidecarOptionId;
+                              const checked = variant.optimizations.includes(optionId);
+                              return (
                               <Checkbox
                                 key={item.id}
-                                checked={variant.optimizations.includes(item.id)}
-                                disabled
-                                label={item.label}
+                                checked={checked}
+                                disabled={
+                                  !variant.configOpen ||
+                                  busy
+                                }
+                                onCheckedChange={(next) => {
+                                  if (next !== checked) {
+                                    onOptimizationChange(
+                                      variant.id,
+                                      optionId,
+                                      Boolean(next),
+                                    );
+                                  }
+                                }}
+                                label={
+                                  <span className="cw-ab-optimization-copy">
+                                    <strong>{item.displayName}</strong>
+                                    <small>{item.description}</small>
+                                  </span>
+                                }
                                 className="cw-ab-optimization-checkbox"
                               />
-                            ))}
+                              );
+                            })}
                           </div>
+                          {variant.optimizations.includes("mcp_resilience") && (
+                            <span className="cw-ab-optimization-note">
+                              当前组合将自动启用 SQL 只读保护（sql_readonly）
+                            </span>
+                          )}
                         </fieldset>
                         <p>设置完成后返回正面，再启动当前测试环境。</p>
                       </div>
@@ -2555,29 +2653,6 @@ const WORKSPACE_MODES: Array<{
   { id: "validate", label: "调试" },
   { id: "publish", label: "发布" },
 ];
-
-const DEBUG_OPTIMIZATIONS = [
-  {
-    id: "context",
-    label: "上下文优化",
-    description: "压缩历史对话，保留与当前任务相关的信息",
-  },
-  {
-    id: "grounding",
-    label: "幻觉抑制",
-    description: "对不确定内容要求依据，并明确表达未知",
-  },
-  {
-    id: "tools",
-    label: "工具调用优化",
-    description: "减少重复调用，优先复用可信的工具结果",
-  },
-  {
-    id: "latency",
-    label: "响应加速",
-    description: "缓存稳定上下文，降低重复推理开销",
-  },
-] as const;
 
 function WorkspaceHeader({ mode }: { mode: WorkspaceMode }) {
   const title =
@@ -2778,7 +2853,8 @@ export function CustomCreate({
         modelName: defaultDebugModelName(initialProviderDraft),
         description: initialProviderDraft.description,
         instruction: initialProviderDraft.instruction,
-        optimizations: [],
+        optimizations: selectedHarnessOptimizations(initialProviderDraft),
+        profile: selectedHarnessProfile(initialProviderDraft),
         configOpen: false,
         phase: "idle",
         runtimeSnapshot: "",
@@ -3208,8 +3284,7 @@ export function CustomCreate({
     });
   };
 
-  const openPublishPreview = async (variantId?: string) => {
-    if (!(await confirmLeaveDebug())) return;
+  const materializePublishRelease = async (variantId?: string) => {
     setBuildErr("");
     if (!requireCompleteDraft()) {
       setWorkspaceMode("build");
@@ -3233,15 +3308,10 @@ export function CustomCreate({
         : selectedDebugVariant;
       if (releaseVariant) setSelectedVariantId(releaseVariant.id);
       const releaseDraft = releaseVariant
-        ? {
-            ...providerDraft,
-            modelName: releaseVariant.modelName || providerDraft.modelName,
-            description: releaseVariant.description,
-            instruction: releaseVariant.instruction,
-          }
+        ? releaseDraftFromDebugVariant(providerDraft, releaseVariant)
         : providerDraft;
       const generated = await generateAgentProject(codegenDraft(releaseDraft));
-      if (releaseDraft !== draft) setDraft(releaseDraft);
+      setDraft(releaseDraft);
       setProject(generated);
       setWorkspaceMode("publish");
     } catch (error) {
@@ -3249,6 +3319,11 @@ export function CustomCreate({
     } finally {
       setBuilding(false);
     }
+  };
+
+  const openPublishPreview = async (variantId?: string) => {
+    if (!(await confirmLeaveDebug())) return;
+    await materializePublishRelease(variantId);
   };
 
   const startDebugVariant = async (id: string) => {
@@ -3301,6 +3376,10 @@ export function CustomCreate({
         modelName: variant.modelName || providerDraft.modelName,
         description: variant.description,
         instruction: variant.instruction,
+        harnessSidecar: harnessIntentFromOptimizations(
+          variant.optimizations,
+          variant.profile,
+        ),
       };
       failedPhase = "create_test_run";
       createdRun = await createGeneratedAgentTestRun(
@@ -3460,6 +3539,7 @@ export function CustomCreate({
           modelName: draft.modelName ?? "",
           description: draft.description,
           instruction: draft.instruction,
+          profile: "default",
           optimizations: [],
           configOpen: true,
           phase: "idle",
@@ -3483,6 +3563,29 @@ export function CustomCreate({
         variant.id === id ? { ...variant, ...patch } : variant,
       ),
     );
+
+  const updateDebugVariantOptimization = (
+    id: string,
+    optionId: HarnessSidecarOptionId,
+    selected: boolean,
+  ) => {
+    const variant = debugVariants.find((item) => item.id === id);
+    if (!variant) return;
+    const optimizations = selected
+      ? [...new Set([...variant.optimizations, optionId])]
+      : variant.optimizations.filter((item) => item !== optionId);
+    patchDebugVariant(id, { optimizations });
+  };
+
+  const updateDebugVariantProfile = (
+    id: string,
+    profile: HarnessSidecarProfileId,
+  ) => {
+    patchDebugVariant(id, {
+      profile,
+      optimizations: harnessProfileDefaultOptimizations(profile),
+    });
+  };
 
   const updateDebugVariantConfig = (
     id: string,
@@ -3550,6 +3653,7 @@ export function CustomCreate({
         runtimeId: deploymentTarget?.runtimeId,
         appName: deploymentTarget?.appName,
         description: draft.description,
+        harnessSidecar: draft.harnessSidecar,
       },
     );
   };
@@ -3575,9 +3679,8 @@ export function CustomCreate({
 
   const handleWorkspaceChange = async (nextMode: WorkspaceMode) => {
     if (nextMode === "publish") {
-      if (!requireCompleteDraft()) return;
-      if (project) setWorkspaceMode("publish");
-      else openPublishPreview();
+      if (!(await confirmLeaveDebug())) return;
+      await materializePublishRelease();
       return;
     }
     if (nextMode === "validate") {
@@ -4335,6 +4438,10 @@ export function CustomCreate({
               }}
               onCompleteConfig={completeDebugVariantConfig}
               onConfigChange={updateDebugVariantConfig}
+              onProfileChange={updateDebugVariantProfile}
+              onOptimizationChange={(id, optionId, selected) =>
+                updateDebugVariantOptimization(id, optionId, selected)
+              }
               onOpenTrace={openDebugTrace}
             />
           </div>
@@ -4360,14 +4467,12 @@ export function CustomCreate({
                         "默认模型",
                       description: selectedDebugVariant.description,
                       instruction: selectedDebugVariant.instruction,
-                      optimizations: selectedDebugVariant.optimizations.flatMap(
-                        (id) => {
-                          const option = DEBUG_OPTIMIZATIONS.find(
-                            (item) => item.id === id,
-                          );
-                          return option ? [option.label] : [];
-                        },
-                      ),
+                      optimizations: [
+                        `优化场景：${harnessSidecarProfileLabel(selectedDebugVariant.profile)}`,
+                        ...selectedDebugVariant.optimizations.map(
+                          harnessSidecarOptionLabel,
+                        ),
+                      ],
                     }
                   : undefined
               }

@@ -18,7 +18,10 @@ import {
   TRANSFER_REQUEST_TIMEOUT_MS,
 } from "./timeout";
 import type { AgentProject } from "../create/project";
-import type { AgentDraft, NetworkConfig } from "../create/types";
+import type {
+  AgentDraft,
+  NetworkConfig,
+} from "../create/types";
 import type { IssueFeedbackReport } from "./issueFeedback";
 import {
   BYTEPLUS_DEFAULT_REGION,
@@ -2130,6 +2133,7 @@ export async function deployAgentkitProject(
     };
     envs?: { key: string; value: string }[];
     resources?: DeployResources;
+    harnessSidecar?: AgentDraft["harnessSidecar"];
   },
 ): Promise<DeployAgentkitResult> {
   const taskId = opts?.taskId;
@@ -2171,6 +2175,7 @@ export async function deployAgentkitProject(
           im: opts?.im,
           envs: opts?.envs,
           resources: opts?.resources,
+          harnessSidecar: opts?.harnessSidecar,
         }),
       },
       {},
@@ -2909,6 +2914,7 @@ export interface GeneratedAgentTestRun {
   runId: string;
   appName: string;
   expiresAt: number;
+  planHash?: string;
 }
 
 export async function generateAgentProject(

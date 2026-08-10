@@ -468,7 +468,7 @@ test("keeps the generated project stable when only deployment channel settings c
   assert.doesNotMatch(customCreateSource, /buildPreviewProject/);
   assert.match(
     customCreateSource,
-    /const releaseDraft = releaseVariant[\s\S]*?\.\.\.providerDraft[\s\S]*?generateAgentProject\(codegenDraft\(releaseDraft\)\)/,
+    /const releaseDraft = releaseVariant[\s\S]*?releaseDraftFromDebugVariant\(providerDraft, releaseVariant\)[\s\S]*?generateAgentProject\(codegenDraft\(releaseDraft\)\)/,
   );
   assert.match(projectPreviewSource, /await onFeishuEnabledChange\(!feishuEnabled\)/);
   assert.match(projectPreviewSource, /deploying \|\| feishuUpdating/);

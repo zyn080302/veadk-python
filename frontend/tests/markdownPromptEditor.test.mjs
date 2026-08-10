@@ -271,7 +271,7 @@ test("debug variants configure and deploy their own model, description, and prom
   );
   assert.match(
     createSource,
-    /const releaseDraft = releaseVariant[\s\S]*?\.\.\.providerDraft[\s\S]*?modelName: releaseVariant\.modelName \|\| providerDraft\.modelName,[\s\S]*?description: releaseVariant\.description,[\s\S]*?instruction: releaseVariant\.instruction/,
+    /const releaseDraft = releaseVariant[\s\S]*?releaseDraftFromDebugVariant\(providerDraft, releaseVariant\)/,
   );
   assert.match(
     createSource,
@@ -439,13 +439,19 @@ test("container agents require child agents before debug or publish", () => {
   );
   assert.match(
     createSource,
-    /if \(nextMode === "publish"\) \{[\s\S]*?if \(!requireCompleteDraft\(\)\) return;[\s\S]*?if \(project\) setWorkspaceMode\("publish"\);/,
+    /const materializePublishRelease = async[\s\S]*?if \(!requireCompleteDraft\(\)\) \{[\s\S]*?setWorkspaceMode\("build"\);[\s\S]*?return;/,
+  );
+  assert.match(
+    createSource,
+    /if \(nextMode === "publish"\) \{[\s\S]*?await materializePublishRelease\(\);/,
   );
 });
 
 test("debug workspace compares multiple configurations behind one shared input", () => {
-  assert.match(createSource, /label: "上下文优化"/);
-  assert.match(createSource, /label: "幻觉抑制"/);
+  assert.match(
+    createSource,
+    /const harnessOptions = HARNESS_SIDECAR_OPTIONS/,
+  );
   assert.doesNotMatch(createSource, /className="cw-optimization-panel"/);
   assert.match(
     createSource,
@@ -458,8 +464,11 @@ test("debug workspace compares multiple configurations behind one shared input",
   assert.doesNotMatch(createSource, /快速调试|同一条输入将同时发送到全部对照组/);
   assert.match(createSource, /className="cw-ab-config-trigger"[\s\S]*?测试配置/);
   assert.match(createSource, /cw-ab-card-inner\$\{variant\.configOpen \? " is-flipped" : ""\}/);
-  assert.match(createSource, /checked=\{variant\.optimizations\.includes\(item\.id\)\}/);
-  assert.match(createSource, /className="cw-ab-optimizations-disabled"[\s\S]*?<em>待开放<\/em>/);
+  assert.match(
+    createSource,
+    /const checked = variant\.optimizations\.includes\(optionId\)[\s\S]*?onOptimizationChange\([\s\S]*?variant\.id,[\s\S]*?optionId,[\s\S]*?Boolean\(next\)/,
+  );
+  assert.doesNotMatch(createSource, /className="cw-ab-optimizations-disabled"/);
   assert.match(createSource, /const startDebugVariant = async \(id: string\)/);
   assert.match(
     createSource,

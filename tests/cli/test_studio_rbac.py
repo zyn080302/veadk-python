@@ -1891,6 +1891,8 @@ def test_update_deployment_reuses_owned_runtime_and_returns_new_version(
             value="preserved-secret",
         ),
         SimpleNamespace(key="REPLACED_ENV", value="old-value"),
+        SimpleNamespace(key="HARNESS_SIDECAR_ENABLED", value="true"),
+        SimpleNamespace(key="HARNESS_SIDECAR_EXPECTED_PLAN_HASH", value="sha256:old"),
     ]
     captured_config: dict[str, Any] = {}
     get_calls = 0
@@ -2063,6 +2065,7 @@ def test_update_deployment_reuses_owned_runtime_and_returns_new_version(
         "preserved-secret"
     )
     assert cloud["runtime_envs"]["REPLACED_ENV"] == "new-value"
+    assert not any(key.startswith("HARNESS_") for key in cloud["runtime_envs"])
     assert "runtime_network" not in cloud
     if has_resource_tags:
         assert cloud["tos_bucket"] == "tagged-bucket"
@@ -2225,6 +2228,196 @@ def test_new_deployment_rejects_invalid_instance_range(
 
     assert response.status_code == 400
     assert response.json()["detail"] == detail
+
+
+def test_sidecar_deployment_uses_agentkit_cli_structured_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agentkit.sdk.runtime.client import AgentkitRuntimeClient
+    from veadk.extensions.harness import sidecar
+
+    managed_base = "internal.invalid/managed/sidecar:test-only"
+    agent_name = "ve_jvm_sidecar_prd_v1"
+    runtime_name = "ve-jvm-sidecar-prd-v1"
+    captured: dict[str, Any] = {}
+    runtime = _runtime_with_public_endpoint(_runtime("runtime-sidecar", "developer"))
+    runtime.current_version_number = 3
+
+    monkeypatch.setenv(
+        "VEADK_STUDIO_HARNESS_SIDECAR_REGIONS",
+        "cn-shanghai",
+    )
+    monkeypatch.setenv(
+        "VEADK_STUDIO_HARNESS_SIDECAR_BASE_IMAGE",
+        managed_base,
+    )
+    monkeypatch.setenv(
+        "VEADK_STUDIO_HARNESS_SIDECAR_RUNTIME_NAME",
+        runtime_name,
+    )
+    monkeypatch.setattr(sidecar, "agentkit_cli_executable", lambda: "/fake/agentkit")
+    monkeypatch.setattr(
+        sidecar,
+        "studio_harness_deployment_config",
+        lambda _intent: (
+            {
+                "enabled": True,
+                "profile": "default",
+                "catalog_version": "2026.07.1",
+                "component_overrides": {
+                    "context_engine": True,
+                    "compressor": False,
+                    "verifier": False,
+                    "long_run_control": False,
+                    "mcp_resilience": False,
+                },
+            },
+            {"planHash": "sha256:test-plan"},
+        ),
+    )
+    monkeypatch.setattr(
+        AgentkitRuntimeClient,
+        "get_runtime",
+        lambda _self, _request: runtime,
+    )
+
+    class FakeProcess:
+        def __init__(self, command: list[str], **kwargs: Any) -> None:
+            captured["command"] = command
+            captured["config"] = yaml.safe_load(
+                (Path(kwargs["cwd"]) / ".agentkit" / "agentkit.yaml").read_text()
+            )
+            captured["managed_base_in_env"] = (
+                kwargs["env"].get("AGENTKIT_HARNESS_SIDECAR_BASE_IMAGE") == managed_base
+            )
+            captured["create_only"] = (
+                kwargs["env"].get("AGENTKIT_HARNESS_SIDECAR_REQUIRE_ABSENT") == "true"
+            )
+            captured["cli_env"] = kwargs["env"]
+            self.returncode: int | None = None
+            self.stdout = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "progress",
+                            "phase": "build",
+                            "level": "info",
+                            "message": "building",
+                        }
+                    )
+                    + "\n",
+                    json.dumps(
+                        {
+                            "type": "runtime",
+                            "runtimeId": "runtime-sidecar",
+                            "runtimeName": runtime_name,
+                        }
+                    )
+                    + "\n",
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "success": True,
+                            "runtimeId": "runtime-sidecar",
+                            "runtimeName": runtime_name,
+                            "endpoint": "https://runtime.example.com",
+                            "version": 3,
+                        }
+                    )
+                    + "\n",
+                ]
+            )
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = 0
+            return 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "agentkit.toolkit.sdk.launch",
+        lambda **_kwargs: pytest.fail("Sidecar deployment must not call Python SDK"),
+    )
+    app = _create_studio_app(monkeypatch, tmp_path, developers="developer")
+    monkeypatch.setattr("subprocess.Popen", FakeProcess)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/web/deploy-agentkit",
+            headers={"X-VeADK-Local-User": "developer"},
+            json={
+                "name": agent_name,
+                "minInstance": 1,
+                "maxInstance": 1,
+                "createEvaluationSets": False,
+                "envs": [{"key": "CUSTOM_SECRET", "value": "runtime-only-value"}],
+                "harnessSidecar": {
+                    "componentOverrides": {"context_engine": True},
+                    "planHash": "sha256:test-plan",
+                },
+                "files": [
+                    {
+                        "path": "requirements.txt",
+                        "content": "veadk-python[harness-sidecar]\n",
+                    },
+                    {
+                        "path": f"agents/{agent_name}/agent.py",
+                        "content": (
+                            "harness_extension = HarnessExtension.from_env()\n"
+                            "app = App(plugins=harness_extension.plugins())\n"
+                        ),
+                    },
+                    {
+                        "path": "app.py",
+                        "content": (
+                            "app = create_agentkit_app(\n"
+                            "    harness_extension=harness_extension,\n"
+                            ")\n"
+                        ),
+                    },
+                ],
+                "config": {"region": "cn-shanghai", "projectName": "default"},
+            },
+        ) as response:
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                for line in response.iter_lines()
+                if line.startswith("data: ")
+            ]
+
+    assert response.status_code == 200
+    assert frames[-1]["success"] is True
+    assert frames[-1]["runtimeId"] == "runtime-sidecar"
+    assert frames[-1]["agentName"] == runtime_name
+    assert captured["command"] == ["/fake/agentkit", "release", "--json"]
+    assert captured["managed_base_in_env"] is True
+    assert captured["create_only"] is True
+    assert captured["config"]["name"] == runtime_name
+    assert captured["config"]["harness_sidecar"]["component_overrides"] == {
+        "context_engine": True,
+        "compressor": False,
+        "verifier": False,
+        "long_run_control": False,
+        "mcp_resilience": False,
+    }
+    assert captured["config"]["runtime"]["min_instance"] == 1
+    assert captured["config"]["runtime"]["max_instance"] == 1
+    assert captured["config"]["runtime"]["tags"]["veadk:managed"] == "true"
+    assert managed_base not in json.dumps(captured["config"])
+    persisted_runtime_value = captured["config"]["envs"]["CUSTOM_SECRET"]
+    assert persisted_runtime_value.startswith("${VEADK_STUDIO_RUNTIME_ENV_")
+    placeholder = persisted_runtime_value.removeprefix("${").removesuffix("}")
+    assert captured["cli_env"][placeholder] == "runtime-only-value"
+    assert "runtime-only-value" not in json.dumps(captured["config"])
 
 
 def test_single_instance_update_failure_fails_the_deployment_at_update_phase(

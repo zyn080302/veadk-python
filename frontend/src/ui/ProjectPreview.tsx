@@ -510,6 +510,9 @@ export interface ProjectPreviewProps {
     description: string;
     instruction: string;
     optimizations: string[];
+    effectiveOptimizations?: string[];
+    autoAddedOptimizations?: string[];
+    planHash?: string;
   };
   /** When provided, files are editable and changes call onChange with the new project. Omit for read-only. */
   onChange?: (project: AgentProject) => void;
@@ -694,6 +697,7 @@ export function ProjectPreview({
   const editable = typeof onChange === "function";
   const isRuntimeUpdate = deploymentActionLabel.includes("更新");
   const inMemorySession = usesInMemorySession(agentDraft);
+  const sidecarEnabled = agentDraft?.harnessSidecar?.enabled === true;
 
   // Initialize all hooks BEFORE any conditional returns (React hooks rule)
   const [selected, setSelected] = useState<string | null>(
@@ -728,7 +732,7 @@ export function ProjectPreview({
   const deployRegionLabel = formatCloudRegion(deployRegion, cloudProvider);
   const [minInstance, setMinInstance] = useState("1");
   const [maxInstance, setMaxInstance] = useState(
-    inMemorySession ? "1" : "5",
+    inMemorySession || sidecarEnabled ? "1" : "5",
   );
   const [createEvaluationSets, setCreateEvaluationSets] = useState(true);
   const supportsEvaluationSets = cloudProvider !== "byteplus";
@@ -839,8 +843,8 @@ export function ProjectPreview({
 
   useEffect(() => {
     setMinInstance("1");
-    setMaxInstance(inMemorySession ? "1" : "5");
-  }, [inMemorySession]);
+    setMaxInstance(inMemorySession || sidecarEnabled ? "1" : "5");
+  }, [inMemorySession, sidecarEnabled]);
 
   useEffect(() => {
     if (previousDeployRegionRef.current === deployRegion) return;
@@ -1577,6 +1581,32 @@ export function ProjectPreview({
                               : "未启用"}
                           </dd>
                         </div>
+                        {releaseConfiguration.effectiveOptimizations &&
+                          releaseConfiguration.effectiveOptimizations.length > 0 && (
+                            <div>
+                              <dt>生效能力</dt>
+                              <dd>
+                                {releaseConfiguration.effectiveOptimizations.join("、")}
+                              </dd>
+                            </div>
+                          )}
+                        {releaseConfiguration.autoAddedOptimizations &&
+                          releaseConfiguration.autoAddedOptimizations.length > 0 && (
+                            <div>
+                              <dt>自动保护</dt>
+                              <dd>
+                                {releaseConfiguration.autoAddedOptimizations.join("、")}
+                              </dd>
+                            </div>
+                          )}
+                        {releaseConfiguration.planHash && (
+                          <div>
+                            <dt>Plan Hash</dt>
+                            <dd className="pp-release-fact-long">
+                              {releaseConfiguration.planHash}
+                            </dd>
+                          </div>
+                        )}
                       </>
                     )}
                     </dl>
@@ -1848,7 +1878,7 @@ export function ProjectPreview({
                         step="1"
                         inputMode="numeric"
                         value={minInstance}
-                        disabled={deploying}
+                        disabled={deploying || sidecarEnabled}
                         aria-invalid={!instanceRange.valid}
                         onChange={(event) => setMinInstance(event.currentTarget.value)}
                       />
@@ -1862,15 +1892,17 @@ export function ProjectPreview({
                         step="1"
                         inputMode="numeric"
                         value={maxInstance}
-                        disabled={deploying}
+                        disabled={deploying || sidecarEnabled}
                         aria-invalid={!instanceRange.valid}
                         onChange={(event) => setMaxInstance(event.currentTarget.value)}
                       />
                     </label>
                   </div>
-                  {inMemorySession && (
+                  {(inMemorySession || sidecarEnabled) && (
                     <p className="pp-instance-note" role="note">
-                      为避免多实例间会话丢失，推荐将 Runtime 固定为 1～1
+                      {sidecarEnabled
+                        ? "Harness Sidecar 首期仅支持单实例，Runtime 固定为 1～1"
+                        : "为避免多实例间会话丢失，推荐将 Runtime 固定为 1～1"}
                     </p>
                   )}
                   {!instanceRange.valid && (

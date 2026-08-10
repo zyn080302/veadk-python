@@ -107,7 +107,12 @@ server that `veadk frontend` launches — no separate backend.
 - **Custom-agent workbench**: configure an agent with a rich Markdown
   system-prompt editor (including heading and list shortcuts), then debug with
   expandable, copyable runner error details, per-result Trace inspection, and
-  review. In-progress drafts are stored only in the current browser and scoped
+  review. Test configurations expose Harness Sidecar as `优化场景`: `自定义`
+  appears first and starts with no components, while `运维场景` applies the
+  `ops` component combination. Component checkboxes remain editable, an empty
+  selection keeps Sidecar disabled, and the UI explains the operations
+  scenario's automatic SQL read-only protection. In-progress drafts are stored only in the
+  current browser and scoped
   to the signed-in user. MCP tokens are converted to Runtime environment
   variables: generated source retains only the `${ENV_NAME}` reference, while
   YAML and browser drafts preserve the corresponding environment value.
