@@ -42,6 +42,12 @@ from .sidecar_config import (
 
 RUNTIME_EXECUTABLE = "agentkit-harness-sidecar-runtime"
 INSTALL_HINT = "run inside an AgentKit managed cloud runtime"
+_SIDECAR_TELEMETRY_ENV = {
+    "ENABLE_APMPLUS": "false",
+    "ENABLE_COZELOOP": "false",
+    "ENABLE_TLS": "false",
+    "OTEL_SDK_DISABLED": "true",
+}
 
 
 class HarnessSidecarError(RuntimeError):
@@ -202,11 +208,12 @@ class SidecarBinding:
         self._relay_env_keys.add(upstreams_env)
 
     def _start_runtime_monitor(self) -> None:
-        if self.process is None:
+        process = self.process
+        if process is None:
             return
 
         def monitor() -> None:
-            exit_code = self.process.wait()
+            exit_code = process.wait()
             with self._state_lock:
                 if self._stopped:
                     return
@@ -278,6 +285,12 @@ def start_harness_sidecar(
         if process_env is not None
         else (environ if environ is not None else os.environ)
     )
+    # The managed application owns its telemetry exporters. Reusing those
+    # process-wide flags in the Sidecar child starts a second exporter against
+    # the Runtime-local collector and can make Sidecar discovery fail before
+    # the application becomes ready. Keep application telemetry untouched and
+    # disable only the child process exporters.
+    runtime_env.update(_SIDECAR_TELEMETRY_ENV)
     stderr_lines: list[str] = []
     config_path: Path | None = None
     process: subprocess.Popen[str] | None = None
@@ -486,12 +499,13 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
 
 
 def _read_startup_line(process: subprocess.Popen[str], timeout: float) -> str:
-    if process.stdout is None:
+    stdout = process.stdout
+    if stdout is None:
         raise HarnessSidecarError("runtime stdout is unavailable")
     lines: queue.Queue[str] = queue.Queue(maxsize=1)
 
     def read() -> None:
-        lines.put(process.stdout.readline())
+        lines.put(stdout.readline())
 
     threading.Thread(target=read, name="harness-sidecar-discovery", daemon=True).start()
     try:

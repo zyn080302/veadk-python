@@ -60,6 +60,17 @@ def fake_runtime(tmp_path: Path) -> Path:
             capture = __import__("os").environ.get("FAKE_RUNTIME_CAPTURE")
             if capture:
                 open(capture, "w", encoding="utf-8").write(json.dumps(config))
+            env_capture = __import__("os").environ.get("FAKE_RUNTIME_ENV_CAPTURE")
+            if env_capture:
+                keys = (
+                    "ENABLE_APMPLUS",
+                    "ENABLE_COZELOOP",
+                    "ENABLE_TLS",
+                    "OTEL_SDK_DISABLED",
+                    "UNRELATED_RUNTIME_ENV",
+                )
+                values = {key: __import__("os").environ.get(key) for key in keys}
+                open(env_capture, "w", encoding="utf-8").write(json.dumps(values))
             discovery = {
                 "schema_version": "1",
                 "status": "ok",
@@ -113,9 +124,11 @@ def test_start_applies_and_restores_binding_env(
     )
     try:
         assert binding.process is not None and binding.process.poll() is None
+        assert binding.config_path is not None
+        config_path = binding.config_path
         assert environ["MODEL_AGENT_API_BASE"].startswith("http://127.0.0.1")
         assert environ["MCP_URLS"].endswith("/metrics")
-        assert stat.S_IMODE(binding.config_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
         runtime_config = json.loads(capture.read_text(encoding="utf-8"))
         assert runtime_config["profile"] == "ops"
         assert "runtime_command" not in runtime_config
@@ -123,14 +136,27 @@ def test_start_applies_and_restores_binding_env(
         binding.stop()
     assert environ["MODEL_AGENT_API_BASE"] == "https://real-model/api/v3"
     assert environ["MCP_URLS"] == "https://real-mcp/metrics"
-    assert binding.config_path.exists() is False
+    assert config_path.exists() is False
 
 
 def test_runtime_process_env_is_separate_from_binding_target(
-    fake_runtime: Path,
+    fake_runtime: Path, tmp_path: Path
 ) -> None:
-    target_env = {"ORIGINAL": "target"}
-    runtime_env = {"ORIGINAL": "runtime"}
+    capture = tmp_path / "runtime-env.json"
+    target_env = {
+        "ORIGINAL": "target",
+        "ENABLE_APMPLUS": "true",
+        "OTEL_SDK_DISABLED": "false",
+    }
+    runtime_env = {
+        "ORIGINAL": "runtime",
+        "ENABLE_APMPLUS": "true",
+        "ENABLE_COZELOOP": "true",
+        "ENABLE_TLS": "true",
+        "OTEL_SDK_DISABLED": "false",
+        "UNRELATED_RUNTIME_ENV": "preserved",
+        "FAKE_RUNTIME_ENV_CAPTURE": str(capture),
+    }
 
     binding = start_harness_sidecar(
         _config(fake_runtime),
@@ -140,7 +166,17 @@ def test_runtime_process_env_is_separate_from_binding_target(
     )
     try:
         assert target_env["ORIGINAL"] == "target"
+        assert target_env["ENABLE_APMPLUS"] == "true"
+        assert target_env["OTEL_SDK_DISABLED"] == "false"
         assert target_env["MODEL_AGENT_API_BASE"].startswith("http://127.0.0.1")
+        child_env = json.loads(capture.read_text(encoding="utf-8"))
+        assert child_env == {
+            "ENABLE_APMPLUS": "false",
+            "ENABLE_COZELOOP": "false",
+            "ENABLE_TLS": "false",
+            "OTEL_SDK_DISABLED": "true",
+            "UNRELATED_RUNTIME_ENV": "preserved",
+        }
     finally:
         binding.stop()
 
@@ -151,7 +187,7 @@ def test_apig_runtime_port_relay_replaces_gateway_authorization(
     observed: dict[str, str] = {}
 
     class GatewayHandler(BaseHTTPRequestHandler):
-        def log_message(self, *_args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
         def do_POST(self) -> None:
@@ -229,7 +265,7 @@ def test_apig_runtime_port_rewrites_managed_toolset_through_mcp_gateway(
     observed: dict[str, str] = {}
 
     class GatewayHandler(BaseHTTPRequestHandler):
-        def log_message(self, *_args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
         def do_POST(self) -> None:
@@ -320,7 +356,7 @@ def test_runtime_exit_switches_stable_model_url_to_direct_upstream(
     requests: list[str] = []
 
     class DirectHandler(BaseHTTPRequestHandler):
-        def log_message(self, *_args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
         def do_GET(self) -> None:  # noqa: N802
@@ -381,7 +417,7 @@ def test_runtime_exit_switches_stable_mcp_url_to_env_upstream(
     requests: list[str] = []
 
     class DirectHandler(BaseHTTPRequestHandler):
-        def log_message(self, *_args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return
 
         def do_POST(self) -> None:  # noqa: N802
