@@ -136,7 +136,10 @@ test("Studio explains the update restart window", () => {
 
 test("Studio prechecks every OTA permission before starting cloud changes", () => {
   assert.match(clientSource, /StudioUpdatePermissionStatus/);
-  assert.match(clientSource, /\/web\/studio-update\/permissions/);
+  assert.match(
+    clientSource,
+    /apiFetch\("\/web\/studio-update\/permissions",\s*\{\s*cache:\s*"no-store"\s*\}\)/,
+  );
   assert.match(
     controlSource,
     /const permissions = await getStudioUpdatePermissions\(\);[\s\S]*?startStudioUpdate\(targetVersion\)/,

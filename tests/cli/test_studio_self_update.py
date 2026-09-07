@@ -1213,6 +1213,7 @@ def test_update_routes_require_admin_and_custom_header() -> None:
         "/web/studio-update/permissions", headers={"X-Admin": "1"}
     )
     assert permission_response.status_code == 200
+    assert permission_response.headers["cache-control"] == "no-store, max-age=0"
     assert permission_response.json()["missingActions"] == ["vefaas:CreateTimer"]
     assert (
         client.get(

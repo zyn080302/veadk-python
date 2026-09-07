@@ -3965,7 +3965,7 @@ export async function getStudioUpdateStatus(
 
 /** Verify every IAM Action needed by OTA before starting any cloud mutation. */
 export async function getStudioUpdatePermissions(): Promise<StudioUpdatePermissionStatus> {
-  const res = await apiFetch("/web/studio-update/permissions");
+  const res = await apiFetch("/web/studio-update/permissions", { cache: "no-store" });
   if (!res.ok) {
     let detail = "";
     try {

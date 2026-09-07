@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 
 from veadk.cli.frontend_branding import SiteLogo
 from veadk.cli.studio_artifacts import (
@@ -1102,8 +1102,11 @@ def mount_studio_update_routes(
         )
 
     @app.get("/web/studio-update/permissions")
-    async def _studio_update_permissions(request: Request) -> dict[str, Any]:
+    async def _studio_update_permissions(
+        request: Request, response: Response
+    ) -> dict[str, Any]:
         require_admin(request)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
         try:
             return await asyncio.to_thread(updater.permission_precheck)
         except StudioReleaseError as error:
