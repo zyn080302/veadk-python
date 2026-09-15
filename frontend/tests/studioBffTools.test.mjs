@@ -21,10 +21,27 @@ test("runSSE sends an explicit per-run platform tool selection", () => {
   );
 });
 
+test("Studio chat sends automatic Tool policy while keeping automatic tools out of manual selection", () => {
+  assert.match(clientSource, /toolPolicy\?: StudioToolPolicy/);
+  assert.match(clientSource, /tool_policy:/);
+  assert.match(clientSource, /manual_tools:/);
+  assert.match(appSource, /mode: "auto"/);
+  assert.match(appSource, /tool\.activationMode !== "automatic"/);
+  assert.match(appSource, /toolPolicy: studioToolRuntime/);
+});
+
 test("Studio keeps BFF tool selection separate per session", () => {
   assert.match(appSource, /studioToolIdsBySession/);
   assert.match(appSource, /studioToolSelectionKey\(appName, userId, sessionId\)/);
-  assert.match(appSource, /platformTools: studioToolRuntime \? platformTools : undefined/);
+  assert.match(
+    appSource,
+    /toolPolicy: studioToolRuntime[\s\S]*?manualTools: platformTools/,
+  );
+  assert.match(appSource, /approvalId: browserApproval\?\.approvalId/);
+  assert.match(
+    appSource,
+    /browserLocationOverride:\s*browserApproval\?\.browserLocationOverride/,
+  );
   assert.match(railSource, /selectedStudioToolIds=\{selectedStudioToolIds\}/);
 });
 

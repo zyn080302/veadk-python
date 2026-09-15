@@ -1,4 +1,51 @@
 {
+  "browserUse": {
+    "enabled": "Browser enabled · {{location}}",
+    "cancelled": "Browser task cancelled",
+    "unavailable": "Browser capability is unavailable",
+    "skipped": "Browser disabled for this turn",
+    "location": {
+      "local": "Local browser",
+      "cloud": "Isolated cloud browser"
+    },
+    "phase": {
+      "planned": "Ready",
+      "browsing": "Browsing",
+      "completed": "Completed",
+      "failed": "Failed",
+      "approval_required": "Waiting for confirmation",
+      "cancelled": "Cancelled",
+      "skipped": "Not enabled",
+      "unavailable": "Unavailable"
+    },
+    "controls": {
+      "label": "Browser task controls",
+      "suppress": "Don't use the browser this turn",
+      "switch": "Use {{location}}",
+      "stop": "Stop"
+    },
+    "controlResolution": {
+      "suppressed": "Cancelled. This choice applies to your next message",
+      "switch_local": "Cancelled. Your next message will use the local browser",
+      "switch_cloud": "Cancelled. Your next message will use the isolated cloud browser",
+      "stopped": "Stopped"
+    },
+    "details": "View details",
+    "environment": "Environment",
+    "reason": "Planning reason",
+    "notSelected": "Not selected",
+    "approval": {
+      "title": "Confirmation required",
+      "action": "Action",
+      "target": "Target site",
+      "modify": "Modify",
+      "cancel": "Cancel",
+      "confirm": "Confirm action",
+      "confirmed": "Confirmed. Continuing the action",
+      "cancelled": "Cancelled. This action will not run",
+      "editing": "Original action cancelled. Update the content in the composer"
+    }
+  },
   "annotation": {
     "selectedExcerptLabel": "Selected excerpt",
     "commentLabel": "Annotation",

@@ -28,6 +28,11 @@ import { AgentKitLogoIcon } from "./icons/AgentKitLogoIcon";
 import { DeliverySourceIcon } from "./icons/DeliverySourceIcon";
 import { DeliveryVerifiedIcon } from "./icons/DeliveryVerifiedIcon";
 import { CodeBrowserDialog } from "./CodeBrowserDialog";
+import { BrowserUseStatusBar } from "./builtin-tools/BrowserUseStatusBar";
+import type {
+  BrowserUseLocation,
+  BrowserUseRunState,
+} from "./builtin-tools/browserUseRun";
 
 const A2UI_TOOL = "send_a2ui_json_to_client";
 const STREAM_FRAME_INTERVAL_MS = 28;
@@ -1198,6 +1203,16 @@ export interface BlocksProps {
     delivery: Extract<Block, { kind: "delivery" }>["value"],
   ) => void;
   onBranchSelect?: (branch: BranchCompareBranch) => void;
+  browserApprovalBusy?: boolean;
+  onBrowserApprove?: (state: BrowserUseRunState) => void;
+  onBrowserCancel?: (state: BrowserUseRunState) => void;
+  onBrowserModify?: (state: BrowserUseRunState) => void;
+  onBrowserSuppress?: (state: BrowserUseRunState) => void;
+  onBrowserSwitchLocation?: (
+    state: BrowserUseRunState,
+    location: BrowserUseLocation,
+  ) => void;
+  onBrowserStop?: (state: BrowserUseRunState) => void;
 }
 
 export function Blocks({
@@ -1215,6 +1230,13 @@ export function Blocks({
   onDownloadDelivery,
   onDeployDelivery,
   onBranchSelect,
+  browserApprovalBusy = false,
+  onBrowserApprove,
+  onBrowserCancel,
+  onBrowserModify,
+  onBrowserSuppress,
+  onBrowserSwitchLocation,
+  onBrowserStop,
 }: BlocksProps) {
   const lastTextBlockIndex = blocks.reduce(
     (lastIndex, block, index) => (block.kind === "text" ? index : lastIndex),
@@ -1224,6 +1246,32 @@ export function Blocks({
     <>
       {blocks.map((b, i) => {
         switch (b.kind) {
+          case "browser-use":
+            return (
+              <BrowserUseStatusBar
+                key="browser-use"
+                state={b.state}
+                busy={browserApprovalBusy}
+                onApprove={onBrowserApprove
+                  ? () => onBrowserApprove(b.state)
+                  : undefined}
+                onCancel={onBrowserCancel
+                  ? () => onBrowserCancel(b.state)
+                  : undefined}
+                onModify={onBrowserModify
+                  ? () => onBrowserModify(b.state)
+                  : undefined}
+                onSuppress={onBrowserSuppress
+                  ? () => onBrowserSuppress(b.state)
+                  : undefined}
+                onSwitchLocation={onBrowserSwitchLocation
+                  ? (location) => onBrowserSwitchLocation(b.state, location)
+                  : undefined}
+                onStop={onBrowserStop
+                  ? () => onBrowserStop(b.state)
+                  : undefined}
+              />
+            );
           case "progress":
             return <BuildProgressBlock key="build-progress" text={b.text} />;
           case "thinking": {

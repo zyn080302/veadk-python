@@ -190,9 +190,17 @@ test("environments are mounted dynamically after a Session exists", () => {
   assert.match(appSource, /setEnvironmentMountsBySession\(\(current\) => \(\{/);
   assert.match(appSource, /ENVIRONMENT_STUDIO_TOOL_IDS = \[[\s\S]*?"list_envs"[\s\S]*?"get_env_manifest"[\s\S]*?"execute_in_sandbox"[\s\S]*?"delegate_to_codex_sandbox"/);
   assert.match(appSource, /selections\.length > 0[\s\S]*?ENVIRONMENT_STUDIO_TOOL_IDS[\s\S]*?selectedIds\.filter/);
-  assert.match(appSource, /const visibleStudioTools = studioToolCapabilities\?\.tools\.filter/);
+  assert.match(
+    appSource,
+    /const manualStudioTools = studioToolCapabilities\?\.tools\.filter\([\s\S]*?activationMode !== "automatic"/,
+  );
+  assert.match(appSource, /const visibleStudioTools = manualStudioTools\.filter/);
   assert.match(appSource, /managedStudioToolIds=\{selectedEnvironmentMounts\.length > 0/);
   assert.match(appSource, /environmentMounts: studioToolRuntime && environmentMounts\.length > 0/);
+  assert.match(
+    appSource,
+    /toolPolicy: studioToolRuntime[\s\S]*?mode: "auto"[\s\S]*?manualTools: platformTools/,
+  );
   assert.doesNotMatch(appSource, /environmentsLocked/);
 });
 
@@ -223,7 +231,7 @@ test("local Agents discover Studio tools through a synthetic local runtime", () 
   assert.match(appSource, /region: defaultCloudRegion\(cloudProvider\)/);
   assert.match(
     appSource,
-    /platformTools: studioToolRuntime \? platformTools : undefined/,
+    /toolPolicy: studioToolRuntime[\s\S]*?mode: "auto"[\s\S]*?manualTools: platformTools/,
   );
   assert.match(
     appSource,
@@ -231,7 +239,11 @@ test("local Agents discover Studio tools through a synthetic local runtime", () 
   );
   assert.match(
     appSource,
-    /platformTools: studioToolRuntime \? resumedPlatformTools : undefined/,
+    /toolPolicy: studioToolRuntime[\s\S]*?mode: "manual_only"[\s\S]*?manualTools: resumedPlatformTools/,
+  );
+  assert.doesNotMatch(
+    appSource,
+    /platformTools: studioToolRuntime \? (?:resumedPlatformTools|platformTools) : undefined/,
   );
 });
 

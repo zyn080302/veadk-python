@@ -1,4 +1,51 @@
 {
+  "browserUse": {
+    "enabled": "已启用浏览器 · {{location}}",
+    "cancelled": "浏览器任务已取消",
+    "unavailable": "浏览器能力暂不可用",
+    "skipped": "本轮不用浏览器",
+    "location": {
+      "local": "本地浏览器",
+      "cloud": "云端隔离浏览器"
+    },
+    "phase": {
+      "planned": "已准备",
+      "browsing": "浏览中",
+      "completed": "已完成",
+      "failed": "执行失败",
+      "approval_required": "等待确认",
+      "cancelled": "已取消",
+      "skipped": "未启用",
+      "unavailable": "不可用"
+    },
+    "controls": {
+      "label": "浏览器任务控制",
+      "suppress": "本轮不用浏览器",
+      "switch": "改用{{location}}",
+      "stop": "停止"
+    },
+    "controlResolution": {
+      "suppressed": "已取消，本次选择将在下一条消息生效",
+      "switch_local": "已取消，下一条消息将改用本地浏览器",
+      "switch_cloud": "已取消，下一条消息将改用云端隔离浏览器",
+      "stopped": "已停止"
+    },
+    "details": "查看详情",
+    "environment": "执行环境",
+    "reason": "规划原因",
+    "notSelected": "未选择",
+    "approval": {
+      "title": "执行前需要确认",
+      "action": "操作",
+      "target": "目标站点",
+      "modify": "修改内容",
+      "cancel": "取消",
+      "confirm": "确认执行",
+      "confirmed": "已确认，正在继续执行",
+      "cancelled": "已取消，不会执行此操作",
+      "editing": "已取消原操作，请在输入框中修改内容"
+    }
+  },
   "annotation": {
     "selectedExcerptLabel": "选中片段",
     "commentLabel": "批注",

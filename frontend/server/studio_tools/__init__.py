@@ -32,6 +32,10 @@ from frontend.server.studio_tools.local import (
     local_progress_sse_event,
     stream_local_studio_response,
 )
+from frontend.server.studio_tools.janus_sandbox import (
+    AgentkitJanusSandboxResolver,
+    JanusSandboxResolutionError,
+)
 from frontend.server.studio_tools.registry import (
     StudioTool,
     StudioToolCatalogSnapshot,
@@ -51,12 +55,14 @@ from frontend.server.studio_tools.sandbox_shell import (
 
 __all__ = [
     "AgentkitEnvironmentSandboxResolver",
+    "AgentkitJanusSandboxResolver",
     "CodexSandboxConnection",
     "CodexSandboxDelegate",
     "SandboxExecutionTarget",
     "SandboxResolutionError",
     "SandboxTargetResolver",
     "LocalStudioToolDispatcher",
+    "JanusSandboxResolutionError",
     "StudioChannelError",
     "StudioTool",
     "StudioToolCatalogSnapshot",

@@ -54,6 +54,8 @@
     "annotationHint": "模型回复；选中文字后可添加批注",
     "continueBranch": "继续“{{branch}}”这个方向",
     "emptyResponse": "本次没有返回可显示的内容。",
+    "browserUseApprovalConfirmation": "确认由浏览器执行：{{action}}（{{target}}）",
+    "browserUseModifyPrompt": "请修改以下浏览器操作后再执行：{{action}}",
     "subagentDescription": "正在执行主 Agent 移交的任务。"
   },
   "credentials": {

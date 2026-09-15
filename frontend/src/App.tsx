@@ -261,6 +261,16 @@ import { SandboxProjectUploadDialog } from "./ui/SandboxProjectUploadDialog";
 import { sandboxSnapshotTurns } from "./ui/sandboxCommands";
 import { useSandboxCodexCommands } from "./ui/useSandboxCodexCommands";
 import { StudioConfirmDialog } from "./ui/StudioConfirmDialog";
+import {
+  browserApprovalRunPolicy,
+  browserUseCanSwitchLocation,
+  browserUseNextRunPolicy,
+  resolveBrowserUseControl,
+  resolveBrowserUseApproval,
+  type BrowserUseControlResolution,
+  type BrowserUseLocation,
+  type BrowserUseRunState,
+} from "./ui/builtin-tools/browserUseRun";
 import byteplusLogo from "./assets/byteplus.svg";
 import defaultSiteLogo from "./assets/logo.svg";
 import {
@@ -1505,6 +1515,17 @@ export default function App() {
     () => new Set(),
   );
   const streamAbortsRef = useRef<Map<string, AbortController>>(new Map());
+  const browserRunPolicyBySessionRef = useRef(new Map<
+    string,
+    NonNullable<ReturnType<typeof browserUseNextRunPolicy>>
+  >());
+  const browserControlResolutionBySessionRef = useRef(new Map<
+    string,
+    {
+      state: BrowserUseRunState;
+      resolution: BrowserUseControlResolution;
+    }
+  >());
   const streamPresentationTimersRef = useRef<Map<string, number>>(new Map());
   const automaticEvaluationStatusTimerRef = useRef<number | undefined>(undefined);
   const automaticEvaluationStatusRefreshRef = useRef<() => void>(() => {});
@@ -5123,6 +5144,7 @@ export default function App() {
     selectedInvocation: FrontendInvocation = emptyInvocation(),
     messageSource: AgentMessageSource = "composer",
     selectedPlatformTools?: readonly string[],
+    browserApproval?: NonNullable<ReturnType<typeof browserApprovalRunPolicy>>,
   ) {
     // `busy` here = the CURRENT session is already streaming (can't double-send
     // to it). Other sessions can stream concurrently.
@@ -5249,6 +5271,10 @@ export default function App() {
       }
     }
 
+    const browserRunPolicy = studioToolRuntime
+      ? browserRunPolicyBySessionRef.current.get(sid)
+      : undefined;
+
     setTurnsFor(sid, (current) =>
       createsSession ? optimisticTurns : [...current, ...optimisticTurns],
     );
@@ -5284,6 +5310,7 @@ export default function App() {
     let streamFailed = false;
     let streamError: unknown = null;
     try {
+      browserRunPolicyBySessionRef.current.delete(sid);
       let finalEventId = "";
       let hasCompletedReply = false;
       for await (const event of runSSE({
@@ -5293,7 +5320,17 @@ export default function App() {
         text,
         attachments: atts,
         invocation: selectedInvocation,
-        platformTools: studioToolRuntime ? platformTools : undefined,
+        toolPolicy: studioToolRuntime
+          ? {
+              mode: "auto",
+              manualTools: platformTools,
+              suppressedTools: browserRunPolicy?.suppressedTools,
+              browserLocationOverride:
+                browserApproval?.browserLocationOverride
+                ?? browserRunPolicy?.browserLocationOverride,
+              approvalId: browserApproval?.approvalId,
+            }
+          : undefined,
         environmentMounts: studioToolRuntime && environmentMounts.length > 0
           ? environmentMounts
           : undefined,
@@ -5395,7 +5432,151 @@ export default function App() {
       finishStreamPresentation(sid);
       setActiveAgentBySession((m) => ({ ...m, [sid]: "" }));
       setExecPathBySession((m) => ({ ...m, [sid]: [] }));
+      flushBrowserControlResolution(sid);
     }
+  }
+
+  function browserControlStateMatches(
+    candidate: BrowserUseRunState,
+    target: BrowserUseRunState,
+  ): boolean {
+    if (candidate === target) return true;
+    if (target.requestId) return candidate.requestId === target.requestId;
+    return candidate.requestId === undefined
+      && candidate.phase === target.phase
+      && candidate.reasonCode === target.reasonCode
+      && candidate.browserLocation === target.browserLocation
+      && candidate.controlResolution === undefined;
+  }
+
+  function applyBrowserControlResolution(
+    sid: string,
+    target: BrowserUseRunState,
+    resolution: BrowserUseControlResolution,
+  ) {
+    setTurnsFor(sid, (current) => {
+      const next = current.slice();
+      for (let turnIndex = next.length - 1; turnIndex >= 0; turnIndex -= 1) {
+        const turn = next[turnIndex];
+        for (
+          let blockIndex = turn.blocks.length - 1;
+          blockIndex >= 0;
+          blockIndex -= 1
+        ) {
+          const block = turn.blocks[blockIndex];
+          if (
+            block.kind !== "browser-use"
+            || !browserControlStateMatches(block.state, target)
+          ) continue;
+          const blocks = turn.blocks.slice();
+          blocks[blockIndex] = {
+            ...block,
+            state: resolveBrowserUseControl(block.state, resolution),
+          };
+          next[turnIndex] = { ...turn, blocks };
+          return next;
+        }
+      }
+      return current;
+    });
+  }
+
+  function flushBrowserControlResolution(sid: string) {
+    const pending = browserControlResolutionBySessionRef.current.get(sid);
+    if (!pending) return;
+    applyBrowserControlResolution(sid, pending.state, pending.resolution);
+    browserControlResolutionBySessionRef.current.delete(sid);
+  }
+
+  function controlBrowserRun(
+    state: BrowserUseRunState,
+    resolution: BrowserUseControlResolution,
+  ) {
+    if (!sessionId || !studioToolRuntime) return;
+    if (
+      (resolution === "switch_local" || resolution === "switch_cloud")
+      && !browserUseCanSwitchLocation(state)
+    ) return;
+    const policy = browserUseNextRunPolicy(resolution);
+    if (policy) browserRunPolicyBySessionRef.current.set(sessionId, policy);
+    browserControlResolutionBySessionRef.current.set(sessionId, {
+      state,
+      resolution,
+    });
+    applyBrowserControlResolution(sessionId, state, resolution);
+    const controller = streamAbortsRef.current.get(sessionId);
+    controller?.abort();
+    if (!controller) flushBrowserControlResolution(sessionId);
+  }
+
+  function suppressBrowserForNextRun(state: BrowserUseRunState) {
+    controlBrowserRun(state, "suppressed");
+  }
+
+  function switchBrowserLocation(
+    state: BrowserUseRunState,
+    location: BrowserUseLocation,
+  ) {
+    controlBrowserRun(
+      state,
+      location === "local" ? "switch_local" : "switch_cloud",
+    );
+  }
+
+  function stopBrowserRun(state: BrowserUseRunState) {
+    controlBrowserRun(state, "stopped");
+  }
+
+  function setBrowserApprovalResolution(
+    state: BrowserUseRunState,
+    resolution: "confirmed" | "cancelled" | "editing",
+  ) {
+    const approvalId = state.actionApproval?.approvalId;
+    if (!sessionId || !approvalId) return;
+    setTurnsFor(sessionId, (current) => current.map((turn) => ({
+      ...turn,
+      blocks: turn.blocks.map((block) => block.kind === "browser-use"
+        ? {
+            ...block,
+            state: resolveBrowserUseApproval(
+              block.state,
+              approvalId,
+              resolution,
+            ),
+          }
+        : block),
+    })));
+  }
+
+  function approveBrowserAction(state: BrowserUseRunState) {
+    const policy = browserApprovalRunPolicy(state);
+    const approval = state.actionApproval;
+    if (!policy || !approval || conversationBusy) return;
+    setBrowserApprovalResolution(state, "confirmed");
+    void send(
+      t("conversation.browserUseApprovalConfirmation", {
+        action: approval.actionSummary,
+        target: approval.targetOrigin,
+      }),
+      [],
+      emptyInvocation(),
+      "composer",
+      selectedStudioToolIds,
+      policy,
+    );
+  }
+
+  function cancelBrowserAction(state: BrowserUseRunState) {
+    setBrowserApprovalResolution(state, "cancelled");
+  }
+
+  function modifyBrowserAction(state: BrowserUseRunState) {
+    const approval = state.actionApproval;
+    if (!approval) return;
+    setBrowserApprovalResolution(state, "editing");
+    setInput(t("conversation.browserUseModifyPrompt", {
+      action: approval.actionSummary,
+    }));
   }
 
   function stopCurrentGeneration() {
@@ -5474,7 +5655,9 @@ export default function App() {
         functionResponses: [
           { id: block.callId, name: "adk_request_credential", response },
         ],
-        platformTools: studioToolRuntime ? resumedPlatformTools : undefined,
+        toolPolicy: studioToolRuntime
+          ? { mode: "manual_only", manualTools: resumedPlatformTools }
+          : undefined,
         environmentMounts: studioToolRuntime && environmentMounts.length > 0
           ? environmentMounts
           : undefined,
@@ -5776,8 +5959,13 @@ export default function App() {
   const allStudioToolIds = new Set(
     studioToolCapabilities?.tools.map((tool) => tool.id) ?? [],
   );
+  const manualStudioTools = studioToolCapabilities?.tools.filter(
+    (tool) => tool.activationMode !== "automatic",
+  ) ?? [];
   const availableStudioToolIds = new Set(
-    [...allStudioToolIds].filter((toolId) => !agentInfo?.tools.includes(toolId)),
+    manualStudioTools
+      .map((tool) => tool.id)
+      .filter((toolId) => !agentInfo?.tools.includes(toolId)),
   );
   const selectedEnvironmentMounts = sessionId
     ? environmentMountsBySession[activeStudioToolSelectionKey] ?? []
@@ -5794,7 +5982,7 @@ export default function App() {
       ? [...ENVIRONMENT_STUDIO_TOOL_IDS]
       : []),
   ])];
-  const visibleStudioTools = studioToolCapabilities?.tools.filter((tool) =>
+  const visibleStudioTools = manualStudioTools.filter((tool) =>
     !ENVIRONMENT_STUDIO_TOOL_IDS.includes(
       tool.id as (typeof ENVIRONMENT_STUDIO_TOOL_IDS)[number],
     ) || selectedEnvironmentMounts.length > 0
@@ -7921,6 +8109,13 @@ export default function App() {
                       onBranchSelect={(branch) => {
                         setInput(t("conversation.continueBranch", { branch: branch.label }));
                       }}
+                      browserApprovalBusy={conversationBusy}
+                      onBrowserApprove={approveBrowserAction}
+                      onBrowserCancel={cancelBrowserAction}
+                      onBrowserModify={modifyBrowserAction}
+                      onBrowserSuppress={suppressBrowserForNextRun}
+                      onBrowserSwitchLocation={switchBrowserLocation}
+                      onBrowserStop={stopBrowserRun}
                     />
                     {/* Finalized turn that produced no visible answer (e.g. only
                         thinking + an empty A2UI surface) — show a fallback note. */}

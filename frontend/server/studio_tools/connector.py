@@ -20,7 +20,14 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -587,12 +594,15 @@ async def open_studio_tool_run(
     payload: dict[str, Any],
     catalog: StudioToolCatalogSnapshot,
     owner_id: str = "",
+    tool_plan: Mapping[str, Any] | None = None,
     environment_mount: SessionEnvironmentMount | None = None,
     environment_mounts: Sequence[SessionEnvironmentMount] = (),
     prepare_environment_mounts: Callable[
         [Sequence[SessionEnvironmentMount], StudioToolExecutionContext],
         Awaitable[Sequence[SessionEnvironmentMount]],
     ]
+    | None = None,
+    prepare_janus_client: Callable[[StudioToolExecutionContext], Awaitable[Any]]
     | None = None,
 ) -> StudioToolRun:
     """Connect, publish the current catalog, and start one same-socket run."""
@@ -618,9 +628,15 @@ async def open_studio_tool_run(
         scope_id=scope_id,
         catalog_revision=revision,
         owner_id=owner_id,
+        tool_plan=tool_plan or {},
         environment_mount=environment_mount,
         environment_mounts=tuple(environment_mounts),
     )
+    if prepare_janus_client is not None:
+        execution_context = replace(
+            execution_context,
+            janus_client=await prepare_janus_client(execution_context),
+        )
     mounts_to_prepare = tuple(environment_mounts) or (
         (environment_mount,) if environment_mount is not None else ()
     )

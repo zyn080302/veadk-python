@@ -103,6 +103,50 @@ function asCustomTools(v: unknown): CustomTool[] {
     .filter((t): t is CustomTool => !!t && !!t.name.trim());
 }
 
+export interface LegacyBrowserAutomationMigration {
+  draft: AgentDraft;
+  migrated: boolean;
+}
+
+/**
+ * Remove the retired creation-time Browser Automation contract without
+ * converting an unknown legacy location into a trusted runtime decision.
+ */
+export function migrateLegacyBrowserAutomationDraft(
+  draft: AgentDraft,
+): LegacyBrowserAutomationMigration {
+  const raw = draft as AgentDraft & { browserAutomation?: unknown };
+  const childMigrations = draft.subAgents.map((child) =>
+    migrateLegacyBrowserAutomationDraft(child),
+  );
+  const browserToolPresent = draft.builtinTools?.includes("browser_automation") ?? false;
+  const browserConfigPresent = Object.prototype.hasOwnProperty.call(
+    raw,
+    "browserAutomation",
+  );
+  const childrenMigrated = childMigrations.some((child) => child.migrated);
+  const migrated = browserToolPresent || browserConfigPresent || childrenMigrated;
+  if (!migrated) return { draft, migrated: false };
+
+  const { browserAutomation: _retiredBrowserAutomation, ...withoutLegacyConfig } =
+    raw;
+  void _retiredBrowserAutomation;
+  return {
+    draft: {
+      ...withoutLegacyConfig,
+      ...(browserToolPresent
+        ? {
+            builtinTools: (draft.builtinTools ?? []).filter(
+              (toolId) => toolId !== "browser_automation",
+            ),
+          }
+        : {}),
+      subAgents: childMigrations.map((child) => child.draft),
+    },
+    migrated: true,
+  };
+}
+
 function pick<T>(v: unknown, allowed: Set<string>, fallback: T): string | T {
   return typeof v === "string" && allowed.has(v) ? v : fallback;
 }
@@ -306,7 +350,6 @@ export function normalizeDraft(raw: unknown): AgentDraft {
     a2aRegistry.enabled && parsedType === "llm" ? "a2a" : parsedType;
   const cloudProvider = asCloudProvider(o.cloudProvider);
   const modelNames = normalizeDraftModelNames(o.modelName, o.modelFallbacks);
-
   const mcpTools = Array.isArray(o.mcpTools)
     ? (o.mcpTools as unknown[])
         .map((m) => {

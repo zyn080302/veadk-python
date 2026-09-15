@@ -54,6 +54,8 @@
     "annotationHint": "Model response; select text to add an annotation",
     "continueBranch": "Continue with “{{branch}}”",
     "emptyResponse": "This response has no displayable content.",
+    "browserUseApprovalConfirmation": "Confirm this browser action: {{action}} ({{target}})",
+    "browserUseModifyPrompt": "Update this browser action before running it: {{action}}",
     "subagentDescription": "Working on a task handed off by the primary Agent."
   },
   "credentials": {

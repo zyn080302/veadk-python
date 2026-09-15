@@ -1,0 +1,141 @@
+name: Browser Use Release Gate
+
+on:
+  workflow_call:
+  push:
+    paths:
+      - '.github/workflows/browser-use-release-gate.yaml'
+      - 'frontend/**'
+      - 'tests/cli/test_frontend_runtime_proxy.py'
+      - 'tests/cli/test_generated_agent_planner.py'
+      - 'tests/frontend/server/studio_tools/**'
+      - 'tests/integrations/agentkit/test_app.py'
+      - 'tests/integrations/agentkit/test_studio_channel.py'
+      - 'tests/test_browser_use_release_gate.py'
+      - 'veadk/cli/cli_frontend.py'
+      - 'veadk/cli/generated_agent_catalog.py'
+      - 'veadk/cli/generated_agent_security.py'
+      - 'veadk/integrations/agentkit/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  pull_request:
+    paths:
+      - '.github/workflows/browser-use-release-gate.yaml'
+      - 'frontend/**'
+      - 'tests/cli/test_frontend_runtime_proxy.py'
+      - 'tests/cli/test_generated_agent_planner.py'
+      - 'tests/frontend/server/studio_tools/**'
+      - 'tests/integrations/agentkit/test_app.py'
+      - 'tests/integrations/agentkit/test_studio_channel.py'
+      - 'tests/test_browser_use_release_gate.py'
+      - 'veadk/cli/cli_frontend.py'
+      - 'veadk/cli/generated_agent_catalog.py'
+      - 'veadk/cli/generated_agent_security.py'
+      - 'veadk/integrations/agentkit/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install locked Python dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run Browser Use BFF and Runtime regression gate
+        run: |
+          uv run pytest -q \
+            tests/frontend/server/studio_tools/test_browser_plan.py \
+            tests/frontend/server/studio_tools/test_browser_observability.py \
+            tests/frontend/server/studio_tools/test_janus_a2a_client.py \
+            tests/frontend/server/studio_tools/test_janus_sandbox.py \
+            tests/frontend/server/studio_tools/test_extensions.py \
+            tests/frontend/server/studio_tools/test_connector.py \
+            tests/frontend/server/studio_tools/test_registry.py \
+            tests/frontend/server/studio_tools/test_local.py \
+            tests/cli/test_frontend_runtime_proxy.py \
+            tests/cli/test_generated_agent_planner.py \
+            tests/integrations/agentkit/test_app.py \
+            tests/integrations/agentkit/test_studio_channel.py \
+            tests/test_browser_use_release_gate.py
+
+      - name: Lint Browser Use Python boundaries
+        run: |
+          uv run ruff check \
+            frontend/server/studio_tools \
+            veadk/cli/cli_frontend.py \
+            veadk/integrations/agentkit \
+            tests/frontend/server/studio_tools \
+            tests/test_browser_use_release_gate.py
+
+      - name: Type-check Browser Use Python boundaries
+        run: |
+          uv run pyright \
+            frontend/server/studio_tools/browser_observability.py \
+            frontend/server/studio_tools/browser_plan.py \
+            frontend/server/studio_tools/extensions/browser_use.py \
+            frontend/server/studio_tools/janus_a2a_client.py \
+            frontend/server/studio_tools/janus_sandbox.py \
+            veadk/integrations/agentkit/app.py \
+            veadk/integrations/agentkit/studio_channel/history.py
+
+      - name: Check source patch whitespace
+        run: git diff --check -- . ':(exclude)veadk/webui/**'
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+
+      - name: Run complete frontend regression suite
+        working-directory: frontend
+        run: npm test
+
+      - name: Type-check frontend
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Build production Studio assets
+        working-directory: frontend
+        run: npm run build
+
+      - name: Verify production asset contract
+        working-directory: frontend
+        run: npm run test:webui-assets
+
+  gate:
+    if: always()
+    needs: [python, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Browser Use check to pass
+        env:
+          PYTHON_RESULT: ${{ needs.python.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          test "$PYTHON_RESULT" = success
+          test "$FRONTEND_RESULT" = success

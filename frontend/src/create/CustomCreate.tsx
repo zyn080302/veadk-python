@@ -113,6 +113,7 @@ import {
 } from "./mcpAuth";
 import { resolveMcpGatewayEnv } from "./mcpGatewayEnv";
 import {
+  migrateLegacyBrowserAutomationDraft,
   normalizeDraft,
   sanitizeGeneratedDraftCapabilities,
 } from "./normalizeDraft";
@@ -3159,13 +3160,15 @@ function draftForCloudProvider(
 interface CustomCreateInitialState {
   draft: AgentDraft;
   customModelSecretValues: Record<string, string>;
+  legacyBrowserAutomationMigrated: boolean;
 }
 
 function customCreateInitialState(
   initialDraft: AgentDraft,
   cloudProvider: CloudProvider,
 ): CustomCreateInitialState {
-  const draft = draftForCloudProvider(initialDraft, cloudProvider);
+  const migration = migrateLegacyBrowserAutomationDraft(initialDraft);
+  const draft = draftForCloudProvider(migration.draft, cloudProvider);
   const requirements = customModelCredentialRequirements(
     draft,
     defaultModelApiBase(cloudProvider),
@@ -3178,7 +3181,11 @@ function customCreateInitialState(
     ),
   );
   if (Object.keys(customModelSecretValues).length === 0) {
-    return { draft, customModelSecretValues };
+    return {
+      draft,
+      customModelSecretValues,
+      legacyBrowserAutomationMigrated: migration.migrated,
+    };
   }
   return {
     draft: {
@@ -3193,6 +3200,7 @@ function customCreateInitialState(
       },
     },
     customModelSecretValues,
+    legacyBrowserAutomationMigrated: migration.migrated,
   };
 }
 
@@ -4039,6 +4047,8 @@ export function CustomCreate({
     );
   });
   const [draft, setDraft] = useState<AgentDraft>(initialState.draft);
+  const [legacyBrowserAutomationMigrated, setLegacyBrowserAutomationMigrated] =
+    useState(initialState.legacyBrowserAutomationMigrated);
   const usesNewAgentWorkbench = isVulcanCreation;
   const [customModelSecretValues, setCustomModelSecretValues] = useState<
     Record<string, string>
@@ -5646,6 +5656,19 @@ export function CustomCreate({
           className="cw-workspace-alert"
           message={buildErr}
         />
+      )}
+      {legacyBrowserAutomationMigrated && (
+        <div className="cw-banner cw-browser-migration" role="status">
+          <Info className="cw-i" aria-hidden="true" />
+          <span>{t("traditional.browserMigration.notice")}</span>
+          <button
+            type="button"
+            className="cw-browser-migration-dismiss"
+            onClick={() => setLegacyBrowserAutomationMigrated(false)}
+          >
+            {t("traditional.browserMigration.dismiss")}
+          </button>
+        </div>
       )}
       <main className="cw-workspace-main" id="cw-workspace-main">
         {workspaceMode === "build" && (

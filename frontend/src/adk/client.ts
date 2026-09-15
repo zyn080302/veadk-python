@@ -1704,6 +1704,8 @@ export interface RunArgs {
   invocation?: FrontendInvocation;
   /** Complete set of local BFF tool IDs selected for this run. */
   platformTools?: readonly string[];
+  /** Studio-private per-run policy consumed by the BFF before ADK validation. */
+  toolPolicy?: StudioToolPolicy;
   /** Studio-only immutable environment selections for this session. */
   environmentMounts?: readonly SessionEnvironmentMountSelection[];
   /** @deprecated Compatibility with older Studio BFF versions. */
@@ -1715,6 +1717,14 @@ export interface RunArgs {
   signal?: AbortSignal;
   /** Receives trusted instance metadata exposed by the same-origin Studio BFF. */
   onRuntimeContext?: (context: RuntimeLogTarget) => void;
+}
+
+export interface StudioToolPolicy {
+  mode: "auto" | "manual_only" | "off";
+  manualTools?: readonly string[];
+  suppressedTools?: readonly string[];
+  browserLocationOverride?: "local" | "cloud" | null;
+  approvalId?: string | null;
 }
 
 export function runSseEmptyResponseError(): string {
@@ -1789,12 +1799,16 @@ export async function* runSSE({
   attachments = [],
   invocation,
   platformTools,
+  toolPolicy,
   environmentMounts,
   environmentMount,
   functionResponses = [],
   signal,
   onRuntimeContext,
 }: RunArgs): AsyncGenerator<AdkEvent, void, unknown> {
+  if (toolPolicy !== undefined && platformTools !== undefined) {
+    throw new Error("toolPolicy and platformTools cannot be used together");
+  }
   const { app, ep } = resolve(appName);
   const attachmentParts = attachments.flatMap<Record<string, unknown>>((a) => {
       if (a.status && a.status !== "ready") return [];
@@ -1852,9 +1866,20 @@ export async function* runSSE({
           session_id: sessionId,
           new_message: { role: "user", parts },
           streaming: true,
-          ...(platformTools !== undefined
-            ? { platform_tools: [...platformTools] }
-            : {}),
+          ...(toolPolicy !== undefined
+            ? {
+                tool_policy: {
+                  mode: toolPolicy.mode,
+                  manual_tools: [...(toolPolicy.manualTools ?? [])],
+                  suppressed_tools: [...(toolPolicy.suppressedTools ?? [])],
+                  browser_location_override:
+                    toolPolicy.browserLocationOverride ?? null,
+                  approval_id: toolPolicy.approvalId ?? null,
+                },
+              }
+            : platformTools !== undefined
+              ? { platform_tools: [...platformTools] }
+              : {}),
           ...(environmentMounts !== undefined
             ? { environment_mounts: [...environmentMounts] }
             : environmentMount
@@ -4399,6 +4424,7 @@ export interface StudioBffTool {
   name: string;
   description: string;
   riskLevel: string;
+  activationMode?: "manual" | "automatic";
 }
 
 export interface RuntimeStudioToolCapabilities {

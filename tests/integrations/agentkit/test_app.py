@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -30,6 +31,9 @@ import veadk
 import veadk.integrations.agentkit.app as agentkit_app
 from veadk.cli.frontend_invocation import FrontendInvocationPlugin
 from veadk.integrations.agentkit.studio_channel import StudioExternalToolset
+from veadk.integrations.agentkit.studio_channel.history import (
+    StudioToolHistoryPlugin,
+)
 
 
 class _FakeAgentServer:
@@ -245,6 +249,83 @@ def test_create_agentkit_app_uses_runtime_bff_tool_opt_in(
         tool for tool in root_agent.tools if isinstance(tool, StudioExternalToolset)
     ]
     assert bool(studio_toolsets) is enabled
+
+
+def test_studio_tool_history_plugin_is_scoped_to_opt_in_channel_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import veadk.integrations.agentkit.studio_channel as studio_channel
+
+    class SessionAgentServer(_FakeAgentServer):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.session_service = object()
+
+    mounted: list[dict[str, Any]] = []
+
+    def fake_mount_studio_channel_routes(**kwargs: Any) -> None:
+        mounted.append(kwargs)
+
+    monkeypatch.setattr(agentkit_app, "AgentkitAgentServerApp", SessionAgentServer)
+    monkeypatch.setattr(
+        studio_channel,
+        "mount_studio_channel_routes",
+        fake_mount_studio_channel_routes,
+    )
+
+    root_agent = AdkAgent(name="agent")
+    audit_plugin = BasePlugin(name="audit")
+    adk_app = App(
+        name="agent",
+        root_agent=root_agent,
+        plugins=[audit_plugin],
+    )
+    agentkit_app.create_agentkit_app(app=adk_app, enable_studio_tools=False)
+
+    assert mounted[-1]["enabled"] is False
+    assert "run_handler" not in mounted[-1]
+    assert adk_app.plugins == [audit_plugin]
+
+    captured_plugins: list[Any] = []
+
+    class EmptyRunner:
+        def run_async(self, **kwargs: Any) -> Any:
+            del kwargs
+
+            async def empty_events():
+                if False:
+                    yield None
+
+            return empty_events()
+
+    def fake_dynamic_runner(*args: Any, **kwargs: Any) -> EmptyRunner:
+        del args
+        captured_plugins.extend(kwargs["plugins"])
+        return EmptyRunner()
+
+    monkeypatch.setattr(agentkit_app, "_dynamic_runner", fake_dynamic_runner)
+    agentkit_app.create_agentkit_app(app=adk_app, enable_studio_tools=True)
+    run_handler = mounted[-1]["run_handler"]
+
+    async def exhaust_run() -> None:
+        async for _ in run_handler(
+            {
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {
+                    "role": "user",
+                    "parts": [{"text": "hello"}],
+                },
+            }
+        ):
+            pass
+
+    asyncio.run(exhaust_run())
+
+    assert isinstance(captured_plugins[0], StudioToolHistoryPlugin)
+    assert captured_plugins[1:] == [audit_plugin]
+    assert adk_app.plugins == [audit_plugin]
 
 
 @pytest.mark.parametrize("workflow_type", [SequentialAgent, ParallelAgent, LoopAgent])

@@ -20,8 +20,8 @@ import asyncio
 import importlib
 import inspect
 import os
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         SessionEnvironmentMountRegistry,
     )
     from frontend.server.studio_tools.sandbox_shell import SandboxTargetResolver
+    from frontend.server.studio_tools.janus_a2a_client import JanusA2AClient
     from veadk.multimodal.service import MediaService
 
 ToolExecutor = Callable[[dict[str, Any]], Any]
@@ -70,10 +71,19 @@ class StudioToolExecutionContext:
     scope_id: str
     catalog_revision: str
     owner_id: str = ""
+    tool_plan: Mapping[str, Any] = field(default_factory=dict)
     environment_mount: SessionEnvironmentMount | None = None
     environment_mounts: tuple[SessionEnvironmentMount, ...] = ()
     tool_request_id: str = ""
     report_progress: StudioToolProgressReporter | None = None
+    janus_client: JanusA2AClient | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tool_plan",
+            MappingProxyType(dict(self.tool_plan)),
+        )
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,7 @@ class StudioTool:
     idempotent: bool = False
     risk_level: str = "low"
     requires_context: bool = False
+    activation_mode: str = "manual"
 
     def manifest(self) -> StudioToolManifest:
         return StudioToolManifest(
@@ -110,6 +121,10 @@ class StudioToolRegistry:
 
     def register(self, tool: StudioTool) -> None:
         manifest = tool.manifest()
+        if tool.activation_mode not in {"manual", "automatic"}:
+            raise ValueError(
+                f"Invalid activation mode for {tool.name}: {tool.activation_mode}"
+            )
         try:
             Draft202012Validator.check_schema(manifest.input_schema)
         except SchemaError as error:
@@ -138,6 +153,19 @@ class StudioToolRegistry:
 
     def public_items(self) -> list[dict[str, Any]]:
         return self.snapshot().public_items()
+
+    def has_tool(self, name: str) -> bool:
+        """Return whether a latest revision exists for ``name``."""
+
+        return name in self._latest
+
+    def activation_mode(self, name: str) -> str:
+        """Return the BFF-only activation mode for a registered tool."""
+
+        revision = self._latest.get(name)
+        if revision is None:
+            raise ValueError(f"Unknown Studio tools: {name}")
+        return self._tools[(name, revision)].activation_mode
 
     def snapshot(
         self, selected_names: Sequence[str] | None = None
@@ -217,6 +245,11 @@ class StudioToolCatalogSnapshot:
                 "name": tool.display_name or name,
                 "description": tool.description,
                 "riskLevel": tool.risk_level,
+                **(
+                    {"activationMode": tool.activation_mode}
+                    if tool.activation_mode != "manual"
+                    else {}
+                ),
             }
             for (name, revision), tool in sorted(self._tools.items())
             if self._latest[name] == revision

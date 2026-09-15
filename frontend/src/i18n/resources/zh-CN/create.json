@@ -576,6 +576,10 @@
     }
   },
   "traditional": {
+    "browserMigration": {
+      "notice": "已移除旧版“浏览器自动化”草稿配置；浏览器能力现在只在对话需要时启用。",
+      "dismiss": "知道了"
+    },
     "actions": {
       "addSubagent": "添加子 Agent",
       "clearRoot": "清空根 Agent",

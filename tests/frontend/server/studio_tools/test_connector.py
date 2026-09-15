@@ -396,13 +396,21 @@ async def test_connector_runs_and_executes_tool_over_one_websocket(
         region="cn-beijing",
         mount_instance_id="mount-1",
     )
-    prepared: list[tuple[tuple[SessionEnvironmentMount, ...], str]] = []
+    janus_client = object()
+    janus_prepared: list[str] = []
+    prepared: list[tuple[tuple[SessionEnvironmentMount, ...], str, bool]] = []
+
+    async def prepare_janus(context: StudioToolExecutionContext) -> object:
+        janus_prepared.append(context.owner_id)
+        return janus_client
 
     async def prepare_mounts(
         mounts: Any,
         context: StudioToolExecutionContext,
     ) -> tuple[SessionEnvironmentMount, ...]:
-        prepared.append((tuple(mounts), context.session_id))
+        prepared.append(
+            (tuple(mounts), context.session_id, context.janus_client is janus_client)
+        )
         return tuple(mounts)
 
     run = await connector.open_studio_tool_run(
@@ -416,9 +424,11 @@ async def test_connector_runs_and_executes_tool_over_one_websocket(
             "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
         },
         catalog=_registry().snapshot(),
+        owner_id="owner-1",
         environment_mount=mount,
         environment_mounts=(mount,),
         prepare_environment_mounts=prepare_mounts,
+        prepare_janus_client=prepare_janus,
     )
 
     chunks = [chunk async for chunk in run.stream()]
@@ -430,7 +440,9 @@ async def test_connector_runs_and_executes_tool_over_one_websocket(
     assert run.execution_context.run_id == run.run_id
     assert run.execution_context.scope_id == run.scope_id
     assert run.execution_context.catalog_revision == run.catalog_revision
-    assert prepared == [((mount,), "session-1")]
+    assert janus_prepared == ["owner-1"]
+    assert run.execution_context.janus_client is janus_client
+    assert prepared == [((mount,), "session-1", True)]
     assert run.runtime_context.instance_name == "instance-websocket"
     assert run.runtime_context.request_id == "request-websocket"
     assert connect_calls[0][0] == (

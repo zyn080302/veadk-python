@@ -19,7 +19,10 @@ from typing import Any
 
 import pytest
 
-from frontend.server.studio_tools.local import build_local_studio_tools
+from frontend.server.studio_tools.local import (
+    build_local_studio_tools,
+    stream_local_studio_response,
+)
 from frontend.server.studio_tools.registry import (
     StudioTool,
     StudioToolExecutionContext,
@@ -38,6 +41,27 @@ def _context(revision: str) -> StudioToolExecutionContext:
         scope_id="scope-1",
         catalog_revision=revision,
     )
+
+
+@pytest.mark.asyncio
+async def test_local_stream_emits_tool_plan_before_runtime_events() -> None:
+    async def source():
+        yield b'data: {"id":"runtime-event"}\n\n'
+
+    chunks = [
+        chunk
+        async for chunk in stream_local_studio_response(
+            source(),
+            tools=(),
+            progress_events=asyncio.Queue(),
+            initial_events=(b'data: {"studioEvent":"studio.tool_plan"}\n\n',),
+        )
+    ]
+
+    assert chunks == [
+        b'data: {"studioEvent":"studio.tool_plan"}\n\n',
+        b'data: {"id":"runtime-event"}\n\n',
+    ]
 
 
 @pytest.mark.asyncio

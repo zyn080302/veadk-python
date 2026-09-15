@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,7 +23,18 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from google.adk.agents import Agent as AdkAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.adk.runners import Runner as AdkRunner
+from google.adk.sessions import InMemorySessionService
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
+from google.genai import types
+from pydantic import PrivateAttr
 
 from veadk.integrations.agentkit.studio_channel import (
     PROTOCOL_VERSION,
@@ -32,6 +44,9 @@ from veadk.integrations.agentkit.studio_channel import (
     bind_studio_tools,
     catalog_revision,
     mount_studio_channel_routes,
+)
+from veadk.integrations.agentkit.studio_channel.history import (
+    StudioToolHistoryPlugin,
 )
 from veadk.integrations.agentkit.studio_channel.routes import _StudioChannelConnection
 
@@ -54,6 +69,40 @@ def _manifest(name: str = "studio_multiply") -> dict[str, Any]:
         "idempotent": True,
         "risk_level": "low",
     }
+
+
+class _UnknownToolThenAnswerModel(BaseLlm):
+    model: str = "offline-unknown-tool"
+    _requests: list[list[types.Content]] = PrivateAttr(default_factory=list)
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncIterator[LlmResponse]:
+        del stream
+        self._requests.append(
+            [content.model_copy(deep=True) for content in llm_request.contents]
+        )
+        if len(self._requests) == 1:
+            yield LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_function_call(
+                            name="browser_use",
+                            args={"task": "open example.com"},
+                        )
+                    ],
+                )
+            )
+            return
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="Continued without the unavailable tool.")],
+            )
+        )
 
 
 def test_catalog_revision_is_stable_across_tool_order() -> None:
@@ -521,3 +570,228 @@ def test_channel_capability_advertises_supported_transports_when_enabled() -> No
         "protocol": PROTOCOL_VERSION,
         "transports": ["websocket", "http-sse"],
     }
+
+
+@pytest.mark.asyncio
+async def test_history_projection_summarizes_only_unavailable_tool_parts() -> None:
+    plugin = StudioToolHistoryPlugin()
+    stale_call = types.Content(
+        role="model",
+        parts=[
+            types.Part.from_function_call(
+                name="browser_use",
+                args={"task": "private historical input"},
+            ),
+            types.Part(text="keep this model text"),
+        ],
+    )
+    stale_response = types.Content(
+        role="user",
+        parts=[
+            types.Part.from_function_response(
+                name="browser_use",
+                response={"result": "private historical output"},
+            )
+        ],
+    )
+    current_call = types.Content(
+        role="model",
+        parts=[types.Part.from_function_call(name="current_tool", args={})],
+    )
+    internal_call = types.Content(
+        role="model",
+        parts=[
+            types.Part.from_function_call(
+                name="transfer_to_agent",
+                args={"agent_name": "worker"},
+            )
+        ],
+    )
+    source_contents = [stale_call, stale_response, current_call, internal_call]
+    source_snapshot = [content.model_copy(deep=True) for content in source_contents]
+    request = LlmRequest(
+        contents=source_contents,
+        tools_dict={
+            "current_tool": BaseTool(
+                name="current_tool",
+                description="Current run tool",
+            )
+        },
+    )
+
+    result = await plugin.before_model_callback(
+        callback_context=cast(CallbackContext, object()),
+        llm_request=request,
+    )
+
+    assert result is None
+    assert request.contents is not source_contents
+    assert source_contents == source_snapshot
+    projected_parts = [
+        part for content in request.contents for part in content.parts or []
+    ]
+    projected_text = "\n".join(part.text or "" for part in projected_parts)
+    projected_calls = [
+        part.function_call.name
+        for part in projected_parts
+        if part.function_call is not None
+    ]
+    assert "browser_use" not in projected_calls
+    assert projected_calls == ["current_tool", "transfer_to_agent"]
+    assert "keep this model text" in projected_text
+    assert "private historical input" not in projected_text
+    assert "private historical output" not in projected_text
+    assert projected_text.count("not available in this run") == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_recovery_is_bounded_per_invocation_and_tool(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(
+        logging.INFO,
+        logger="veadk.integrations.agentkit.studio_channel.history",
+    )
+    plugin = StudioToolHistoryPlugin()
+    missing_tool = BaseTool(name="browser_use", description="Tool not found")
+    context = SimpleNamespace(invocation_id="invocation-1")
+    error = ValueError("Tool 'browser_use' not found.\nAvailable tools:")
+
+    first = await plugin.on_tool_error_callback(
+        tool=missing_tool,
+        tool_args={"task": "open example.com"},
+        tool_context=cast(ToolContext, context),
+        error=error,
+    )
+    repeated = await plugin.on_tool_error_callback(
+        tool=missing_tool,
+        tool_args={"task": "open example.com again"},
+        tool_context=cast(ToolContext, context),
+        error=error,
+    )
+    another_tool = await plugin.on_tool_error_callback(
+        tool=BaseTool(name="old_search", description="Tool not found"),
+        tool_args={},
+        tool_context=cast(ToolContext, context),
+        error=ValueError("Tool 'old_search' not found.\nAvailable tools:"),
+    )
+
+    assert first == {
+        "status": "unavailable",
+        "reason_code": "TOOL_NOT_AVAILABLE_IN_CURRENT_RUN",
+        "message": (
+            "This tool is not available in the current run. Continue without "
+            "it, or ask the user to start a new run that enables the capability."
+        ),
+    }
+    assert repeated is None
+    assert another_tool is not None
+
+    await plugin.after_run_callback(
+        invocation_context=cast(
+            InvocationContext,
+            SimpleNamespace(invocation_id="invocation-1"),
+        )
+    )
+    after_cleanup = await plugin.on_tool_error_callback(
+        tool=missing_tool,
+        tool_args={},
+        tool_context=cast(ToolContext, context),
+        error=error,
+    )
+    assert after_cleanup == first
+    recovered = [
+        record
+        for record in caplog.records
+        if getattr(record, "browser_event", "") == "browser_unknown_tool_recovered"
+    ]
+    assert len(recovered) == 2
+    assert all(
+        record.reason_code == "TOOL_NOT_AVAILABLE_IN_CURRENT_RUN"
+        for record in recovered
+    )
+    assert "open example.com" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_history_plugin_does_not_mask_real_tool_errors() -> None:
+    plugin = StudioToolHistoryPlugin()
+
+    result = await plugin.on_tool_error_callback(
+        tool=BaseTool(name="browser_use", description="Managed browser"),
+        tool_args={},
+        tool_context=cast(
+            ToolContext,
+            SimpleNamespace(invocation_id="invocation-1"),
+        ),
+        error=RuntimeError("browser backend failed"),
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_adk_runner_recovers_unknown_tool_without_mutating_session() -> None:
+    model = _UnknownToolThenAnswerModel()
+    session_service = InMemorySessionService()
+    await session_service.create_session(
+        app_name="studio-agent",
+        user_id="user-1",
+        session_id="session-1",
+    )
+    runner = AdkRunner(
+        agent=AdkAgent(name="studio_agent", model=model),
+        app_name="studio-agent",
+        plugins=[StudioToolHistoryPlugin()],
+        session_service=session_service,
+    )
+
+    events = [
+        event
+        async for event in runner.run_async(
+            user_id="user-1",
+            session_id="session-1",
+            new_message=types.Content(
+                role="user",
+                parts=[types.Part(text="Open example.com")],
+            ),
+        )
+    ]
+
+    assert any(
+        part.text == "Continued without the unavailable tool."
+        for event in events
+        for part in (event.content.parts if event.content else []) or []
+    )
+    unavailable_responses = [
+        response.response
+        for event in events
+        for response in event.get_function_responses()
+        if response.name == "browser_use"
+    ]
+    assert unavailable_responses == [
+        {
+            "status": "unavailable",
+            "reason_code": "TOOL_NOT_AVAILABLE_IN_CURRENT_RUN",
+            "message": (
+                "This tool is not available in the current run. Continue "
+                "without it, or ask the user to start a new run that enables "
+                "the capability."
+            ),
+        }
+    ]
+
+    projected_parts = [
+        part for content in model._requests[-1] for part in content.parts or []
+    ]
+    assert not any(part.function_call is not None for part in projected_parts)
+    assert not any(part.function_response is not None for part in projected_parts)
+
+    persisted = await session_service.get_session(
+        app_name="studio-agent",
+        user_id="user-1",
+        session_id="session-1",
+    )
+    assert persisted is not None
+    assert any(event.get_function_calls() for event in persisted.events)
+    assert any(event.get_function_responses() for event in persisted.events)

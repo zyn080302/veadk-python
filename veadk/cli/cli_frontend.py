@@ -2828,6 +2828,7 @@ def _run_frontend_server(
 
     from frontend.server.studio_tools import (
         AgentkitEnvironmentSandboxResolver,
+        AgentkitJanusSandboxResolver,
         CodexSandboxDelegate,
         SandboxResolutionError,
         StudioToolExecutionContext,
@@ -2850,6 +2851,12 @@ def _run_frontend_server(
     environment_sandbox_resolver = AgentkitEnvironmentSandboxResolver(
         _environment_sandbox_client
     )
+    janus_sandbox_resolver = AgentkitJanusSandboxResolver(
+        _environment_sandbox_client,
+        tool_id=os.getenv("JANUS_SANDBOX_TOOL_ID", ""),
+        provider=os.getenv("JANUS_SANDBOX_PROVIDER", provider).strip(),
+        region=os.getenv("JANUS_SANDBOX_REGION", ""),
+    )
     register_sandbox_shell_tool(
         studio_tool_registry,
         mounts=session_environment_mounts,
@@ -2863,6 +2870,7 @@ def _run_frontend_server(
     )
     app.state.environment_sandbox_resolver = environment_sandbox_resolver
     app.state.environment_codex_delegate = environment_codex_delegate
+    app.state.janus_sandbox_resolver = janus_sandbox_resolver
 
     async def _prepare_execution_environment_mounts(
         owner_id: str,
@@ -3028,7 +3036,12 @@ def _run_frontend_server(
         payload = dict(payload)
         has_studio_controls = any(
             key in payload
-            for key in ("platform_tools", "environment_mount", "environment_mounts")
+            for key in (
+                "platform_tools",
+                "tool_policy",
+                "environment_mount",
+                "environment_mounts",
+            )
         )
         if not has_studio_controls:
             try:
@@ -3066,18 +3079,45 @@ def _run_frontend_server(
                 custom_metadata[INVOCATION_METADATA_KEY] = invocation_metadata
                 payload["custom_metadata"] = custom_metadata
 
-        selected_tool_ids: list[str] = []
-        if "platform_tools" in payload:
-            raw_tool_ids = payload.pop("platform_tools")
-            if not isinstance(raw_tool_ids, list) or any(
-                not isinstance(tool_id, str) or not tool_id.strip()
-                for tool_id in raw_tool_ids
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="platform_tools must be a list of non-empty tool IDs",
-                )
-            selected_tool_ids = [tool_id.strip() for tool_id in raw_tool_ids]
+        from frontend.server.studio_tools.browser_plan import (
+            BrowserRolloutContext,
+            ToolPolicyError,
+            resolve_run_tool_plan,
+            studio_tool_plan_sse_event,
+        )
+        from frontend.server.studio_tools.browser_observability import (
+            emit_browser_plan_events,
+        )
+
+        principal = _current_principal(request)
+        owner_id = principal.owner_id if principal is not None else "local"
+        tenant_id = os.getenv("VEADK_STUDIO_ACCOUNT_ID", "").strip() or "local"
+        try:
+            resolved_tool_plan = resolve_run_tool_plan(
+                payload,
+                studio_tool_registry,
+                rollout_context=BrowserRolloutContext(
+                    tenant_id=tenant_id,
+                    user_identifiers=(
+                        tuple(sorted(principal.identifiers))
+                        if principal is not None
+                        else (owner_id.casefold(),)
+                    ),
+                    rollout_key=f"{tenant_id}\0{owner_id.casefold()}",
+                ),
+            )
+        except ToolPolicyError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        payload.pop("platform_tools", None)
+        payload.pop("tool_policy", None)
+        selected_tool_ids = list(resolved_tool_plan.selected_tool_ids)
+        browser_plan_event = studio_tool_plan_sse_event(resolved_tool_plan.browser_plan)
+        browser_tool_plan = (
+            resolved_tool_plan.browser_plan.execution_metadata()
+            if resolved_tool_plan.browser_plan is not None
+            and resolved_tool_plan.browser_plan.decision == "mount"
+            else {}
+        )
 
         if "environment_mount" in payload and "environment_mounts" in payload:
             raise HTTPException(
@@ -3087,8 +3127,6 @@ def _run_frontend_server(
                 ),
             )
 
-        principal = _current_principal(request)
-        owner_id = principal.owner_id if principal is not None else "local"
         mounts: tuple[Any, ...] = ()
         try:
             if "environment_mounts" in payload:
@@ -3268,7 +3306,27 @@ def _run_frontend_server(
         except (ValidationError, ValueError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         if not catalog.enabled:
-            return await adk_run_sse_endpoint(req)
+            if resolved_tool_plan.browser_plan is not None:
+                emit_browser_plan_events(
+                    resolved_tool_plan.browser_plan,
+                    mounted=False,
+                    runtime_capability="local",
+                    catalog_revision=catalog.revision,
+                )
+            response = await adk_run_sse_endpoint(req)
+            if browser_plan_event is None:
+                return response
+            return StreamingResponse(
+                stream_local_studio_response(
+                    response.body_iterator,
+                    tools=(),
+                    progress_events=asyncio.Queue(),
+                    initial_events=(browser_plan_event,),
+                ),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                background=response.background,
+            )
 
         app_name_for_run = req.app_name or getattr(adk_server, "default_app_name", None)
         if not app_name_for_run:
@@ -3281,7 +3339,21 @@ def _run_frontend_server(
                 [manifest["name"] for manifest in catalog.manifests()],
             )
         except Exception as error:
+            if resolved_tool_plan.browser_plan is not None:
+                emit_browser_plan_events(
+                    resolved_tool_plan.browser_plan,
+                    mounted=False,
+                    runtime_capability="rejected",
+                    catalog_revision=catalog.revision,
+                )
             raise HTTPException(status_code=409, detail=str(error)) from error
+        if resolved_tool_plan.browser_plan is not None:
+            emit_browser_plan_events(
+                resolved_tool_plan.browser_plan,
+                mounted=(resolved_tool_plan.browser_plan.decision == "mount"),
+                runtime_capability="local",
+                catalog_revision=catalog.revision,
+            )
 
         scope_payload = {
             "runtime_id": "local",
@@ -3308,10 +3380,16 @@ def _run_frontend_server(
             scope_id=scope_id,
             catalog_revision=catalog.revision,
             owner_id=owner_id,
+            tool_plan=browser_tool_plan,
             environment_mount=(mounts[0] if len(mounts) == 1 else None),
             environment_mounts=mounts,
         )
         try:
+            janus_client = (
+                await janus_sandbox_resolver.prepare(context)
+                if browser_tool_plan
+                else None
+            )
             mounts = await _prepare_execution_environment_mounts(
                 owner_id,
                 mounts,
@@ -3321,6 +3399,7 @@ def _run_frontend_server(
                 context,
                 environment_mount=(mounts[0] if len(mounts) == 1 else None),
                 environment_mounts=mounts,
+                janus_client=janus_client,
             )
         except SandboxResolutionError as error:
             raise HTTPException(
@@ -3348,6 +3427,7 @@ def _run_frontend_server(
                 response.body_iterator,
                 tools=tools,
                 progress_events=progress_events,
+                initial_events=(browser_plan_event,) if browser_plan_event else (),
             ),
             status_code=response.status_code,
             headers=dict(response.headers),
@@ -10672,6 +10752,10 @@ def _run_frontend_server(
         run_sse_principal: StudioPrincipal | None = None
         run_sse_payload: dict[str, Any] | None = None
         studio_tool_catalog: Any | None = None
+        browser_tool_plan: Mapping[str, Any] = {}
+        browser_plan_event: bytes | None = None
+        effective_browser_plan: Any | None = None
+        browser_plan_audited = False
         session_environment_mount: Any | None = None
         session_environment_mounts_for_run: tuple[Any, ...] = ()
         studio_tool_owner_id = ""
@@ -10706,18 +10790,50 @@ def _run_frontend_server(
                     custom_metadata = dict(custom_metadata)
                     custom_metadata[INVOCATION_METADATA_KEY] = invocation_metadata
                     payload["custom_metadata"] = custom_metadata
-            selected_tool_ids: list[str] = []
-            if "platform_tools" in payload:
-                raw_tool_ids = payload.pop("platform_tools")
-                if not isinstance(raw_tool_ids, list) or any(
-                    not isinstance(tool_id, str) or not tool_id.strip()
-                    for tool_id in raw_tool_ids
-                ):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="platform_tools must be a list of non-empty tool IDs",
-                    )
-                selected_tool_ids = [tool_id.strip() for tool_id in raw_tool_ids]
+            from frontend.server.studio_tools.browser_plan import (
+                BrowserRolloutContext,
+                ToolPolicyError,
+                resolve_run_tool_plan,
+                runtime_has_legacy_static_browser,
+                studio_tool_plan_sse_event,
+            )
+            from frontend.server.studio_tools.browser_observability import (
+                emit_browser_plan_events,
+            )
+
+            tenant_id = os.getenv("VEADK_STUDIO_ACCOUNT_ID", "").strip() or "local"
+            rollout_owner_id = principal.owner_id if principal is not None else "local"
+            try:
+                resolved_tool_plan = resolve_run_tool_plan(
+                    payload,
+                    studio_tool_registry,
+                    rollout_context=BrowserRolloutContext(
+                        tenant_id=tenant_id,
+                        user_identifiers=(
+                            tuple(sorted(principal.identifiers))
+                            if principal is not None
+                            else (rollout_owner_id.casefold(),)
+                        ),
+                        rollout_key=(f"{tenant_id}\0{rollout_owner_id.casefold()}"),
+                        legacy_static_browser=(
+                            runtime_has_legacy_static_browser(runtime)
+                        ),
+                    ),
+                )
+            except ToolPolicyError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            payload.pop("platform_tools", None)
+            payload.pop("tool_policy", None)
+            selected_tool_ids = list(resolved_tool_plan.selected_tool_ids)
+            browser_plan_event = studio_tool_plan_sse_event(
+                resolved_tool_plan.browser_plan
+            )
+            effective_browser_plan = resolved_tool_plan.browser_plan
+            if (
+                resolved_tool_plan.browser_plan is not None
+                and resolved_tool_plan.browser_plan.decision == "mount"
+            ):
+                browser_tool_plan = resolved_tool_plan.browser_plan.execution_metadata()
             try:
                 studio_tool_catalog = studio_tool_registry.snapshot(selected_tool_ids)
             except ValueError as error:
@@ -11058,6 +11174,23 @@ def _run_frontend_server(
                     endpoint=endpoint,
                     authorization=headers.get("Authorization", ""),
                 )
+                if (
+                    not bff_tools_enabled
+                    and resolved_tool_plan.browser_plan is not None
+                    and resolved_tool_plan.browser_plan.decision == "mount"
+                ):
+                    unavailable_browser_plan = replace(
+                        resolved_tool_plan.browser_plan,
+                        decision="unavailable",
+                        platform_tools=(),
+                        reason_code="RUNTIME_TOOL_HOST_UNAVAILABLE",
+                        context_policy="none",
+                    )
+                    browser_plan_event = studio_tool_plan_sse_event(
+                        unavailable_browser_plan
+                    )
+                    effective_browser_plan = unavailable_browser_plan
+                    browser_tool_plan = {}
                 studio_run = (
                     await open_studio_tool_run(
                         endpoint=endpoint,
@@ -11066,6 +11199,7 @@ def _run_frontend_server(
                         payload=run_sse_payload,
                         catalog=studio_tool_catalog,
                         owner_id=studio_tool_owner_id,
+                        tool_plan=browser_tool_plan,
                         environment_mount=session_environment_mount,
                         environment_mounts=session_environment_mounts_for_run,
                         prepare_environment_mounts=(
@@ -11077,10 +11211,28 @@ def _run_frontend_server(
                                 )
                             )
                         ),
+                        prepare_janus_client=(
+                            janus_sandbox_resolver.prepare
+                            if browser_tool_plan
+                            else None
+                        ),
                     )
                     if bff_tools_enabled
                     else None
                 )
+                if effective_browser_plan is not None:
+                    emit_browser_plan_events(
+                        effective_browser_plan,
+                        mounted=(
+                            studio_run is not None
+                            and effective_browser_plan.decision == "mount"
+                        ),
+                        runtime_capability=(
+                            "supported" if bff_tools_enabled else "unsupported"
+                        ),
+                        catalog_revision=studio_tool_catalog.revision,
+                    )
+                    browser_plan_audited = True
             except SandboxResolutionError as error:
                 raise HTTPException(
                     status_code=409,
@@ -11122,6 +11274,8 @@ def _run_frontend_server(
                 async def _studio_channel_body():
                     source = studio_run.stream()
                     try:
+                        if browser_plan_event is not None:
+                            yield browser_plan_event
                         if observation is None:
                             async for chunk in source:
                                 yield chunk
@@ -11154,6 +11308,19 @@ def _run_frontend_server(
                         getattr(studio_run, "runtime_context", None)
                     ),
                 )
+
+        if effective_browser_plan is not None and not browser_plan_audited:
+            emit_browser_plan_events(
+                effective_browser_plan,
+                mounted=False,
+                runtime_capability="not_required",
+                catalog_revision=(
+                    studio_tool_catalog.revision
+                    if studio_tool_catalog is not None
+                    else "unknown"
+                ),
+            )
+            browser_plan_audited = True
 
         is_retryable_read = _runtime_proxy_is_retryable_read(upstream_method)
         max_attempts = _runtime_proxy_attempts(
@@ -11304,6 +11471,8 @@ def _run_frontend_server(
 
         async def _body():
             try:
+                if browser_plan_event is not None:
+                    yield browser_plan_event
                 if observation is None:
                     async for chunk in upstream.aiter_raw():
                         yield chunk

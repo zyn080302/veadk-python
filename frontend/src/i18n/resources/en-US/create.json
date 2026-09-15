@@ -576,6 +576,10 @@
     }
   },
   "traditional": {
+    "browserMigration": {
+      "notice": "The retired Browser Automation draft setting was removed. Browser Use is now enabled only when a conversation needs it.",
+      "dismiss": "Got it"
+    },
     "actions": {
       "addSubagent": "Add subagent",
       "clearRoot": "Clear main agent",

@@ -422,6 +422,36 @@
   color: hsl(var(--destructive));
   font-size: 12.5px;
 }
+.cw-browser-migration {
+  flex: 0 0 auto;
+  width: var(--cw-workspace-width);
+  margin: 0 auto 4px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+.cw-browser-migration > span {
+  min-width: 0;
+  flex: 1;
+}
+.cw-browser-migration-dismiss {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font: inherit;
+  cursor: pointer;
+}
+.cw-browser-migration-dismiss:hover {
+  background: hsl(var(--accent));
+}
+.cw-browser-migration-dismiss:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
 
 /* ---------- master-detail editor: left tree + right form ---------- */
 .cw-editor {

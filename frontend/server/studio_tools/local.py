@@ -220,6 +220,7 @@ async def stream_local_studio_response(
     *,
     tools: Sequence[BaseTool],
     progress_events: asyncio.Queue[bytes],
+    initial_events: Sequence[bytes] = (),
 ) -> AsyncIterator[bytes | str]:
     """Merge direct tool progress into the local ADK SSE response."""
 
@@ -227,6 +228,8 @@ async def stream_local_studio_response(
     progress_task: asyncio.Task[bytes] | None = None
     iterator = source.__aiter__()
     try:
+        for event in initial_events:
+            yield event
         with bind_studio_tools(tools):
             while True:
                 if source_task is None:

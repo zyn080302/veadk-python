@@ -917,6 +917,9 @@ def _configure_studio_tool_routes(
         StudioExternalToolset,
         mount_studio_channel_routes,
     )
+    from veadk.integrations.agentkit.studio_channel.history import (
+        StudioToolHistoryPlugin,
+    )
 
     if enabled and isinstance(root_agent, (SequentialAgent, ParallelAgent, LoopAgent)):
         logger.warning(
@@ -944,6 +947,7 @@ def _configure_studio_tool_routes(
     }
     if not any(isinstance(tool, StudioExternalToolset) for tool in agent_tools):
         agent_tools.append(StudioExternalToolset())
+    studio_plugins = [StudioToolHistoryPlugin(), *plugins]
 
     async def _studio_channel_run(
         payload: dict[str, Any],
@@ -955,7 +959,7 @@ def _configure_studio_tool_routes(
             app_name=app_name,
             root_agent=root_agent,
             prompt=_content_text(req.new_message),
-            plugins=plugins,
+            plugins=studio_plugins,
         )
         stream_mode = StreamingMode.SSE if req.streaming else StreamingMode.NONE
         custom_metadata = _run_request_custom_metadata(req)

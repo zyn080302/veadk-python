@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ import pytest
 from frontend.server.studio_tools import extensions
 from frontend.server.studio_tools.extensions import register_studio_tool_extensions
 from frontend.server.studio_tools.registry import (
+    StudioToolExecutionContext,
     StudioToolExecutionError,
     StudioToolRegistry,
 )
@@ -35,11 +37,21 @@ async def test_current_time_extension_is_discovered_and_executable() -> None:
 
     assert registry.public_items() == [
         {
+            "id": "browser_use",
+            "name": "浏览器自动化",
+            "description": (
+                "Complete a browser task through the owner-bound managed Janus "
+                "A2A Service."
+            ),
+            "riskLevel": "high",
+            "activationMode": "automatic",
+        },
+        {
             "id": "current_time",
             "name": "当前时间",
             "description": "Return the current date and time in an IANA timezone.",
             "riskLevel": "low",
-        }
+        },
     ]
     result = await registry.execute(
         name="current_time",
@@ -50,6 +62,214 @@ async def test_current_time_extension_is_discovered_and_executable() -> None:
     assert result["iso8601"].endswith("+00:00")
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", result["date"])
     assert re.fullmatch(r"\d{2}:\d{2}:\d{2}", result["time"])
+
+
+@pytest.mark.asyncio
+async def test_browser_use_extension_uses_only_the_trusted_run_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from frontend.server.studio_tools.extensions import browser_use
+
+    calls: list[dict[str, object]] = []
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _Client:
+        async def send_browser_task(self, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {
+                "status": "completed",
+                "text": "Example Domain",
+                "contextId": "context-secret",
+                "metadata": {},
+            }
+
+    monkeypatch.setattr(
+        browser_use,
+        "emit_browser_event",
+        lambda event, **fields: events.append((event, fields)),
+    )
+    registry = StudioToolRegistry()
+    browser_use.register_tools(registry)
+
+    context = StudioToolExecutionContext(
+        runtime_id="runtime-1",
+        app_name="agent",
+        user_id="user-1",
+        session_id="session-1",
+        run_id="run-1",
+        scope_id="scope-1",
+        catalog_revision=registry.revision,
+        owner_id="owner-1",
+        tool_plan={
+            "decision": "mount",
+            "browser_location": "cloud",
+            "risk_level": "high",
+            "approval_id": "approval-1",
+        },
+        janus_client=_Client(),
+    )
+
+    result = await registry.execute(
+        name="browser_use",
+        executor_revision="janus-a2a-browser-use-v1",
+        arguments={"task": "Open example.com"},
+        context=context,
+    )
+
+    assert calls == [
+        {
+            "task": "Open example.com",
+            "browser_location": "cloud",
+            "approval_id": "approval-1",
+            "risk_level": "high",
+            "context_key": (
+                "owner-1",
+                "runtime-1",
+                "agent",
+                "user-1",
+                "session-1",
+            ),
+        }
+    ]
+    assert result == {
+        "status": "completed",
+        "text": "Example Domain",
+        "metadata": {},
+    }
+    assert [event for event, _fields in events] == [
+        "browser_approval_approved",
+        "browser_a2a_started",
+        "browser_a2a_completed",
+    ]
+    assert "Open example.com" not in repr(events)
+
+
+@pytest.mark.asyncio
+async def test_browser_use_keeps_approval_secret_out_of_model_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from frontend.server.studio_tools.extensions import browser_use
+
+    progress: list[dict[str, Any]] = []
+    approval = {
+        "approvalId": "approval-opaque",
+        "actionDigest": "a" * 64,
+        "actionSummary": "发布公告",
+        "targetOrigin": "https://example.com",
+        "riskLevel": "high",
+        "expiresAt": "2026-09-15T12:00:00Z",
+        "capabilityVersion": "browser-action-approval-v1",
+    }
+
+    class _Client:
+        async def send_browser_task(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "status": "approval_required",
+                "text": "发布前需要确认。",
+                "contextId": "private-context",
+                "metadata": {
+                    "status": "approval_required",
+                    "actionSummary": "发布公告",
+                    "targetOrigin": "https://example.com",
+                    "riskLevel": "high",
+                    "expiresAt": "2026-09-15T12:00:00Z",
+                    "capabilityVersion": "browser-action-approval-v1",
+                },
+                "approval": approval,
+            }
+
+    registry = StudioToolRegistry()
+    browser_use.register_tools(registry)
+
+    async def report_progress(event: dict[str, Any]) -> None:
+        progress.append(event)
+
+    context = StudioToolExecutionContext(
+        runtime_id="runtime-1",
+        app_name="agent",
+        user_id="user-1",
+        session_id="session-1",
+        run_id="run-1",
+        scope_id="scope-1",
+        catalog_revision=registry.revision,
+        owner_id="owner-1",
+        tool_plan={
+            "decision": "mount",
+            "browser_location": "cloud",
+            "risk_level": "high",
+            "approval_id": None,
+        },
+        report_progress=report_progress,
+        janus_client=_Client(),
+    )
+
+    result = await registry.execute(
+        name="browser_use",
+        executor_revision="janus-a2a-browser-use-v1",
+        arguments={"task": "发布公告"},
+        context=context,
+    )
+
+    assert progress == [
+        {
+            "phase": "browser_a2a_started",
+            "browserLocation": "cloud",
+        },
+        {
+            "phase": "browser_approval_required",
+            "browserLocation": "cloud",
+            "status": "approval_required",
+            "approval": approval,
+        },
+    ]
+    assert result == {
+        "status": "approval_required",
+        "text": "发布前需要确认。",
+        "metadata": {
+            "status": "approval_required",
+            "actionSummary": "发布公告",
+            "targetOrigin": "https://example.com",
+            "riskLevel": "high",
+            "expiresAt": "2026-09-15T12:00:00Z",
+            "capabilityVersion": "browser-action-approval-v1",
+        },
+    }
+    assert "approval-opaque" not in repr(result)
+    assert "a" * 64 not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_browser_use_fails_closed_without_owner_bound_janus_client() -> None:
+    from frontend.server.studio_tools.extensions import browser_use
+
+    registry = StudioToolRegistry()
+    browser_use.register_tools(registry)
+    context = StudioToolExecutionContext(
+        runtime_id="runtime-1",
+        app_name="agent",
+        user_id="user-1",
+        session_id="session-1",
+        run_id="run-1",
+        scope_id="scope-1",
+        catalog_revision=registry.revision,
+        owner_id="owner-1",
+        tool_plan={
+            "decision": "mount",
+            "browser_location": "cloud",
+            "risk_level": "read_only",
+        },
+    )
+
+    with pytest.raises(
+        StudioToolExecutionError,
+        match="owner-bound Janus Sandbox was not prepared",
+    ):
+        await registry.execute(
+            name="browser_use",
+            executor_revision="janus-a2a-browser-use-v1",
+            arguments={"task": "Open example.com"},
+            context=context,
+        )
 
 
 @pytest.mark.asyncio

@@ -229,6 +229,36 @@ def test_snapshot_rejects_unknown_tool_ids() -> None:
         _registry().snapshot(["missing"])
 
 
+def test_public_catalog_exposes_activation_mode_without_changing_wire_manifest() -> (
+    None
+):
+    registry = _registry()
+    registry.register(
+        StudioTool(
+            name="browser_use",
+            description="Operate a browser through Janus.",
+            input_schema={
+                "type": "object",
+                "properties": {"task": {"type": "string"}},
+                "required": ["task"],
+            },
+            executor=lambda arguments: arguments,
+            activation_mode="automatic",
+        )
+    )
+
+    browser_item = next(
+        item for item in registry.public_items() if item["id"] == "browser_use"
+    )
+    browser_manifest = next(
+        item for item in registry.manifests() if item["name"] == "browser_use"
+    )
+
+    assert browser_item["activationMode"] == "automatic"
+    assert "activation_mode" not in browser_manifest
+    assert "activationMode" not in browser_manifest
+
+
 def test_registry_keeps_generic_external_module_extension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

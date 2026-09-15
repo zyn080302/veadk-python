@@ -31,6 +31,15 @@ import {
   parseCodexSandboxProgress,
 } from "./ui/builtin-tools/codexSandboxProgress";
 import type { CodexSandboxProgress } from "./ui/builtin-tools/codexSandboxProgress";
+import {
+  applyBrowserUseProgress,
+  parseBrowserUsePlanEvent,
+  parseBrowserUseProgress,
+} from "./ui/builtin-tools/browserUseRun";
+import type {
+  BrowserUseProgress,
+  BrowserUseRunState,
+} from "./ui/builtin-tools/browserUseRun";
 
 const A2UI_TOOL = "send_a2ui_json_to_client";
 const VALIDATED_JSON_KEY = "validated_a2ui_json";
@@ -94,6 +103,7 @@ export interface CodexSandboxActivity {
 
 export type Block =
   | { kind: "progress"; text: string }
+  | { kind: "browser-use"; state: BrowserUseRunState }
   | { kind: "thinking"; text: string; done: boolean }
   | { kind: "text"; text: string }
   | {
@@ -183,6 +193,36 @@ export function emptyAcc(): Acc {
 }
 
 const MAX_PENDING_CODEX_PROGRESS = 64;
+
+function updateBrowserUseBlock(
+  blocks: Block[],
+  update: BrowserUseRunState | BrowserUseProgress,
+): void {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.kind !== "browser-use") continue;
+    block.state = "decision" in update
+      ? update
+      : applyBrowserUseProgress(block.state, update);
+    return;
+  }
+  blocks.push({
+    kind: "browser-use",
+    state: "decision" in update
+      ? update
+      : {
+          decision: "mount",
+          reasonCode: "RUNTIME_PROGRESS",
+          ...(update.browserLocation
+            ? { browserLocation: update.browserLocation }
+            : {}),
+          riskLevel: "unknown",
+          approval: "not_required",
+          phase: update.phase,
+          ...(update.requestId ? { requestId: update.requestId } : {}),
+        },
+  });
+}
 
 function applyCodexProgressToTool(
   blocks: Block[],
@@ -412,6 +452,12 @@ export function applyEvent(acc: Acc, ev: AdkEvent): Acc {
   const blocks = acc.blocks.map((b) => ({ ...b }));
   let liveStart = acc.liveStart;
   let pendingCodexProgress = acc.pendingCodexProgress.slice();
+  const browserPlan = parseBrowserUsePlanEvent(ev);
+  if (browserPlan) {
+    updateBrowserUseBlock(blocks, browserPlan);
+    liveStart = blocks.length;
+    return { blocks, liveStart, pendingCodexProgress };
+  }
   const parts = ev.content?.parts ?? [];
   const progressUpdates = parts.flatMap((part) => {
     const progress = parseBranchCompareProgress(
@@ -425,7 +471,17 @@ export function applyEvent(acc: Acc, ev: AdkEvent): Acc {
     );
     return progress ? [progress] : [];
   });
-  if (progressUpdates.length > 0 || codexProgressUpdates.length > 0) {
+  const browserProgressUpdates = parts.flatMap((part) => {
+    const progress = parseBrowserUseProgress(
+      part.partMetadata ?? part.part_metadata,
+    );
+    return progress ? [progress] : [];
+  });
+  if (
+    progressUpdates.length > 0
+    || codexProgressUpdates.length > 0
+    || browserProgressUpdates.length > 0
+  ) {
     for (const progress of progressUpdates) {
       for (let index = blocks.length - 1; index >= 0; index -= 1) {
         const block = blocks[index];
@@ -448,6 +504,9 @@ export function applyEvent(acc: Acc, ev: AdkEvent): Acc {
         pendingCodexProgress = [...pendingCodexProgress, progress]
           .slice(-MAX_PENDING_CODEX_PROGRESS);
       }
+    }
+    for (const progress of browserProgressUpdates) {
+      updateBrowserUseBlock(blocks, progress);
     }
     return { blocks, liveStart, pendingCodexProgress };
   }
@@ -628,6 +687,7 @@ function completesAssistantResponse(ev: AdkEvent, blocks: Block[]): boolean {
 }
 
 function eventAffectsAssistantTurn(ev: AdkEvent): boolean {
+  if (parseBrowserUsePlanEvent(ev)) return true;
   const artifactDelta = ev.actions?.artifactDelta ?? ev.actions?.artifact_delta;
   if (artifactDelta && Object.keys(artifactDelta).length > 0) return true;
   return (ev.content?.parts ?? []).some((part) =>
@@ -635,7 +695,8 @@ function eventAffectsAssistantTurn(ev: AdkEvent): boolean {
       visiblePartText(part) ||
       attachmentsFromParts([part]).length > 0 ||
       fnCall(part) ||
-      fnResp(part)
+      fnResp(part) ||
+      parseBrowserUseProgress(part.partMetadata ?? part.part_metadata)
     )
   );
 }

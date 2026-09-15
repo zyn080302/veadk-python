@@ -227,6 +227,447 @@ def test_runtime_proxy_builds_a_per_run_selected_tool_catalog(
     assert "platform_tools" not in opened["payload"]
 
 
+def test_runtime_proxy_auto_mounts_browser_from_private_tool_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    opened: dict[str, Any] = {}
+
+    class _FakeStudioRun:
+        async def stream(self):
+            yield b'data: {"id":"browser-run"}\n\n'
+
+    async def fake_open_studio_tool_run(**kwargs: Any) -> _FakeStudioRun:
+        opened.update(kwargs)
+        return _FakeStudioRun()
+
+    async def supports_tools(**kwargs: Any) -> bool:
+        del kwargs
+        return True
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        fake_open_studio_tool_run,
+    )
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        supports_tools,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {
+                    "role": "user",
+                    "parts": [{"text": "打开 https://example.com 告诉我标题"}],
+                },
+                "tool_policy": {
+                    "mode": "auto",
+                    "manual_tools": [],
+                    "suppressed_tools": [],
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item["name"] for item in opened["catalog"].manifests()] == ["browser_use"]
+    assert "tool_policy" not in opened["payload"]
+    assert "platform_tools" not in opened["payload"]
+    assert opened["tool_plan"]["browser_location"] == "cloud"
+    assert opened["tool_plan"]["decision"] == "mount"
+    assert callable(opened["prepare_janus_client"])
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0] == {
+        "studioEvent": "studio.tool_plan",
+        "payload": {
+            "decision": "mount",
+            "reasonCode": "PUBLIC_WEB_TASK",
+            "browserLocation": "cloud",
+            "riskLevel": "read_only",
+            "approval": "not_required",
+        },
+    }
+    assert frames[1] == {"id": "browser-run"}
+
+
+def test_runtime_proxy_browser_rollout_uses_authenticated_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROWSER_USE_USER_ALLOWLIST", "trusted-user")
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+                envs=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    opened: dict[str, Any] = {}
+
+    class _FakeStudioRun:
+        async def stream(self):
+            yield b'data: {"id":"trusted-rollout"}\n\n'
+
+    async def fake_open_studio_tool_run(**kwargs: Any) -> _FakeStudioRun:
+        opened.update(kwargs)
+        return _FakeStudioRun()
+
+    async def supports_tools(**kwargs: Any) -> bool:
+        del kwargs
+        return True
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        fake_open_studio_tool_run,
+    )
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        supports_tools,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            headers={"X-VeADK-Local-User": "trusted-user"},
+            json={
+                "app_name": "agent",
+                "user_id": "body-user-must-not-authorize-rollout",
+                "owner_id": "body-owner-must-not-authorize-rollout",
+                "session_id": "session-1",
+                "new_message": {
+                    "role": "user",
+                    "parts": [{"text": "打开 https://example.com 告诉我标题"}],
+                },
+                "tool_policy": {"mode": "auto"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item["name"] for item in opened["catalog"].manifests()] == ["browser_use"]
+
+
+def test_runtime_proxy_legacy_janus_runtime_never_double_mounts_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+                envs=[
+                    SimpleNamespace(
+                        key="JANUS_BROWSER_GATEWAY_URL",
+                        value="must-not-be-read",
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+
+    async def unexpected_channel(**kwargs: Any) -> None:
+        del kwargs
+        raise AssertionError(
+            "legacy Janus Runtime must not open a dynamic Tool channel"
+        )
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        unexpected_channel,
+    )
+
+    class _FakeUpstreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_raw(self):
+            yield b'data: {"id":"legacy-run"}\n\n'
+
+        async def aclose(self) -> None:
+            pass
+
+    class _FakeHttpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def build_request(self, *args: Any, **kwargs: Any) -> object:
+            del args, kwargs
+            return object()
+
+        async def send(self, request: object, *, stream: bool) -> _FakeUpstreamResponse:
+            del request
+            assert stream
+            return _FakeUpstreamResponse()
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeHttpClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {
+                    "role": "user",
+                    "parts": [{"text": "打开 https://example.com 告诉我标题"}],
+                },
+                "tool_policy": {"mode": "auto"},
+            },
+        )
+
+    assert response.status_code == 200
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["payload"]["decision"] == "no_tool"
+    assert frames[0]["payload"]["reasonCode"] == "LEGACY_STATIC_BROWSER_AGENT"
+    assert frames[1] == {"id": "legacy-run"}
+
+
+def test_runtime_proxy_browser_plan_fails_closed_without_tool_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+                envs=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    capability_checks = 0
+
+    async def runtime_lacks_tool_host(**kwargs: Any) -> bool:
+        nonlocal capability_checks
+        del kwargs
+        capability_checks += 1
+        return False
+
+    async def unexpected_channel(**kwargs: Any) -> None:
+        del kwargs
+        raise AssertionError("unsupported Runtime must not open a Tool channel")
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        runtime_lacks_tool_host,
+    )
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        unexpected_channel,
+    )
+
+    class _FakeUpstreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_raw(self):
+            yield b'data: {"id":"plain-run"}\n\n'
+
+        async def aclose(self) -> None:
+            pass
+
+    class _FakeHttpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def build_request(self, *args: Any, **kwargs: Any) -> object:
+            del args, kwargs
+            return object()
+
+        async def send(self, request: object, *, stream: bool) -> _FakeUpstreamResponse:
+            del request
+            assert stream
+            return _FakeUpstreamResponse()
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeHttpClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {
+                    "role": "user",
+                    "parts": [{"text": "打开 https://example.com 告诉我标题"}],
+                },
+                "tool_policy": {"mode": "auto"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert capability_checks == 1
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["payload"]["decision"] == "unavailable"
+    assert frames[0]["payload"]["reasonCode"] == "RUNTIME_TOOL_HOST_UNAVAILABLE"
+    assert frames[1] == {"id": "plain-run"}
+
+
+def test_runtime_proxy_rejects_automatic_browser_in_manual_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {"role": "user", "parts": [{"text": "hello"}]},
+                "tool_policy": {
+                    "mode": "auto",
+                    "manual_tools": ["browser_use"],
+                },
+            },
+        )
+
+    assert response.status_code == 400
+    assert "automatic Studio tools" in response.json()["detail"]
+
+
 def test_runtime_proxy_resolves_environment_mount_without_forwarding_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -701,6 +1142,7 @@ def test_runtime_tool_capabilities_expose_safe_local_metadata(
     assert {item["id"] for item in body["tools"]} == {
         *list_builtin_tools(),
         "branch_compare",
+        "browser_use",
         "current_time",
         "delegate_to_codex_sandbox",
         "execute_in_sandbox",

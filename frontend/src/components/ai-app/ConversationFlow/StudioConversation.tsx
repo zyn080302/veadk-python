@@ -10,6 +10,11 @@ import { FileExplorer } from "../../composites/FileExplorer";
 import { ConversationSurface } from "./ConversationSurface";
 import { ConversationBlocks } from "./ConversationBlocks";
 import { safeConversationMediaSource } from "./ConversationMedia";
+import { BrowserUseStatusBar } from "../../../ui/builtin-tools/BrowserUseStatusBar";
+import type {
+  BrowserUseLocation,
+  BrowserUseRunState,
+} from "../../../ui/builtin-tools/browserUseRun";
 import type { ConversationBlock, ConversationFile, ConversationMediaBlock, ConversationMessage } from "./ConversationFlow.types";
 
 type ArtifactFile = Extract<Block, { kind: "artifact" }>["files"][number];
@@ -37,6 +42,16 @@ export interface StudioConversationOptions {
   onAttachmentDownload?: (file: AttachmentView) => void;
   onDeliveryDownload?: (delivery: Delivery) => void;
   onDeliveryDeploy?: (delivery: Delivery) => void;
+  browserApprovalBusy?: boolean;
+  onBrowserApprove?: (state: BrowserUseRunState) => void;
+  onBrowserCancel?: (state: BrowserUseRunState) => void;
+  onBrowserModify?: (state: BrowserUseRunState) => void;
+  onBrowserSuppress?: (state: BrowserUseRunState) => void;
+  onBrowserSwitchLocation?: (
+    state: BrowserUseRunState,
+    location: BrowserUseLocation,
+  ) => void;
+  onBrowserStop?: (state: BrowserUseRunState) => void;
 }
 
 function code(value: unknown): string | undefined {
@@ -193,6 +208,32 @@ export function fromStudioTurns(turns: readonly Turn[], options: StudioConversat
     const custom = options.renderBlock?.(block, turn);
     if (custom !== undefined) return { id, type: "custom", content: custom };
     switch (block.kind) {
+      case "browser-use": return {
+        id,
+        type: "custom",
+        content: <BrowserUseStatusBar
+          state={block.state}
+          busy={options.browserApprovalBusy}
+          onApprove={options.onBrowserApprove
+            ? () => options.onBrowserApprove?.(block.state)
+            : undefined}
+          onCancel={options.onBrowserCancel
+            ? () => options.onBrowserCancel?.(block.state)
+            : undefined}
+          onModify={options.onBrowserModify
+            ? () => options.onBrowserModify?.(block.state)
+            : undefined}
+          onSuppress={options.onBrowserSuppress
+            ? () => options.onBrowserSuppress?.(block.state)
+            : undefined}
+          onSwitchLocation={options.onBrowserSwitchLocation
+            ? (location) => options.onBrowserSwitchLocation?.(block.state, location)
+            : undefined}
+          onStop={options.onBrowserStop
+            ? () => options.onBrowserStop?.(block.state)
+            : undefined}
+        />,
+      };
       case "text": return { id, type: "markdown", text: block.text };
       case "thinking": return { id, type: "reasoning", title: "思考过程", status: block.done ? "complete" : "running", content: block.text };
       case "progress": return { id, type: "reasoning", title: block.text, status: turn.meta?.streaming ? "running" : "complete", content: block.text };
