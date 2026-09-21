@@ -64,6 +64,41 @@ def _canonical_snapshot(
     )
 
 
+@pytest.mark.parametrize(
+    "pythonpath",
+    [None, "/app/extensions:/opt/vendor", "/opt/veadk-studio-python:/app"],
+)
+def test_source_preserving_runtime_environment_activates_packaged_overlay(
+    pythonpath: str | None,
+) -> None:
+    from veadk.cli.legacy_runtime_recovery import (
+        source_preserving_runtime_environment,
+    )
+
+    original = {"MODEL_SETTING": "preserved", "HARNESS_SIDECAR_ENABLED": "false"}
+    if pythonpath is not None:
+        original["PYTHONPATH"] = pythonpath
+    before = dict(original)
+    result = source_preserving_runtime_environment(original)
+    assert original == before
+    assert result["MODEL_SETTING"] == "preserved"
+    assert result["HARNESS_SIDECAR_ENABLED"] == "false"
+    assert result["VEADK_STUDIO_SKILL_OVERLAY"] == "/opt/veadk-studio-overlay"
+    assert result["VEADK_STUDIO_OVERLAY_READY_FILE"] == (
+        "/tmp/veadk-studio-overlay-ready"
+    )
+    paths = result["PYTHONPATH"].split(":")
+    assert paths[0] == "/opt/veadk-studio-python"
+    assert paths.count("/opt/veadk-studio-python") == 1
+    assert paths[1:] == [
+        path
+        for path in (pythonpath.split(":") if pythonpath else [])
+        if path != "/opt/veadk-studio-python"
+    ]
+    assert source_preserving_runtime_environment(result) == result
+    assert "MCP_SERVERS_JSON" not in result
+
+
 def _layer(entries: dict[str, bytes | tuple[str, str]]) -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:

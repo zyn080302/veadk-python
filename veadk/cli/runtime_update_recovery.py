@@ -591,6 +591,12 @@ def assess_runtime_update_agent(
         raw_draft = fallback_draft
         source = "agent-draft"
 
+    # Image overlays retain custom source even if a host also exposes a draft.
+    # The privileged legacy recovery path verifies this separate public snapshot.
+    if "sourceOverlay" in agent_info:
+        raw_draft = None
+        fallback_available = False
+
     if raw_draft is None and fallback_available:
         return RuntimeUpdateRecovery(
             can_update=False,

@@ -771,7 +771,7 @@ def test_agentkit_code_pipeline_override_redirects_sdk_hardcoded_names(
                     ),
                 )
             )
-            or {"Items": []}
+            or {"Items": [{"Id": "selected-pipeline-id", "Name": "selected-pipeline"}]}
         ),
     )
     monkeypatch.setattr(
@@ -1029,3 +1029,97 @@ def test_all_resource_mode_combinations_map_to_agentkit_config(monkeypatch) -> N
         assert ("cp_workspace_name" in resolved) is (cp_mode != "auto")
         assert ("cp_pipeline_name" in resolved) is (cp_mode != "auto")
         assert ("cp_pipeline_id" in resolved) is (cp_mode == "existing")
+
+
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize(
+    "scenario", ["similar", "exact", "duplicate", "truncated", "error", "wrong-id"]
+)
+def test_sdk_pipeline_lookup_never_reuses_fuzzy_match_or_creates_after_failed_lookup(
+    monkeypatch,
+    selected,
+    scenario,
+) -> None:
+    from agentkit.toolkit.builders.ve_pipeline import VeCPCRBuilder
+    from agentkit.toolkit.config import CommonConfig, CloudStrategyConfig
+    from agentkit.toolkit.config.global_config import GlobalConfig
+    from agentkit.toolkit.models import BuildResult
+    from agentkit.toolkit.strategies.cloud_strategy import CloudStrategy
+    from agentkit.toolkit.volcengine.code_pipeline import VeCodePipeline
+    from agentkit.toolkit.volcengine.services import CRServiceConfig
+
+    monkeypatch.setenv("VOLCENGINE_ACCESS_KEY", "offline")
+    monkeypatch.setenv("VOLCENGINE_SECRET_KEY", "offline")
+    monkeypatch.setattr(
+        "agentkit.toolkit.config.global_config.get_global_config",
+        lambda: GlobalConfig(),
+    )
+    target = "selected-pipeline" if selected else "runtime-name"
+    scope = (
+        {"cp_workspace_name": "selected-workspace", "cp_pipeline_name": target}
+        if selected
+        else {}
+    )
+    if scenario == "wrong-id":
+        scope.update(
+            cp_workspace_name="selected-workspace",
+            cp_pipeline_name=target,
+            cp_pipeline_id="wanted-id",
+        )
+    calls = []
+
+    def transport(_client, request_body, action):
+        calls.append(action)
+        if action == "ListWorkspaces":
+            name = request_body["Filter"]["Name"]
+            return {
+                "Result": {
+                    "TotalCount": 1,
+                    "Items": [{"Id": "workspace", "Name": name}],
+                }
+            }
+        if action == "ListPipelines":
+            if scenario == "error":
+                raise RuntimeError("offline_service_unavailable")
+            rows = [{"Id": "unrelated", "Name": target + "-copy"}]
+            if scenario in {"exact", "duplicate", "wrong-id"}:
+                rows.append({"Id": "exact-id", "Name": target})
+            if scenario == "duplicate":
+                rows.append({"Id": "duplicate-id", "Name": target})
+            return {
+                "Result": {
+                    "TotalCount": 20 if scenario == "truncated" else len(rows),
+                    "Items": rows,
+                }
+            }
+        if action == "CreatePipeline":
+            assert request_body["Name"] == target
+            return {"Result": {"Id": "created-id"}}
+        raise AssertionError(action)
+
+    monkeypatch.setattr(VeCodePipeline, "_ve_request", transport)
+    original_list = VeCodePipeline.list_pipelines
+
+    def build(builder, config):
+        chosen = builder._prepare_pipeline_resources(config, "", CRServiceConfig())
+        assert chosen == ("exact-id" if scenario == "exact" else "created-id")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(VeCPCRBuilder, "build", build)
+
+    def invoke():
+        with deployment_resources.agentkit_code_pipeline_resources(scope):
+            return CloudStrategy().build(
+                CommonConfig(agent_name="agent"),
+                CloudStrategyConfig(runtime_name="runtime-name"),
+            )
+
+    if scenario in {"duplicate", "truncated", "error", "wrong-id"}:
+        with pytest.raises(Exception, match="Pipeline lookup could not be verified"):
+            invoke()
+        assert "CreatePipeline" not in calls
+    else:
+        assert invoke().success
+        assert calls.count("CreatePipeline") == int(scenario == "similar")
+    assert calls.count("ListPipelines") == 1
+    assert VeCodePipeline.list_pipelines is original_list

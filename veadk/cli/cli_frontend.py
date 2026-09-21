@@ -71,6 +71,7 @@ from veadk.cli.studio_account_id import (
     resolve_studio_account_id_metadata,
     studio_account_id_environment,
 )
+from veadk.cli.studio_sdk_config import sdk_build_config, sdk_memory_config
 from veadk.cli.studio_telemetry import studio_telemetry_config
 from veadk.cli.studio_vpc_network import (
     IpNetwork,
@@ -6718,7 +6719,6 @@ def _run_frontend_server(
         path. Both paths tag the Runtime with the deploying user.
         """
         import tempfile
-        import copy as _copy
         import shutil
         import queue as _queue
         import json as _json
@@ -7869,7 +7869,10 @@ def _run_frontend_server(
                 key = str(getattr(item, "key", "") or "").strip()
                 if (
                     key
-                    and key not in _RESERVED_RUNTIME_ENV_KEYS
+                    and (
+                        key not in _RESERVED_RUNTIME_ENV_KEYS
+                        or (source_preserving_requested and key == "PYTHONPATH")
+                    )
                     and key not in requested_remove_runtime_env_keys
                 ):
                     runtime_envs[key] = str(getattr(item, "value", "") or "")
@@ -7883,6 +7886,11 @@ def _run_frontend_server(
                     status_code=409,
                     detail="保留源码更新快照不可用，请重新打开智能体详情。",
                 )
+            from veadk.cli.legacy_runtime_recovery import (
+                source_preserving_runtime_environment,
+            )
+
+            runtime_envs = source_preserving_runtime_environment(runtime_envs)
             if source_preserving_mcp_owner != "platform":
                 for key in (
                     "MCP_SERVERS_JSON",
@@ -8137,6 +8145,13 @@ def _run_frontend_server(
             if existing_runtime is not None
             else requested_runtime_name
         ) or agent_name
+        # Source-preserving clients omit metadata they are not editing. Keep the
+        # server's accepted description verbatim; normalize only an explicit edit.
+        runtime_description = (
+            str(getattr(existing_runtime, "description", "") or "")
+            if existing_runtime is not None and "description" not in data
+            else _normalize_runtime_description(data.get("description"))
+        )
         sidecar_build_overrides: dict[str, Any] | None = None
         agentkit_config: dict[str, Any] | None = None
         if use_managed_sidecar_release:
@@ -8186,7 +8201,7 @@ def _run_frontend_server(
             sidecar_agentkit_config = {
                 "name": deployment_runtime_name,
                 "role_name": selected_runtime_role_name,
-                "description": _normalize_runtime_description(data.get("description")),
+                "description": runtime_description,
                 "cloud_provider": "volcengine",
                 "region": region,
                 "project": project_name,
@@ -8247,9 +8262,7 @@ def _run_frontend_server(
                 "common": {
                     "agent_name": trusted_agent_name,
                     "entry_point": entry_point,
-                    "description": _normalize_runtime_description(
-                        data.get("description")
-                    ),
+                    "description": runtime_description,
                     "python_version": "3.12",
                     "launch_type": "cloud",
                 },
@@ -8257,8 +8270,7 @@ def _run_frontend_server(
             }
             persisted_agentkit_config = agentkit_config
             if source_preserving_requested:
-                persisted_agentkit_config = _copy.deepcopy(agentkit_config)
-                persisted_agentkit_config["launch_types"]["cloud"]["runtime_envs"] = {}
+                persisted_agentkit_config = sdk_build_config(agentkit_config)
             (base / "agentkit.yaml").write_text(
                 _yaml.dump(persisted_agentkit_config, allow_unicode=True),
                 encoding="utf-8",
@@ -9124,10 +9136,7 @@ def _run_frontend_server(
                         persisted_config = config
                         in_memory_config = None
                         if sidecar_enabled or source_preserving_requested:
-                            persisted_config = copy.deepcopy(config)
-                            persisted_config["launch_types"]["cloud"][
-                                "runtime_envs"
-                            ] = {}
+                            persisted_config = sdk_build_config(config)
                             in_memory_config = copy.deepcopy(config)
                             in_memory_config.update(sidecar_build_overrides or {})
                         config_path.write_text(
@@ -9152,6 +9161,7 @@ def _run_frontend_server(
                                 agentkit_code_pipeline_resources(
                                     deployment_resource_config
                                 ),
+                                sdk_memory_config(config_path, in_memory_config),
                             ):
                                 launch_result = sdk.launch(
                                     config_file=str(config_path),
@@ -10254,6 +10264,55 @@ def _run_frontend_server(
             logger.error(f"get runtime detail failed: {e}", exc_info=True)
             raise HTTPException(status_code=502, detail=str(e))
 
+    from frontend.server.instruction_environment import (
+        mount_instruction_environment_routes,
+    )
+
+    def _publish_runtime_instruction(
+        runtime_id: str, region: str, envs: dict[str, str]
+    ) -> None:
+        from agentkit.sdk.runtime import types as runtime_types
+        from agentkit.sdk.runtime.client import AgentkitRuntimeClient
+
+        ak, sk, token = _resolve_ve_credentials()
+        client = AgentkitRuntimeClient(
+            access_key=ak,
+            secret_key=sk,
+            session_token=token or "",
+            region=region,
+        )
+        client.update_runtime(
+            runtime_types.UpdateRuntimeRequest(
+                RuntimeId=runtime_id,
+                Envs=[
+                    runtime_types.EnvsItemForUpdateRuntime(Key=key, Value=value)
+                    for key, value in envs.items()
+                ],
+                ReleaseEnable=True,
+            )
+        )
+        _rt_conn_cache.pop((region, runtime_id), None)
+
+    async def _read_runtime_instruction(request, runtime, runtime_id, region, app_name):
+        return await _runtime_json_request(
+            request,
+            runtime=runtime,
+            runtime_id=runtime_id,
+            region=region,
+            method="GET",
+            path="/web/aiops-extension/" + quote(app_name, safe=""),
+        )
+
+    mount_instruction_environment_routes(
+        app,
+        require_editor=_require_agent_management,
+        authorize=_authorized_runtime,
+        require_editable=AgentReviewService.require_editable,
+        normalize_region=_coerce_cloud_region,
+        read_addition=_read_runtime_instruction,
+        publish=_publish_runtime_instruction,
+    )
+
     @app.post("/web/runtime-api-key/reveal")
     async def _web_runtime_api_key_reveal(
         request: Request,
@@ -11024,7 +11083,7 @@ def _run_frontend_server(
 
     @app.api_route(
         "/web/runtime-proxy/{runtime_id}/{path:path}",
-        methods=["GET", "HEAD", "POST", "PATCH", "DELETE"],
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
     )
     async def _runtime_proxy(runtime_id: str, path: str, request: Request):
         """Proxy a data-plane call with its runtime credential injected server-side.
@@ -12467,6 +12526,7 @@ def _run_frontend_server(
         selected_skills: list[dict[str, Any]],
         mcp_tools: list[dict[str, Any]],
         root: bool,
+        overlay_mcp: Mapping[str, list[dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         agent_type = str(node.get("type") or "llm")
         if agent_type not in {"llm", "sequential", "parallel", "loop", "a2a"}:
@@ -12474,7 +12534,7 @@ def _run_frontend_server(
         raw_children = node.get("children")
         children: list[Any] = raw_children if isinstance(raw_children, list) else []
         return {
-            "name": str(node.get("name") or "legacy-agent"),
+            "name": str(node.get("id") or node.get("name") or "legacy-agent"),
             "description": str(node.get("description") or ""),
             "instruction": str(node.get("instruction") or ""),
             "agentType": agent_type,
@@ -12482,13 +12542,18 @@ def _run_frontend_server(
             "modelName": str(node.get("model") or ""),
             "skills": [item["name"] for item in selected_skills] if root else [],
             "selectedSkills": selected_skills if root else [],
-            "mcpTools": mcp_tools if root else [],
+            "mcpTools": (
+                overlay_mcp[str(node.get("id") or node.get("name") or "legacy-agent")]
+                if overlay_mcp is not None
+                else (mcp_tools if root else [])
+            ),
             "subAgents": [
                 _legacy_draft_node(
                     child,
                     selected_skills=[],
                     mcp_tools=[],
                     root=False,
+                    overlay_mcp=overlay_mcp,
                 )
                 for child in children
                 if isinstance(child, Mapping)
@@ -12605,7 +12670,28 @@ def _run_frontend_server(
         region: str,
     ) -> tuple[dict[str, Any], str, str]:
         environment = _legacy_runtime_environment(runtime)
-        mcp, _secret_values = _legacy_mcp_state(runtime, region)
+        overlay_mcp = None
+        if environment.get("VEADK_STUDIO_SKILL_OVERLAY") or "sourceOverlay" in agent:
+            from veadk.integrations.agentkit.source_overlay import (
+                validate_source_overlay,
+            )
+
+            try:
+                overlay_mcp = validate_source_overlay(agent.get("sourceOverlay"))
+            except (ValueError, TypeError, RecursionError):
+                raise LegacyRecoveryError(
+                    "legacy_overlay_snapshot_unavailable"
+                ) from None
+            if (
+                not overlay_mcp
+                and not str(getattr(runtime, "mcp_toolset_id", "") or "").strip()
+                and _legacy_harness_intent(environment) is None
+            ):
+                raise LegacyRecoveryError("legacy_overlay_snapshot_incomplete")
+        mcp_tools = []
+        if not overlay_mcp:
+            mcp, _secret_values = _legacy_mcp_state(runtime, region)
+            mcp_tools = [dict(item) for item in mcp.tools]
         raw_skill_entries = agent.get("skills")
         raw_skills: list[Any] = (
             raw_skill_entries if isinstance(raw_skill_entries, list) else []
@@ -12630,11 +12716,34 @@ def _run_frontend_server(
         graph: Mapping[str, Any] = (
             raw_graph if isinstance(raw_graph, Mapping) else agent
         )
+        if overlay_mcp:
+            pending, names = [graph], set()
+            while pending:
+                node = pending.pop()
+                name = str(node.get("id") or node.get("name") or "legacy-agent")
+                if name in names or len(names) >= 128:
+                    raise LegacyRecoveryError("legacy_overlay_agent_identity_invalid")
+                names.add(name)
+                children = node.get("children") or []
+                if not isinstance(children, list) or any(
+                    not isinstance(child, Mapping) for child in children
+                ):
+                    raise LegacyRecoveryError("legacy_overlay_agent_identity_invalid")
+                pending.extend(children)
+            if names != set(overlay_mcp):
+                raise LegacyRecoveryError("legacy_overlay_agent_identity_invalid")
+            if any(
+                item["authTokenEnv"] and not environment.get(item["authTokenEnv"])
+                for entries in overlay_mcp.values()
+                for item in entries
+            ):
+                raise LegacyRecoveryError("legacy_overlay_mcp_credential_missing")
         draft = _legacy_draft_node(
             graph,
             selected_skills=selected_skills,
-            mcp_tools=[dict(item) for item in mcp.tools],
+            mcp_tools=mcp_tools,
             root=True,
+            overlay_mcp=overlay_mcp or None,
         )
         draft["deployment"] = {
             "envValues": {
@@ -13076,6 +13185,16 @@ def _run_frontend_server(
                 reason_code="runtime_agent_info_invalid",
             )
 
+        # An image overlay is authoritative even when an old host exposes a
+        # standard draft. Missing overlay metadata must never enable regeneration.
+        if (
+            _legacy_runtime_environment(runtime).get("VEADK_STUDIO_SKILL_OVERLAY")
+            and "sourceOverlay" not in agent
+        ):
+            agent = {
+                **agent,
+                "sourceOverlay": {"schemaVersion": 1, "status": "unavailable"},
+            }
         fallback_draft: Any = None
         fallback_available = False
         if agent.get("draft") is None:

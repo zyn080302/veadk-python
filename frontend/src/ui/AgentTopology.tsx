@@ -23,6 +23,7 @@ import {
 } from "./StudioToolDialog";
 import { TextShimmer } from "./text-shimmer/TextShimmer";
 import { SessionEnvironmentPicker } from "./SessionEnvironmentPicker";
+import { InstructionExtensionEditor } from "./InstructionExtensionEditor";
 
 function totalNodes(node: AgentNode): number {
   return 1 + node.children.reduce((count, child) => count + totalNodes(child), 0);
@@ -278,6 +279,12 @@ export function AgentInfoPanel({
         )}
       </section>
 
+      {info.instructionExtension && (
+        <details className="instruction-extension-rail">
+          <summary>{t("instructionExtension.title")}</summary>
+          <InstructionExtensionEditor key={appName} appName={appName} />
+        </details>
+      )}
       <div className="topo-module-stack">
         <section className="topo-module-card topo-tools-card" aria-label={t("agentTopology.tools")}>
           <ModuleTitle

@@ -5105,6 +5105,139 @@ def test_legacy_runtime_capability_recovers_environment_and_agentkit_toolset(
     assert "toolset-secret" not in control_plane_fallback.text
 
 
+@pytest.mark.parametrize(
+    "snapshot_case",
+    [
+        "valid",
+        "missing",
+        "ordinary-draft",
+        "wrong-agent",
+        "empty",
+        "missing-credential",
+    ],
+)
+def test_source_preserving_overlay_reopen_keeps_mcp_and_private_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    snapshot_case: str,
+) -> None:
+    """A second edit must not replace an image-owned MCP set with an empty set."""
+    from agentkit.sdk.runtime.client import AgentkitRuntimeClient
+
+    from veadk.cli.legacy_runtime_recovery import (
+        OciImageInspector,
+        build_source_preserving_overlay,
+    )
+
+    runtime = _runtime_with_public_endpoint(_runtime("runtime-overlay", "developer"))
+    runtime.current_version_number = 2
+    runtime.status = "Ready"
+    runtime.artifact_url = (
+        "example-registry-cn-shanghai.cr.volces.com/agentkit/private:v2"
+    )
+    runtime.envs = [
+        SimpleNamespace(key="VEADK_STUDIO_SKILL_OVERLAY", value="/opt/overlay"),
+        SimpleNamespace(key="MCP_ORDERS_AUTH", value="synthetic-overlay-credential"),
+    ]
+    if snapshot_case == "missing-credential":
+        runtime.envs.pop()
+    monkeypatch.setattr(
+        AgentkitRuntimeClient, "get_runtime", lambda _self, _request: runtime
+    )
+    monkeypatch.setattr(
+        OciImageInspector,
+        "extract_skills",
+        lambda _self, image, _skills: (image.pinned("sha256:" + "a" * 64), ()),
+    )
+    mcp = [
+        {
+            "name": "orders",
+            "transport": "http",
+            "url": "https://mcp.example.com/orders",
+            "authTokenEnv": "MCP_ORDERS_AUTH",
+        }
+    ]
+    agent = {
+        "name": "private-agent",
+        "draft": None,
+        "instructionExtension": True,
+        "graph": {
+            "id": "private-agent",
+            "name": "应用专家",
+            "type": "llm",
+            "children": [],
+        },
+    }
+    if snapshot_case not in {"missing", "ordinary-draft"}:
+        agent["sourceOverlay"] = {"schemaVersion": 1, "mcp": {"private-agent": mcp}}
+
+    if snapshot_case == "wrong-agent":
+        agent["sourceOverlay"]["mcp"] = {"other-agent": mcp}
+    if snapshot_case == "empty":
+        agent["sourceOverlay"]["mcp"] = {}
+    if snapshot_case == "ordinary-draft":
+        agent["draft"] = {"name": "private-agent", "instruction": "Customer extension"}
+
+    class RuntimeAsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, _method, url, **_kwargs):
+            if url.endswith("/list-apps"):
+                return _RuntimeJsonResponse(["private-agent"])
+            if url.endswith("/web/agent-info/private-agent"):
+                return _RuntimeJsonResponse(agent)
+            assert url.endswith("/web/agent-draft/private-agent")
+            return _RuntimeJsonResponse({}, status_code=404, text="Not Found")
+
+    monkeypatch.setattr("httpx.AsyncClient", RuntimeAsyncClient)
+    app = _create_studio_app(monkeypatch, tmp_path, developers="developer")
+    with TestClient(app) as client:
+        response = client.get(
+            "/web/runtime-update-capability",
+            params={"runtimeId": runtime.runtime_id, "region": "cn-shanghai"},
+            headers={"X-VeADK-Local-User": "developer"},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert "synthetic-overlay-credential" not in response.text
+    if snapshot_case != "valid":
+        assert payload["canUpdate"] is False
+        assert payload["editMode"] == "blocked"
+        return
+    assert payload["canUpdate"] is True
+    assert payload["editMode"] == "source-preserving"
+    assert payload["agent"]["sourceImage"].endswith("@sha256:" + "a" * 64)
+    draft = payload["agent"]["draft"]
+    assert [{k: item[k] for k in mcp[0]} for item in draft["mcpTools"]] == mcp
+    assert not draft.get("instruction")
+    assert draft["name"] == "private-agent"
+    assert "MCP_ORDERS_AUTH" in payload["runtime"]["configuredEnvKeys"]
+
+    files = {
+        item["path"]: item["content"]
+        for item in build_source_preserving_overlay(
+            source_image=payload["agent"]["sourceImage"],
+            published_draft=draft,
+            edited_draft=draft,
+            canonical_skills=(),
+            application_mcp=True,
+        )
+    }
+    assert json.loads(files[".veadk-studio-overlay/mcp.json"]) == {"private-agent": mcp}
+    assert files["Dockerfile"].startswith(
+        "FROM " + payload["agent"]["sourceImage"] + "\n"
+    )
+    assert "entrypoint" in files["app.py"]
+    assert "synthetic-overlay-credential" not in json.dumps(files)
+
+
 def test_update_deployment_rejects_missing_stale_or_wrong_base_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5338,10 +5471,22 @@ def test_update_deployment_rechecks_runtime_identity_before_update(
     [False, True],
     ids=["legacy-tagless", "modern-tagged"],
 )
+@pytest.mark.parametrize(
+    ("description_fields", "expected_description"),
+    [
+        ({}, "Published description 🤖"),
+        ({"description": "Updated\n description 🤖"}, "Updated description"),
+        ({"description": ""}, ""),
+    ],
+    ids=["preserve-description", "edit-description", "clear-description"],
+)
 def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_of_build(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     has_build_resource_tags: bool,
+    description_fields: dict[str, str],
+    expected_description: str,
+    overlay: bool = False,
 ) -> None:
     from agentkit.sdk.runtime.client import AgentkitRuntimeClient
 
@@ -5349,6 +5494,7 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
 
     runtime = _runtime_with_public_endpoint(_runtime("runtime-legacy", "developer"))
     runtime.current_version_number = 9
+    runtime.description = "Published description 🤖"
     runtime.role_name = "runtime-role"
     runtime.status = "Ready"
     runtime.artifact_url = (
@@ -5389,6 +5535,7 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
             ),
         ),
         SimpleNamespace(key="MODEL_AGENT_NAME", value="published-model"),
+        SimpleNamespace(key="PYTHONPATH", value="/app/custom_modules"),
         SimpleNamespace(key="HARNESS_SIDECAR_ENABLED", value="false"),
         SimpleNamespace(key="HARNESS_MODEL_PROXY_ENABLED", value="false"),
         SimpleNamespace(key="HARNESS_MCP_GATEWAY_ENABLED", value="false"),
@@ -5422,6 +5569,18 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
             value="https://stale.example.com",
         ),
     ]
+    if overlay:
+        runtime.envs = [
+            entry for entry in runtime.envs if entry.key != "MCP_SERVERS_JSON"
+        ]
+        runtime.envs.extend(
+            [
+                SimpleNamespace(
+                    key="VEADK_STUDIO_SKILL_OVERLAY", value="/opt/veadk-studio-overlay"
+                ),
+                SimpleNamespace(key="MCP_ORDERS_AUTH", value="retained-secret"),
+            ]
+        )
     launched = False
     captured: dict[str, Any] = {}
     update_requests: list[Any] = []
@@ -5471,6 +5630,25 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
             if url.endswith("/web/agent-info/legacy-agent"):
                 return _RuntimeJsonResponse(
                     {
+                        **(
+                            {
+                                "sourceOverlay": {
+                                    "schemaVersion": 1,
+                                    "mcp": {
+                                        "legacy-agent": [
+                                            {
+                                                "name": "orders",
+                                                "transport": "http",
+                                                "url": "https://mcp.example.com/orders",
+                                                "authTokenEnv": "MCP_ORDERS_AUTH",
+                                            }
+                                        ]
+                                    },
+                                }
+                            }
+                            if overlay
+                            else {}
+                        ),
                         "name": "legacy-agent",
                         "instruction": "Published instruction",
                         "skills": [],
@@ -5495,6 +5673,16 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
         captured["mcp"] = (base / ".veadk-studio-overlay/mcp.json").read_text()
         captured["persisted_config"] = Path(config_file).read_text()
         captured["config"] = config_dict
+        # Exercise the installed SDK's actual build-result persistence callback.
+        from agentkit.toolkit.config import AgentkitConfigManager
+
+        manager = AgentkitConfigManager.from_dict(
+            config_dict, base_config_path=config_file
+        )
+        manager.update_strategy_config(
+            "cloud", {"cr_image_full_url": "example.invalid/offline:candidate"}
+        )
+        captured["persisted_after_sdk"] = Path(config_file).read_text()
         AgentkitRuntimeClient.update_runtime(
             object(),
             SimpleNamespace(tags=[], apmplus_enable=False),
@@ -5573,6 +5761,7 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
             ],
             "config": {"region": "cn-shanghai", "projectName": "default"},
         }
+        update_payload.update(description_fields)
         generic_env = client.post(
             "/web/deploy-agentkit",
             headers=headers,
@@ -5607,11 +5796,13 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
     assert "模型 fallback" in fallback_model_change.json()["detail"]
     assert response.status_code == 200
     assert frames[-1]["success"] is True
+    assert captured["config"]["common"]["description"] == expected_description
     assert captured["dockerfile"].splitlines()[0].endswith("@sha256:" + "b" * 64)
     assert "browser-overwrite-must-be-ignored" not in captured["app"]
     for protected in ("retained-secret", "replacement-secret"):
         assert protected not in captured["mcp"]
         assert protected not in captured["persisted_config"]
+        assert protected not in captured["persisted_after_sdk"]
     assert captured["config"]["launch_types"]["cloud"]["runtime_envs"]
     assert (
         "replacement-secret"
@@ -5627,6 +5818,15 @@ def test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_o
     assert runtime_envs["HARNESS_MCP_GATEWAY_ENABLED"] == "false"
     assert runtime_envs["HARNESS_ENHANCE_ENABLED"] == "false"
     assert runtime_envs["HARNESS_LEGACY_ROUTER_ENABLED"] == "false"
+    # Runtime launchers need explicit process configuration; Docker ENV alone
+    # must not be the only way to activate the packaged Skill/MCP overlay.
+    assert runtime_envs["VEADK_STUDIO_SKILL_OVERLAY"] == "/opt/veadk-studio-overlay"
+    assert runtime_envs["VEADK_STUDIO_OVERLAY_READY_FILE"] == (
+        "/tmp/veadk-studio-overlay-ready"
+    )
+    assert runtime_envs["PYTHONPATH"].split(":")[0] == "/opt/veadk-studio-python"
+    assert runtime_envs["PYTHONPATH"].split(":")[1:] == ["/app/custom_modules"]
+    assert "MCP_SERVERS_JSON" not in runtime_envs
     assert json.loads(runtime_envs["HARNESS_SIDECAR_COMPONENT_OVERRIDES"]) == {
         "context_engine": False,
         "compressor": False,
@@ -8135,3 +8335,16 @@ def test_agent_review_flow_enforces_shared_use_and_private_management(
             == 404
         )
     assert writes
+
+
+def test_source_preserving_overlay_republish_keeps_credentials_private(
+    monkeypatch, tmp_path
+):
+    test_source_preserving_update_ignores_browser_source_and_keeps_secrets_out_of_build(
+        monkeypatch,
+        tmp_path,
+        True,
+        {},
+        "Published description 🤖",
+        overlay=True,
+    )

@@ -388,5 +388,22 @@
     "noMatch": "No matching Studio tools",
     "remove": "Remove",
     "add": "Add"
+  },
+  "instructionExtension": {
+    "title": "Additional instructions",
+    "priority": "Business instructions are appended after the AIOps core rules.",
+    "loading": "Loading…",
+    "reload": "Reload",
+    "save": "Save",
+    "saved": "Saved. Applies to the next invocation.",
+    "loadError": "Could not load instructions. Retry.",
+    "saveError": "Could not save instructions. Retry.",
+    "conflict": "Another edit updated this configuration. Keep your text, reload, then merge.",
+    "tooLong": "Instructions cannot exceed 65536 characters.",
+    "saveAndPublish": "Save and publish",
+    "publishPending": "Configuration publication submitted. Reload after publication completes.",
+    "publishUnknown": "Publication is unconfirmed. Reload and check the Runtime status.",
+    "publishError": "Publication is unconfirmed. Reload and check the Runtime before retrying.",
+    "envTooLong": "Additional instructions must fit within 64 KiB of UTF-8 text."
   }
 }

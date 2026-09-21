@@ -354,13 +354,11 @@ def _is_agentkit_build_pipeline(client: Any, pipeline: dict[str, Any]) -> bool:
 
 @contextmanager
 def agentkit_code_pipeline_resources(config: Mapping[str, str]):
-    """Make AgentKit 0.8.x honor Studio's selected CodePipeline resources."""
+    """Honor selected resources and require exact SDK pipeline lookups."""
     workspace_name = str(config.get("cp_workspace_name") or "").strip()
     selected_pipeline_name = str(config.get("cp_pipeline_name") or "").strip()
     pipeline_id = str(config.get("cp_pipeline_id") or "").strip()
-    if not workspace_name or not selected_pipeline_name:
-        yield
-        return
+    override_names = bool(workspace_name and selected_pipeline_name)
 
     from agentkit.toolkit.volcengine.code_pipeline import VeCodePipeline
 
@@ -380,6 +378,7 @@ def agentkit_code_pipeline_resources(config: Mapping[str, str]):
     original_create_workspace = VeCodePipeline.create_workspace
     original_list_pipelines = VeCodePipeline.list_pipelines
     original_create_pipeline = VeCodePipeline._create_pipeline
+    lookup_failed = False
 
     def workspace_exists(self, name: str) -> bool:
         del name
@@ -423,19 +422,51 @@ def agentkit_code_pipeline_resources(config: Mapping[str, str]):
         name_filter: str = "",
         pipeline_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        nonlocal lookup_failed
         if pipeline_id:
             pipeline_ids = [pipeline_id]
             name_filter = ""
-        elif name_filter:
+        elif name_filter and override_names:
             name_filter = selected_pipeline_name
-        return original_list_pipelines(
-            self,
-            workspace_id,
-            page_number=page_number,
-            page_size=page_size,
-            name_filter=name_filter,
-            pipeline_ids=pipeline_ids,
-        )
+        try:
+            if not name_filter and not pipeline_ids:
+                raise ValueError("Pipeline lookup requires a name or ID")
+            result = original_list_pipelines(
+                self,
+                workspace_id,
+                page_number=page_number,
+                page_size=page_size,
+                name_filter=name_filter,
+                pipeline_ids=pipeline_ids,
+            )
+            rows = result.get("Items", [])
+            # The service's name filter is a substring search. Never let the
+            # SDK reuse its first row or create after an incomplete lookup.
+            if (
+                not isinstance(rows, list)
+                or not all(isinstance(row, dict) for row in rows)
+                or result.get("NextToken")
+                or result.get("TotalCount", len(rows)) != len(rows)
+                or page_number != 1
+            ):
+                raise ValueError("Incomplete pipeline lookup")
+            exact = [
+                row
+                for row in rows
+                if (not name_filter or row.get("Name") == name_filter)
+                and (not pipeline_ids or row.get("Id") in pipeline_ids)
+                and (not pipeline_id or row.get("Name") == selected_pipeline_name)
+            ]
+            if len(exact) > 1 or (pipeline_ids and len(exact) != 1):
+                raise ValueError("Ambiguous or missing selected pipeline")
+            if exact and not exact[0].get("Id"):
+                raise ValueError("Pipeline ID missing")
+            return {**result, "Items": exact, "TotalCount": len(exact)}
+        except Exception:
+            # AgentKit catches lookup errors and falls back to creation. Keep
+            # that fallback from turning an API failure into a cloud mutation.
+            lookup_failed = True
+            raise ValueError("Pipeline lookup could not be verified") from None
 
     def create_pipeline(
         self,
@@ -444,18 +475,20 @@ def agentkit_code_pipeline_resources(config: Mapping[str, str]):
         spec: str,
         parameters: list[dict[str, str]] | None = None,
     ) -> str:
-        del pipeline_name
+        if lookup_failed:
+            raise ValueError("Pipeline lookup could not be verified")
         return original_create_pipeline(
             self,
             workspace_id,
-            selected_pipeline_name,
+            selected_pipeline_name if override_names else pipeline_name,
             spec,
             parameters=parameters,
         )
 
-    VeCodePipeline.workspace_exists_by_name = workspace_exists
-    VeCodePipeline.get_workspaces_by_name = get_workspaces
-    VeCodePipeline.create_workspace = create_workspace
+    if override_names:
+        VeCodePipeline.workspace_exists_by_name = workspace_exists
+        VeCodePipeline.get_workspaces_by_name = get_workspaces
+        VeCodePipeline.create_workspace = create_workspace
     VeCodePipeline.list_pipelines = list_pipelines
     VeCodePipeline._create_pipeline = create_pipeline
     try:

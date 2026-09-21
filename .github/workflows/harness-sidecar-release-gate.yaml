@@ -18,6 +18,7 @@ on:
       - 'tests/cli/test_studio_startup_imports.py'
       - 'tests/frontend/server/studio_tools/test_deferred_veadk_builtin_tools.py'
       - 'tests/frontend/server/test_runtime_iam.py'
+      - 'tests/frontend/server/test_deployment_resources.py'
       - 'tests/extensions/harness/**'
       - 'tests/integrations/agentkit/test_app.py'
       - 'tests/test_harness_sidecar_release_gate.py'
@@ -33,11 +34,18 @@ on:
       - 'veadk/cli/managed_sidecar_source.py'
       - 'veadk/cli/legacy_runtime_recovery.py'
       - 'veadk/cli/studio_vpc_network.py'
+      - 'veadk/cli/studio_sdk_config.py'
+      - 'tests/cli/test_studio_sdk_config.py'
+      - 'frontend/server/instruction_environment.py'
+      - 'tests/frontend/server/test_instruction_environment.py'
+      - 'tests/cli/test_instruction_environment_routes.py'
       - 'veadk/cli/studio_release.py'
       - 'veadk/cli/studio_self_update.py'
       - 'veadk/integrations/ve_faas/ve_faas.py'
       - 'veadk/extensions/harness/**'
       - 'veadk/integrations/agentkit/app.py'
+      - 'veadk/integrations/agentkit/source_overlay.py'
+      - 'veadk/cli/runtime_update_recovery.py'
       - 'pyproject.toml'
   pull_request:
     paths:
@@ -55,6 +63,7 @@ on:
       - 'tests/cli/test_studio_startup_imports.py'
       - 'tests/frontend/server/studio_tools/test_deferred_veadk_builtin_tools.py'
       - 'tests/frontend/server/test_runtime_iam.py'
+      - 'tests/frontend/server/test_deployment_resources.py'
       - 'tests/extensions/harness/**'
       - 'tests/integrations/agentkit/test_app.py'
       - 'tests/test_harness_sidecar_release_gate.py'
@@ -70,11 +79,18 @@ on:
       - 'veadk/cli/managed_sidecar_source.py'
       - 'veadk/cli/legacy_runtime_recovery.py'
       - 'veadk/cli/studio_vpc_network.py'
+      - 'veadk/cli/studio_sdk_config.py'
+      - 'tests/cli/test_studio_sdk_config.py'
+      - 'frontend/server/instruction_environment.py'
+      - 'tests/frontend/server/test_instruction_environment.py'
+      - 'tests/cli/test_instruction_environment_routes.py'
       - 'veadk/cli/studio_release.py'
       - 'veadk/cli/studio_self_update.py'
       - 'veadk/integrations/ve_faas/ve_faas.py'
       - 'veadk/extensions/harness/**'
       - 'veadk/integrations/agentkit/app.py'
+      - 'veadk/integrations/agentkit/source_overlay.py'
+      - 'veadk/cli/runtime_update_recovery.py'
       - 'pyproject.toml'
 
 permissions:
@@ -133,6 +149,14 @@ jobs:
           (
             python -m pytest -q \
               tests/frontend/server/test_runtime_iam.py \
+              tests/frontend/server/test_deployment_resources.py \
+              tests/cli/test_studio_sdk_config.py \
+              tests/frontend/server/test_instruction_environment.py \
+              tests/cli/test_instruction_environment_routes.py \
+              tests/integrations/agentkit/test_app.py::test_source_overlay_metadata_is_public_and_never_a_builder_draft \
+              tests/cli/test_studio_rbac.py::test_source_preserving_overlay_reopen_keeps_mcp_and_private_source \
+              tests/cli/test_studio_rbac.py::test_source_preserving_overlay_republish_keeps_credentials_private \
+              tests/cli/test_legacy_runtime_recovery.py::test_source_preserving_runtime_environment_activates_packaged_overlay \
               tests/cli/test_generated_agent_mcp.py \
               tests/cli/test_generated_agent_backend_codegen_extended.py::test_generated_debug_applies_published_mcp_credential_contract_before_discovery \
               tests/cli/test_studio_rbac.py::test_deployment_status_recovers_completed_update_from_fresh_instance \

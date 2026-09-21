@@ -388,5 +388,22 @@
     "noMatch": "没有匹配的 Studio 工具",
     "remove": "移除",
     "add": "添加"
+  },
+  "instructionExtension": {
+    "title": "附加提示词",
+    "priority": "业务要求将在 AIOps 核心规则之后追加。",
+    "loading": "正在读取…",
+    "reload": "重新读取",
+    "save": "保存",
+    "saved": "已保存，下次调用生效。",
+    "loadError": "读取失败，请重试。",
+    "saveError": "保存失败，请重试。",
+    "conflict": "其他编辑已更新此配置。请保留当前文本，重新读取后合并。",
+    "tooLong": "附加提示词不能超过 65536 个字符。",
+    "saveAndPublish": "保存并发布",
+    "publishPending": "已提交配置发布，发布完成后请重新读取。",
+    "publishUnknown": "发布结果尚未确认，请重新读取并核对 Runtime 状态。",
+    "publishError": "发布未确认。请先重新读取并核对 Runtime 状态，再决定是否重试。",
+    "envTooLong": "附加提示词的 UTF-8 内容不能超过 64 KiB。"
   }
 }

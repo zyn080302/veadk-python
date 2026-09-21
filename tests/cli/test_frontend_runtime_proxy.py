@@ -2751,6 +2751,28 @@ def test_runtime_proxy_accepts_post_delete_override(
     ),
     [
         (
+            "public",
+            "PUT",
+            "web/aiops-extension/expert",
+            "?region=cn-beijing",
+            "volcengine",
+            "cn-beijing",
+            1,
+            1,
+            200,
+        ),
+        (
+            "public",
+            "PUT",
+            "web/aiops-extension/expert",
+            "?region=cn-beijing",
+            "volcengine",
+            "cn-beijing",
+            1,
+            None,
+            502,
+        ),
+        (
             "private",
             "GET",
             "list-apps",
@@ -2896,6 +2918,12 @@ def test_runtime_proxy_retry_policy(
             headers: dict[str, str],
             content: bytes,
         ) -> object:
+            assert method == request_method
+            if request_method == "PUT":
+                assert json.loads(content) == {
+                    "instruction": "customer addition",
+                    "revision": 3,
+                }
             forwarded_params.append(params)
             return object()
 
@@ -2915,6 +2943,11 @@ def test_runtime_proxy_retry_policy(
         response = client.request(
             request_method,
             f"/web/runtime-proxy/runtime-1/{proxy_path}{query}",
+            **(
+                {"json": {"instruction": "customer addition", "revision": 3}}
+                if request_method == "PUT"
+                else {}
+            ),
         )
 
     assert response.status_code == expected_status

@@ -35,10 +35,12 @@ export default function MarkdownPromptEditor({
   value,
   onChange,
   invalid = false,
+  readOnly = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   invalid?: boolean;
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation("create");
   const editorRef = useRef<MDXEditorMethods>(null);
@@ -92,6 +94,7 @@ export default function MarkdownPromptEditor({
         <textarea
           className={`cw-markdown-fallback${invalid ? " is-error" : ""}`}
           value={value}
+          readOnly={readOnly}
           aria-invalid={invalid}
           spellCheck={false}
           onChange={(event) => {
@@ -111,6 +114,7 @@ export default function MarkdownPromptEditor({
         className={`cw-markdown-editor${invalid ? " is-error" : ""}`}
         contentEditableClassName="cw-markdown-content"
         markdown={value}
+        readOnly={readOnly}
         placeholder={t("promptEditor.placeholder")}
         plugins={plugins}
         suppressHtmlProcessing

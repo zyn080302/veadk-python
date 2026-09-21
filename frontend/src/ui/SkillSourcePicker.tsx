@@ -8,7 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
-import { FolderUp, Globe, Plus, Sparkles, X } from "lucide-react";
+import { FolderUp, Globe, Pencil, Plus, Sparkles, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { CloudProvider } from "../adk/cloudProvider";
@@ -58,10 +58,12 @@ function skillSourceLabelKey(skill: SelectedSkill): string {
 function SelectedSkillRow({
   skill,
   onRemove,
+  onEdit,
   disabled,
 }: {
   skill: SelectedSkill;
   onRemove: () => void;
+  onEdit?: () => void;
   disabled: boolean;
 }) {
   const { t } = useTranslation("ui");
@@ -93,6 +95,8 @@ function SelectedSkillRow({
           {detail}
         </span>
       </span>
+      {onEdit && skill.localFiles?.length ? <button type="button" className="cw-selected-skill-remove" disabled={disabled} onClick={onEdit}
+        aria-label={t("skillSourcePicker.edit", { name: skill.name })} title={t("skillSourcePicker.edit", { name: skill.name })}><Pencil className="cw-i cw-i-sm" /></button> : null}
       <button
         type="button"
         className="cw-selected-skill-remove"
@@ -138,6 +142,7 @@ const SKILL_SOURCES: Array<{
 export function SkillSourcePicker({
   selected,
   onChange,
+  onEdit,
   cloudProvider,
   disabled = false,
   addLabel,
@@ -145,6 +150,7 @@ export function SkillSourcePicker({
 }: {
   selected: SelectedSkill[];
   onChange: (next: SelectedSkill[]) => void;
+  onEdit?: (skill: SelectedSkill) => void;
   cloudProvider: CloudProvider;
   disabled?: boolean;
   addLabel?: string;
@@ -232,6 +238,7 @@ export function SkillSourcePicker({
                   skill={skill}
                   disabled={disabled}
                   onRemove={() => remove(skillKey(skill), skill)}
+                  onEdit={onEdit ? () => onEdit(skill) : undefined}
                 />
               ))}
             </AnimatePresence>

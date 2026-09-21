@@ -64,6 +64,7 @@ __all__ = [
     "resolve_source_preserving_mcp_owner",
     "resolve_source_preserving_mcp_secrets",
     "source_preserving_mcp_changed",
+    "source_preserving_runtime_environment",
 ]
 
 _IMAGE_HOST_RE = re.compile(
@@ -98,6 +99,27 @@ _MAX_SKILL_FILES = 256
 _MAX_SKILL_FILE_BYTES = 1024 * 1024
 _MAX_SKILL_TOTAL_BYTES = 8 * 1024 * 1024
 _MAX_MCP_SECRET_BYTES = 8192
+
+
+def source_preserving_runtime_environment(
+    environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Activate the image overlay even when the launcher omits Docker ENV.
+
+    This is operator-owned deployment configuration, never browser input.
+    Keep application import paths while installing the bootstrap exactly once.
+    """
+    bootstrap = "/opt/veadk-studio-python"
+    previous = environment.get("PYTHONPATH", "")
+    paths = (
+        [path for path in previous.split(":") if path != bootstrap] if previous else []
+    )
+    return {
+        **environment,
+        "VEADK_STUDIO_SKILL_OVERLAY": "/opt/veadk-studio-overlay",
+        "VEADK_STUDIO_OVERLAY_READY_FILE": "/tmp/veadk-studio-overlay-ready",
+        "PYTHONPATH": ":".join([bootstrap, *paths]),
+    }
 
 
 def _legacy_mcp_auth_reference(name: str, url: str) -> str:
@@ -218,7 +240,12 @@ def _replace_mcp(root_agent, configuration):
             raise RuntimeError("Studio MCP overlay Agent identity is invalid")
         visited.add(name)
         configured = configuration.get(name)
-        if isinstance(configured, list):
+        handler = getattr(agent, "_veadk_studio_mcp_overlay_handler", None)
+        if isinstance(configured, list) and handler is not None:
+            if not callable(handler):
+                raise RuntimeError("Studio MCP overlay handler is invalid")
+            handler(configured)
+        elif isinstance(configured, list):
             tools = [
                 item
                 for item in list(getattr(agent, "tools", None) or [])

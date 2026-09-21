@@ -25,6 +25,36 @@ const {
 } = await loadTypeScriptModule("../src/adk/deploymentStatus.ts");
 const { deployAgentkitProject } = await loadTypeScriptModule("../src/adk/client.ts");
 
+test("Runtime updates preserve omitted metadata and allow explicit description edits", async () => {
+  const originals = Object.fromEntries(["fetch", "window", "sessionStorage", "localStorage"].map((key) => [key, globalThis[key]]));
+  const storage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  globalThis.window = { location: { search: "", origin: "https://studio.example.com", pathname: "/", hash: "" }, history: { replaceState: () => {} } };
+  globalThis.sessionStorage = storage;
+  globalThis.localStorage = storage;
+  try {
+    for (const [edit, expected] of [
+      [{}, undefined],
+      [{ description: "" }, ""],
+      [{ description: "Updated description" }, "Updated description"],
+      [{ description: "  Updated\ndescription\u0000  " }, "Updated description"],
+    ]) {
+      let body;
+      globalThis.fetch = async (input, init) => {
+        assert.ok(String(input).endsWith("/web/deploy-agentkit"));
+        body = JSON.parse(init.body);
+        return new Response('data: {"done":true,"success":true,"agentName":"expert","runtimeId":"runtime-1"}\n\n', { headers: { "Content-Type": "text/event-stream" } });
+      };
+      await deployAgentkitProject("expert", [], { region: "cn-shanghai", projectName: "default" }, {
+        runtimeId: "runtime-1", editMode: "source-preserving", baseRuntimeVersion: 3, ...edit,
+      });
+      assert.equal(Object.hasOwn(body, "description"), Object.hasOwn(edit, "description"));
+      assert.equal(body.description, expected);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(originals)) globalThis[key] = value;
+  }
+});
+
 test("classifies only explicitly ambiguous deployment outcomes as unconfirmed", () => {
   const transport = new DeploymentStatusUnconfirmedError({
     taskId: "task-1",

@@ -1230,7 +1230,8 @@
       "skillspaceShort": "AgentKit",
       "skillhub": "Volcengine Find Skill marketplace",
       "skillhubShort": "Find Skill"
-    }
+    },
+    "edit": "Edit {{name}} files"
   },
   "composer": {
     "tasks": {

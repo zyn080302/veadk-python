@@ -1,0 +1,47 @@
+.instruction-extension-rail {
+  flex: 0 1 auto;
+  max-height: 45vh;
+  overflow: auto;
+  padding: 12px 0;
+  font-size: 13px;
+}
+
+.instruction-extension-rail > summary {
+  cursor: pointer;
+}
+
+.instruction-extension {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.instruction-extension-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.instruction-extension p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.instruction-extension .cw-markdown-editor:not(.mdxeditor-popup-container),
+.instruction-extension .cw-markdown-fallback {
+  min-height: 190px;
+  max-height: 260px;
+}
+
+.instruction-extension .cw-markdown-toolbar {
+  flex-wrap: wrap;
+  height: auto;
+}
+
+.instruction-extension .cw-markdown-content {
+  min-height: 104px;
+  max-height: 170px;
+  padding: 12px;
+}

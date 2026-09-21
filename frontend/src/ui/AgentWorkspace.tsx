@@ -82,6 +82,7 @@ import { Markdown } from "./Markdown";
 import { ResourceDetailLayout } from "./ResourceCollection";
 import { StudioConfirmDialog } from "./StudioConfirmDialog";
 import { TextShimmer } from "./text-shimmer/TextShimmer";
+import { InstructionExtensionEditor } from "./InstructionExtensionEditor";
 import "./AgentWorkspace.css";
 
 type WorkspaceView = "library" | "evaluation";
@@ -1130,7 +1131,7 @@ export function AgentWorkspace({
   } | null>(null);
   const [updateCapabilityLoading, setUpdateCapabilityLoading] = useState(false);
   const [updateCapabilityError, setUpdateCapabilityError] = useState("");
-  const [detailAgentInfo, setDetailAgentInfo] = useState<AgentInfo | null>(null);
+  const [detailAgentInfoState, setDetailAgentInfo] = useState<{ key: string; info: AgentInfo | null } | null>(null);
   const [detailAgentInfoResolved, setDetailAgentInfoResolved] = useState(false);
   const [detailAgentInfoError, setDetailAgentInfoError] = useState("");
   const [detailAgentInfoUnsupported, setDetailAgentInfoUnsupported] = useState(false);
@@ -1277,6 +1278,12 @@ export function AgentWorkspace({
   const selectedAgentUpdateDraft = selectedAgent?.runtimeId
     ? updateDraftByRuntimeId.get(selectedAgent.runtimeId)
     : undefined;
+  const detailAgentInfoKey = JSON.stringify([
+    selectedAgent?.runtimeId ?? "", selectedAgent?.region ?? "cn-beijing",
+    selectedAgent?.runtimeApp ?? "", selectedAgent?.currentVersion ?? null,
+  ]);
+  const detailAgentInfo = detailAgentInfoState?.key === detailAgentInfoKey
+    ? detailAgentInfoState.info : null;
   const selectedAgentInfo = detailOnly
     ? detailAgentInfo
     : activeAgentId && agentInfoAgentId === activeAgentId
@@ -1688,7 +1695,7 @@ export function AgentWorkspace({
     const cached = runtimeId
       ? getCachedRuntimeAgentInfo(runtimeId, region, knownApp)
       : null;
-    setDetailAgentInfo(cached);
+    setDetailAgentInfo({ key: detailAgentInfoKey, info: cached });
     setDetailAgentInfoError("");
     setDetailAgentInfoUnsupported(false);
     setDetailAgentInfoResolved(Boolean(cached) || !detailOnly || !runtimeId);
@@ -1700,10 +1707,10 @@ export function AgentWorkspace({
       { force: true },
     )
       .then((info) => {
-        if (!cancelled) setDetailAgentInfo(info);
+        if (!cancelled) setDetailAgentInfo({ key: detailAgentInfoKey, info });
       })
       .catch((error: unknown) => {
-        if (!cancelled && !cached) setDetailAgentInfo(null);
+        if (!cancelled && !cached) setDetailAgentInfo({ key: detailAgentInfoKey, info: null });
         if (!cancelled) {
           setDetailAgentInfoUnsupported(
             error instanceof RuntimeProbeError && error.unsupported,
@@ -1719,6 +1726,7 @@ export function AgentWorkspace({
     };
   }, [
     detailOnly,
+    detailAgentInfoKey,
     detailReloadToken,
     selectedAgent?.currentVersion,
     selectedAgent?.region,
@@ -3030,6 +3038,20 @@ export function AgentWorkspace({
                       </div>
                     </dl>
                   </section>
+                  {canUpdate && selectedAgent?.runtimeId && selectedAgent.region &&
+                    (!focusedAgentId || selectedAgent.id === focusedAgentId) &&
+                    selectedAgentAppName && selectedAgentInfo?.instructionExtension === true && (
+                    <section className="aw-settings-card">
+                      <div className="aw-section-head">
+                        <h3>{t("instructionExtension.title", { ns: "workspaceTools" })}</h3>
+                      </div>
+                      <InstructionExtensionEditor
+                        key={JSON.stringify([selectedAgent.runtimeId, selectedAgent.region, selectedAgentAppName])}
+                        appName={selectedAgentAppName}
+                        target={{ runtimeId: selectedAgent.runtimeId, region: selectedAgent.region }}
+                      />
+                    </section>
+                  )}
                   <section className="aw-canvas-card">
                     <div className="aw-card-head">
                       <strong>{t("agentWorkspace.executionFlow")}</strong>

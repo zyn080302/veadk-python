@@ -1309,5 +1309,19 @@
       "NotActivated": "尚未开通",
       "Unknown": "未获取到模型状态"
     }
+  },
+  "sourcePreserving": {
+    "back": "返回",
+    "title": "更新 {{name}}",
+    "description": "编辑 Skill 和 MCP，发布到当前智能体。附加提示词可在对话页的智能体信息中编辑。",
+    "assets": "工具与技能",
+    "skills": "Skill",
+    "publish": "更新并发布",
+    "publishing": "正在发布…",
+    "complete": "更新发布完成",
+    "failed": "更新发布失败",
+    "reloadRequired": "发布快照不完整，请返回智能体详情重新打开更新页面。",
+    "mcpConflict": "MCP 名称或地址重复，请检查配置。",
+    "invalidMcp": "请输入有效的 HTTP(S) MCP 地址，认证信息请使用独立的认证字段。"
   }
 }

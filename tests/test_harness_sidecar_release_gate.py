@@ -65,6 +65,19 @@ def test_sidecar_release_gate_runs_backend_and_frontend_in_parallel() -> None:
         in backend_run
     )
     assert "tests/frontend/server/test_runtime_iam.py" in backend_run
+    assert "tests/frontend/server/test_deployment_resources.py" in backend_run
+    assert "tests/cli/test_studio_sdk_config.py" in backend_run
+    assert (
+        "test_source_preserving_overlay_reopen_keeps_mcp_and_private_source"
+        in backend_run
+    )
+    assert (
+        "test_source_overlay_metadata_is_public_and_never_a_builder_draft"
+        in backend_run
+    )
+    assert "test_source_preserving_runtime_environment_activates_packaged_overlay" in (
+        backend_run
+    )
     assert "test_new_deployment_only_updates_non_default_instance_range" in backend_run
     assert (
         "test_sidecar_update_resolves_or_explicitly_reuses_stored_mcp_credentials"

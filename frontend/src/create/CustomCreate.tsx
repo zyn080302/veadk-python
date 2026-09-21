@@ -191,6 +191,7 @@ import {
 } from "./customModelCredentials";
 import { isValidModelApiBaseUrl } from "./modelApiBase";
 import "./CustomCreate.css";
+import { SourcePreservingUpdate } from "./SourcePreservingUpdate";
 
 const MarkdownPromptEditor = lazy(() => import("./MarkdownPromptEditor"));
 
@@ -3936,7 +3937,7 @@ function WorkspaceLifecycleFooter({
 /* ================================================================ *
  * Main component
  * ================================================================ */
-interface CustomCreateProps extends CreateModeProps {
+export interface CustomCreateProps extends CreateModeProps {
   /** Pre-fill the wizard (used when importing an agent-structure YAML). */
   initialDraft?: AgentDraft;
   /** Global UI feature gates loaded from the backend. */
@@ -3975,7 +3976,15 @@ interface CustomCreateProps extends CreateModeProps {
   onDiscard?: () => void;
 }
 
-export function CustomCreate({
+export function CustomCreate(props: CustomCreateProps) {
+  if (props.deploymentTarget?.editMode === "source-preserving") {
+    if (!props.initialDraft) return <p role="alert">{createT("sourcePreserving.reloadRequired")}</p>;
+    return <SourcePreservingUpdate key={props.deploymentTarget.runtimeId} {...props} McpEditor={McpToolEditor} />;
+  }
+  return <StandardCustomCreate {...props} />;
+}
+
+function StandardCustomCreate({
   onBack,
   onCreate,
   onAgentAdded,

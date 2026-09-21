@@ -1309,5 +1309,19 @@
       "NotActivated": "Not activated",
       "Unknown": "Model status unavailable"
     }
+  },
+  "sourcePreserving": {
+    "back": "Back",
+    "title": "Update {{name}}",
+    "description": "Edit Skills and MCP, then publish to this agent. Additional instructions can be edited in Agent information on the conversation page.",
+    "assets": "Tools and skills",
+    "skills": "Skills",
+    "publish": "Update and publish",
+    "publishing": "Publishing…",
+    "complete": "Update published",
+    "failed": "Update failed",
+    "reloadRequired": "The release snapshot is incomplete. Reopen this update from Agent details.",
+    "mcpConflict": "MCP names or URLs are duplicated. Check the configuration.",
+    "invalidMcp": "Enter a valid HTTP(S) MCP URL and use the separate authentication field for credentials."
   }
 }

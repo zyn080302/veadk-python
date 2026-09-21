@@ -7317,20 +7317,17 @@ export default function App() {
                   );
                   const apiKeyId =
                     hydratedDraft.deployment?.modelApiKeyId?.trim();
-                  let arkModelIds = new Set<string>();
-                  try {
-                    const response = await listModelOptions({ apiKeyId });
-                    arkModelIds = new Set(
-                      response.models.map((model) => model.id.trim()),
-                    );
-                  } catch {
-                    // If the ModelArk catalog is unavailable, no Runtime model
-                    // can be verified as ModelArk; custom is the safe fallback.
+                  let classifiedDraft = hydratedDraft;
+                  if (capability.editMode !== "source-preserving") {
+                    let arkModelIds = new Set<string>();
+                    try {
+                      const response = await listModelOptions({ apiKeyId });
+                      arkModelIds = new Set(response.models.map((model) => model.id.trim()));
+                    } catch {
+                      // An unavailable catalog leaves regenerated models classified as custom.
+                    }
+                    classifiedDraft = classifyRuntimeModelSources(hydratedDraft, arkModelIds);
                   }
-                  const classifiedDraft = classifyRuntimeModelSources(
-                    hydratedDraft,
-                    arkModelIds,
-                  );
                   let editorDraft = classifiedDraft;
                   if (configuredMcpEnvKeys(classifiedDraft).length > 0) {
                     try {

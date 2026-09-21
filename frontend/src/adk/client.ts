@@ -1502,6 +1502,8 @@ export interface FrontendInvocation {
 
 /** Introspected metadata for an agent app, served locally or by Agent Server. */
 export interface AgentInfo {
+  /** Operator-managed core; only the separate additive instruction is editable. */
+  instructionExtension?: boolean;
   /** Real ADK app id used in runtime proxy paths; display names may differ. */
   appName?: string;
   name: string;
@@ -1556,7 +1558,71 @@ async function fetchAgentInfo(
     searchSources: info.searchSources ?? [],
     graph: info.graph,
     draft: info.draft,
+    instructionExtension: info.instructionExtension === true,
   };
+}
+
+export interface InstructionExtension {
+  instruction: string;
+  revision: number;
+  core_locked: true;
+  core_position: "first";
+  storage?: "runtime_env" | "sqlite" | "memory";
+  publication?: "ready" | "pending" | "unknown";
+}
+
+export class InstructionExtensionError extends Error {
+  constructor(public readonly status: number) {
+    super(`Instruction extension request failed (${status})`);
+  }
+}
+
+export interface InstructionExtensionTarget {
+  runtimeId: string;
+  region: string;
+}
+
+export async function instructionExtension(
+  appName: string,
+  edit?: Pick<InstructionExtension, "instruction" | "revision">,
+  signal?: AbortSignal,
+  target?: InstructionExtensionTarget,
+): Promise<InstructionExtension> {
+  // Runtime detail pages do not register a chat connection. Never fall back to
+  // a local or previously connected Agent when an explicit target is supplied.
+  if (target && (!target.runtimeId.trim() || !target.region.trim() || !appName.trim())) {
+    throw new InstructionExtensionError(400);
+  }
+  const { app, ep } = target
+    ? { app: appName, ep: { runtimeId: target.runtimeId, region: target.region } }
+    : resolve(appName);
+  const runtimePublication = Boolean(ep.runtimeId);
+  const path = runtimePublication
+    ? `/web/runtime-instruction/${encodeURIComponent(ep.runtimeId!)}/${encodeURIComponent(app)}?region=${encodeURIComponent(ep.region || "cn-beijing")}`
+    : `/web/aiops-extension/${encodeURIComponent(app)}`;
+  const res = await apiFetch(path, {
+    method: edit ? "PUT" : "GET",
+    signal,
+    ...(edit ? {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: edit.instruction, revision: edit.revision }),
+    } : {}),
+  }, runtimePublication ? {} : ep);
+  if (!res.ok) throw new InstructionExtensionError(res.status);
+  const data: unknown = await res.json();
+  if (!data || typeof data !== "object" ||
+      !("instruction" in data) || typeof data.instruction !== "string" ||
+      !("revision" in data) || !Number.isSafeInteger(data.revision) || Number(data.revision) < 0 ||
+      !("core_locked" in data) || data.core_locked !== true ||
+      !("core_position" in data) || data.core_position !== "first") {
+    throw new InstructionExtensionError(502);
+  }
+  if (runtimePublication &&
+      (!("storage" in data) || data.storage !== "runtime_env" ||
+       !("publication" in data) || !["ready", "pending", "unknown"].includes(String(data.publication)))) {
+    throw new InstructionExtensionError(502);
+  }
+  return data as InstructionExtension;
 }
 
 export async function getAgentInfo(appName: string): Promise<AgentInfo> {
@@ -3678,7 +3744,9 @@ export async function deployAgentkitProject(
           minInstance: opts?.minInstance,
           maxInstance: opts?.maxInstance,
           createEvaluationSets: opts?.createEvaluationSets,
-          description: normalizeRuntimeDescription(opts?.description ?? ""),
+          ...(opts?.description !== undefined
+            ? { description: normalizeRuntimeDescription(opts.description) }
+            : {}),
           authentication: opts?.authentication,
           im: opts?.im,
           envs: opts?.envs,

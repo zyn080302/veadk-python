@@ -1230,7 +1230,8 @@
       "skillspaceShort": "AgentKit",
       "skillhub": "火山 Find Skill 技能广场",
       "skillhubShort": "Find Skill"
-    }
+    },
+    "edit": "编辑 {{name}} 文件"
   },
   "composer": {
     "tasks": {

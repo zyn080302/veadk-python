@@ -832,6 +832,10 @@ dependencies even when the current `package.json` already declares them
 
 ### Studio deployment resources
 
+Agent builds reuse a pipeline only when its name or selected ID matches exactly.
+A failed, incomplete, or ambiguous lookup stops deployment before pipeline creation;
+similarly named pipelines are never reused.
+
 `veadk studio deploy` configures the Studio function with 8 vCPU, 16 GB memory,
 and both minimum and maximum instance counts set to 1 on Volcengine and BytePlus
 These settings apply to new deployments and redeployments of an existing Studio
@@ -1549,3 +1553,10 @@ Tokens 使用带展开提示的轻量文字按钮，可通过悬浮、键盘聚�
 `usage` 事件仍保留兼容；已有数据库只增加 `run_turns.metrics` 列。回滚到旧代码时应
 使用新的短期数据库路径，因为旧版本按固定列数写入 `run_turns`。当前单实例云部署
 在实例替换后丢失短期记录的约定不变。
+
+
+### Protected additive instructions
+
+Operator-managed AIOps apps can advertise `instructionExtension: true` in `/web/agent-info/{app}`. The Runtime details page offers **Additional instructions** to managers without requiring a conversation. The conversation Agent information panel also offers the same Markdown editor. Details use an explicit Runtime ID and region, independent of registered chat connections; changing Runtime clears the previous capability, text and revision before editing is available. Cloud connections use GET/PUT `/web/runtime-instruction/{runtime_id}/{app_name}?region=...`; **Save and publish** stores `AIOPS_CUSTOMER_INSTRUCTION` in Runtime configuration while preserving other environment values. This publishes a new configuration version without rebuilding the image. Pending or uncertain publication disables duplicate saves; reload confirms Ready. Local connections keep GET/PUT `/web/aiops-extension/{app}` and the existing SQLite storage. Only `instruction` and `revision` are sent; a 409 retains unsaved text until reload. The UI never receives the operator's core prompt. Runtime owners/admins retain write permission; shared conversation users cannot use configuration routes. See [AIOps configuration](../docs/aiops.md) for precedence and publication semantics.
+
+Regression coverage: `tests/instructionExtension.test.mjs` (DOM events/state, IME, duplicate save, conflicts, retries and stale response), `tests/instructionExtensionClient.test.mjs` (real client routing/schema), `tests/instructionWorkspace.test.tsx` (real detail page and client, permission/capability gating, save/conflict/reload, same-app Runtime switching without a conversation), and Python Runtime proxy PUT/retry coverage. The detail-page suite runs through `npm test`. The Markdown widget itself is replaced by a textarea only in container unit tests; browser checks must cover the real widget.
