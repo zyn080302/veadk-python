@@ -646,7 +646,13 @@ def _build_agentkit_config(
     }
 
 
-def _harness_request(url: str, path: str, key: str | None, body: dict) -> dict:
+def _harness_request(
+    url: str,
+    path: str,
+    key: str | None,
+    body: dict,
+    extra_headers: dict | None = None,
+) -> dict:
     """POST ``body`` to ``url + path`` with optional Bearer auth; return JSON."""
     import os
 
@@ -655,6 +661,8 @@ def _harness_request(url: str, path: str, key: str | None, body: dict) -> dict:
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    if extra_headers:
+        headers.update(extra_headers)
 
     # Tool/skill-driven agent runs can take minutes; allow a generous, tunable
     # client timeout (HARNESS_TIMEOUT seconds, default 600).
@@ -930,6 +938,12 @@ def deploy(
     default=".",
     help="Dir containing harness.json (default: current dir).",
 )
+@click.option(
+    "--harness-proxy-url",
+    "harness_proxy_url",
+    default=None,
+    help="OpenAI-compatible Harness proxy URL for transparent model-call enhancement.",
+)
 @_override_options
 def invoke(
     message_arg,
@@ -941,6 +955,7 @@ def invoke(
     url,
     key,
     path,
+    harness_proxy_url,
     **overrides,
 ) -> None:
     """Invoke a deployed harness and print its output.
@@ -978,5 +993,13 @@ def invoke(
     if override:
         body["harness"] = override
 
-    result = _harness_request(url, "/harness/invoke", key, body)
+    extra_headers = {}
+    if harness_proxy_url:
+        extra_headers["X-Harness-Proxy-URL"] = harness_proxy_url
+        extra_headers["X-Harness-Proxy-Mode"] = "transparent"
+        extra_headers["X-Harness-Session-ID"] = session_id
+        extra_headers["X-Harness-User-ID"] = user_id
+        extra_headers["X-Harness-Profile"] = "research"
+
+    result = _harness_request(url, "/harness/invoke", key, body, extra_headers=extra_headers)
     click.echo(result.get("output", json.dumps(result, ensure_ascii=False)))

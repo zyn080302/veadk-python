@@ -399,6 +399,18 @@ class HarnessApp:
             request: InvokeHarnessRequest,
             http_request: Request,
         ) -> InvokeHarnessResponse:
+            proxy_model_api_base = _harness_proxy_model_api_base(http_request)
+            base_agent = (
+                _clone_agent_with_proxy_model_base(self.agent, proxy_model_api_base)
+                if proxy_model_api_base
+                else self.agent
+            )
+            if proxy_model_api_base:
+                logger.info(
+                    "Applying per-request Harness proxy model_api_base: "
+                    f"{proxy_model_api_base}"
+                )
+
             effective_harness = (
                 self._effective_harness_config(
                     request.harness,
@@ -444,12 +456,13 @@ class HarnessApp:
                         + ", ".join(self._plugin_names(harness_plugins))
                     )
                 plugins = self._plugins_for_run(harness_plugins, usage_plugin)
-                has_registry = has_a2a_registry_config(self.agent)
+                has_registry = has_a2a_registry_config(base_agent)
                 needs_scoped_runner = (
                     has_registry
                     or bool(body_plugins)
                     or bool(header_plugins)
                     or usage_plugin is not None
+                    or bool(proxy_model_api_base)
                 )
                 if effective_harness is not None:
                     logger.info(
@@ -463,7 +476,7 @@ class HarnessApp:
                         prefix="harness_invoke_"
                     ) as work_dir:
                         agent = spawn_harness_run_agent(
-                            self.agent,
+                            base_agent,
                             request.prompt,
                             effective_harness,
                             download_dir=Path(work_dir),
@@ -486,14 +499,14 @@ class HarnessApp:
                 elif needs_scoped_runner:
                     if has_registry:
                         run_agent = spawn_harness_run_agent(
-                            self.agent,
+                            base_agent,
                             request.prompt,
                             app_name=self.harness_name,
                             registry_tip_token=tip_token,
                             registry_authorization=auth_header,
                         )
                     else:
-                        run_agent = self.agent
+                        run_agent = base_agent
                     runner = Runner(
                         agent=run_agent,
                         short_term_memory=self.short_term_memory,
@@ -770,6 +783,48 @@ class HarnessApp:
         import uvicorn
 
         uvicorn.run(self.app, host=host, port=port)
+
+
+def _harness_proxy_model_api_base(request: Request) -> str:
+    proxy_url = request.headers.get("x-harness-proxy-url", "").strip()
+    if not proxy_url:
+        return ""
+    base = proxy_url.rstrip("/")
+    if base.endswith("/v1") or base.endswith("/api/v3"):
+        return base
+    return f"{base}/v1"
+
+
+def _clone_agent_with_proxy_model_base(agent: Agent, model_api_base: str) -> Agent:
+    cloned = agent.clone(update={"model_api_base": model_api_base})
+    model = getattr(cloned, "model", None)
+    if model is None:
+        return cloned
+
+    additional_args = dict(getattr(model, "_additional_args", {}) or {})
+    additional_args["api_base"] = model_api_base
+    if getattr(cloned, "model_api_key", ""):
+        additional_args["api_key"] = cloned.model_api_key
+
+    model_name = getattr(model, "model", None)
+    if model_name:
+        try:
+            cloned.model = model.__class__(model=model_name, **additional_args)
+            return cloned
+        except Exception as exc:
+            logger.warning(f"Failed to rebuild model with Harness proxy: {exc}")
+
+    if hasattr(model, "model_copy"):
+        copied = model.model_copy(
+            update={
+                "api_base": model_api_base,
+                "api_key": getattr(cloned, "model_api_key", ""),
+            }
+        )
+        if hasattr(copied, "_additional_args"):
+            copied._additional_args = additional_args
+        cloned.model = copied
+    return cloned
 
 
 harness_app = HarnessApp(

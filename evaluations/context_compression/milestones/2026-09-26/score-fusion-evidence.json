@@ -1,0 +1,28 @@
+{
+  "candidate": "sdk-score-fusion-20260926",
+  "base_commit": "0b3058cc687d6479e58ea7fa133030fcaea1ff8a",
+  "frozen_sha256": "0be384888de927d9c28afd9eb81ace3dbc94262cb1db8b349c116722bc084551",
+  "gate_sha256": "73466545abf184afc4e8ec05df8c28720fd972b5b440a78ba32940b0ddb32a81",
+  "junit_sha256": "0074e7ecc4f1ebae56f420c0b9771f0fc9f469bd368eab714589641d0703e6c6",
+  "passed": 1102,
+  "skipped": 5,
+  "qasper20": {
+    "f1": 47.01298,
+    "qa_input_reduction_pct": 66.16363,
+    "evidence": "complete-request equivalence replay; reused evaluated answers"
+  },
+  "continuous20": {
+    "f1": 46.28033,
+    "qa_input_reduction_pct": 55.70069,
+    "sessions": 9,
+    "plan_sha256": "83ce1e7ff08eb5eb9decfce294aac5c31c8da345bdd34bb83eafd2e63c28aaa1",
+    "result_sha256": "5dd8abee61aef41b250efcad5bda0ee437ce8c33a3d37917f55c489da29f5eb8"
+  },
+  "longmemeval20": {
+    "accuracy_pct": 85,
+    "qa_input_reduction_pct": 87.00229,
+    "plan_sha256": "8adbb01ceab38a4314699d3c9c6cc1f38b507190dcca9f460ac3358c2d57c5f9",
+    "result_sha256": "f8db80d8fae41cdffa8f5a06e59ed36bb5892f907f52b8a6a8b0fb94b1e8f55f"
+  },
+  "published": false
+}

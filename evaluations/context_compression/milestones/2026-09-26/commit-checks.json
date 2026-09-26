@@ -1,0 +1,30 @@
+{
+  "scope": "Devbox offline SDK checks; no new model calls",
+  "score_fusion": {
+    "exit_code": 0,
+    "tests": 1107,
+    "passed": 1102,
+    "skipped": 5,
+    "failures": [],
+    "source_unchanged": true
+  },
+  "reader_capabilities": {
+    "exit_code": 0,
+    "tests": 1131,
+    "passed": 1126,
+    "skipped": 5,
+    "failures": [],
+    "source_unchanged": true
+  },
+  "precommit": {
+    "completed": false,
+    "install_exit": null,
+    "error_type": "TimeoutExpired"
+  },
+  "local_static": {
+    "ast_parsed": 133,
+    "secret_pattern_findings": [],
+    "scan_scope": "explicitly staged source and configuration; matched values never emitted"
+  },
+  "automatic_fixes_applied_to_committed_source": false
+}
