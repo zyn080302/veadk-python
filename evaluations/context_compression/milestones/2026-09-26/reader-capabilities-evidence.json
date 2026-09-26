@@ -1,0 +1,33 @@
+{
+  "candidate": "sdk-reader-capabilities-20260926",
+  "parent_candidate": "sdk-score-fusion-20260926",
+  "frozen_sha256": "e53badcee0824eb578a8a15e6292f1531a6d908e8be090ea5c80e75d490cd25e",
+  "gate_sha256": "14f20a5f366055762aece1e3b00bba9ec6be47a8cf0111d44b4a03a7e308e915",
+  "junit_sha256": "7402be2a58e44af57a34d78a314619347a57d94d21a8a75fb8a75d1aa6670ad2",
+  "passed": 1126,
+  "skipped": 5,
+  "new_regressions": 24,
+  "old_mechanism_failures": 22,
+  "qasper20": {
+    "f1": 50.98247110032825,
+    "qa_input_tokens": 43555,
+    "qa_input_reduction_pct": 66.34444495958707,
+    "answers": 20,
+    "failures": 0,
+    "qa_calls": 20,
+    "reader_calls": 0,
+    "new_embedding_calls": 0,
+    "new_summary_calls": 0,
+    "historical_query_embedding_calls": 18,
+    "historical_query_embedding_input_tokens": 1971,
+    "source_index_cost": "additional; reused previously built index",
+    "plan_sha256": "eaa65cb0afbca8a4c52187df181b51a3eb1764fedefebcdaffc3c3cf602f855c",
+    "result_sha256": "0755b1ee4fe387434b4ca8034cddb85d2ccacf4d47210b125c81aa937bccc08a"
+  },
+  "continuous20": "not evaluated for this candidate",
+  "longmemeval20": "not evaluated for this candidate",
+  "model": "deepseek-v4-1-flash-260910",
+  "thinking": "disabled",
+  "test_account": "5663",
+  "published": false
+}

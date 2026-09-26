@@ -52,9 +52,25 @@ READ_CONTEXT_TOOL = "veadk_read_context"
 
 
 class _ContextReader(FunctionTool):
-    def __init__(self, function, identity):
+    def __init__(self, function, identity, references=None):
         super().__init__(function)
         self.context_identity = identity
+        # Freeze capabilities, not original content, into the declaration.
+        operations = ["read", "search"]
+        sources = None if references is None else tuple(references.values())
+        if sources is None or any(
+            isinstance(s, dict)
+            and isinstance(s.get("record_format"), str)
+            and s["record_format"] in {"numbered_paragraphs", "json_array_strings"}
+            for s in sources
+        ):
+            operations.append("count_unique")
+        if sources is None or any(
+            isinstance(s, dict) and s.get("prometheus_vector") is True
+            for s in sources
+        ):
+            operations.extend(["count", "tail", "max", "sum"])
+        self.context_operations = tuple(operations)
 
     def _get_declaration(self):
         # The model must choose an operation. Keep the Python callable's default
@@ -63,10 +79,19 @@ class _ContextReader(FunctionTool):
         if declaration is None:
             return declaration
         declaration = declaration.model_copy(deep=True)
-        operations = ["read", "search", "count_unique", "count", "tail", "max", "sum"]
+        operations = list(self.context_operations)
+        declaration.description = (
+            "Retrieve omitted original evidence when retained excerpts are insufficient. "
+            "Observe remaining_calls; never infer missing facts."
+        )
+        if "count_unique" in operations:
+            declaration.description += " count_unique requires a source with declared records."
+        if "count" in operations:
+            declaration.description += " count/tail/max/sum require a source with declared vectors."
         descriptions = {
-            "operation": "Explicit choice; statistics require a declared source format.",
-            "query": "search: keywords; read: exact case-sensitive text, or empty to page from offset. Max 256 characters.",
+            "operation": "Choose explicitly: read exact text or search passages.",
+            "reference": "Reference from the compressed preview.",
+            "query": "search: words or a short question; read: exact case-sensitive text, or empty to page from offset. Max 256 characters.",
         }
         if declaration.parameters is not None:
             parameters = declaration.parameters
@@ -215,7 +240,9 @@ def compact_tool_results(
         request, scope, config
     ):
         record_format = metadata.get("context_compression_record_format")
-        if record_format in {"numbered_paragraphs", "json_array_strings"}:
+        if isinstance(record_format, str) and record_format in {
+            "numbered_paragraphs", "json_array_strings"
+        }:
             source["record_format"] = record_format
         exact_overview = None
         if metadata.get("prometheus_vector_queries") is True:
@@ -568,7 +595,7 @@ def _attach_reader(request, scope, config, references):
             return result
         return {"error": "context_reference_expired"}
 
-    tool = _ContextReader(veadk_read_context, identity)
+    tool = _ContextReader(veadk_read_context, identity, references)
     if (
         scope.retrieval_calls >= config.max_retrieval_calls
         or scope.retrieval_input_exhausted

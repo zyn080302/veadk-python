@@ -2,7 +2,15 @@
 
 用户已暂停进一步优化。本目录保存《最新开源压缩对比报告-2026-09-26.md》的有效代码与成绩对应关系，不包含后续实验候选。
 
-## 当前提交：统一三类版本
+## 当前提交：单轮最佳版本
+
+候选为 `sdk-reader-capabilities-20260926`，在统一版 commit `1568059edd301c02ee9e33a9223c2e4dd2757cc9` 上仅改动 `veadk/context/tool_results.py`、新增 `tests/context/test_reader_capabilities.py` 与 `tests/run_reader_capabilities_gate.py`。普通文本来源只向模型声明实际支持的 read/search 能力；原文保存和执行权限保持不变。
+
+Qasper 原 20 题：**F1 50.98，累计 QA 输入 43,555 token，减少 66.34%**；20 题完成，0 失败、0 自主回查、0 新摘要／embedding。复用索引及 18 条查询向量，历史查询成本 1,971 输入 token，来源建索引成本另计。完整 SDK 门禁 **1126 passed / 5 skipped**。此独立版本尚未评测另外两类场景，不能套用父提交的多轮与长历史成绩。
+
+完整 Headroom 同题 F1 为 51.67、QA 输入 146,947 token；本版本质量低 0.69，输入少 70.36%。仅是开发题单均值，不宣称稳定超越。源码映射见 [reader-capabilities-source-sha256.json](reader-capabilities-source-sha256.json)，真实 QA 计划、结果和冻结哈希见 [reader-capabilities-evidence.json](reader-capabilities-evidence.json)。
+
+## 统一三类版本（父提交）
 
 候选为 `sdk-score-fusion-20260926`，保留评测时的 SDK 源码、回归测试与配置。Git 基线为 `0b3058cc687d6479e58ea7fa133030fcaea1ff8a`；已获取上游更新，但归档提交不 rebase 到新上游，也不自动格式化已评测源码，以免改变成绩对应的代码。
 
