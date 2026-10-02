@@ -1,0 +1,448 @@
+.my-agents-header {
+  display: flex;
+  align-items: center;
+}
+
+.my-agent-create-secondary {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 13px;
+  border: 1px solid var(--purple-500);
+  border-radius: 8px;
+  background-color: var(--purple-500);
+  background-image: linear-gradient(
+    105deg,
+    var(--blue-500) 0%,
+    var(--purple-500) 36%,
+    color-mix(in srgb, var(--purple-400) 94%, var(--purple-500)) 60%,
+    var(--blue-500) 100%
+  );
+  background-position: 32% 50%;
+  background-size: 160% 100%;
+  color: var(--white);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    background-position 180ms ease,
+    color 160ms ease;
+}
+
+.my-agent-create-secondary:hover:not(:disabled) {
+  border-color: var(--purple-400);
+  background-position: 68% 50%;
+}
+
+.my-agent-create-secondary:active:not(:disabled) {
+  border-color: var(--purple-500);
+  background-color: var(--purple-500);
+  background-image: linear-gradient(
+    105deg,
+    var(--blue-500) 0%,
+    var(--purple-500) 46%,
+    var(--blue-500) 100%
+  );
+  background-position: 32% 50%;
+  background-size: 160% 100%;
+}
+
+.my-agent-create-secondary:disabled {
+  border-color: hsl(var(--border));
+  background: hsl(var(--secondary));
+  background-image: none;
+  color: hsl(var(--muted-foreground));
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.my-agent-inline-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid hsl(var(--destructive) / 0.2);
+  border-radius: 8px;
+  background: hsl(var(--destructive) / 0.05);
+  color: hsl(var(--destructive));
+  font-size: 12px;
+}
+
+.my-agent-inline-error span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.my-agent-inline-error button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+
+.my-agent-create-secondary svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.my-agent-draft-badge {
+  min-height: 22px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: #dd6800;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.my-agent-deploying-badge {
+  min-height: 22px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid hsl(43 90% 48% / 0.3);
+  border-radius: 999px;
+  background: hsl(45 96% 52% / 0.14);
+  color: hsl(38 78% 36%);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.my-agent-session-id {
+  display: block;
+  margin-top: 1px;
+  overflow: hidden;
+  color: #7a7880;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.my-agent-status-label {
+  display: inline-flex;
+  min-height: 22px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1;
+}
+
+.my-agent-status-label[data-ready] {
+  border-color: hsl(142 35% 40% / 0.22);
+  background: hsl(142 42% 94%);
+  color: hsl(142 55% 28%);
+}
+
+.my-agent-compatibility-trigger {
+  flex: 0 0 auto;
+  display: inline-flex;
+  position: relative;
+  z-index: 2;
+  border-radius: 999px;
+  outline: none;
+}
+
+.my-agent-compatibility-trigger:focus-visible {
+  box-shadow: 0 0 0 2px hsl(var(--ring));
+}
+
+.my-agent-compatibility-status {
+  gap: 5px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.my-agent-compatibility-tooltip {
+  max-height: min(240px, calc(100vh - 24px));
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.my-agent-compatibility-spinner {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  box-sizing: border-box;
+  border: 1.25px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: loading-gap-spin 0.72s linear infinite;
+}
+
+.my-agent-card.is-connecting .resource-card__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.my-agent-created-at,
+.my-agent-region,
+.my-agent-expiry {
+  width: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #7a7880;
+}
+
+.my-agent-expiry.is-expiring dd {
+  color: hsl(38 78% 36%);
+  font-weight: 550;
+}
+
+.my-agent-region dd {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-card__action.my-agent-use.is-connected,
+.resource-card__action.my-agent-use.is-connected:disabled {
+  background: transparent;
+  color: hsl(142 62% 30%);
+  opacity: 1;
+}
+
+.my-agent-use-spinner {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 11px;
+  box-sizing: border-box;
+  border: 1.25px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: loading-gap-spin 0.7s linear infinite;
+}
+
+.my-agent-loading-mark {
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: loading-gap-spin 0.72s linear infinite;
+}
+
+.my-agent-loading-mark {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.my-agent-load-more,
+.my-agent-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+}
+
+.my-agent-load-more {
+  min-height: 54px;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.my-agent-empty-message {
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+}
+
+.my-agent-sandbox-empty-title {
+  max-width: none;
+  white-space: nowrap;
+  text-wrap: nowrap;
+}
+
+.my-agent-empty {
+  min-height: 220px;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.my-agent-empty p,
+.my-agent-empty span {
+  margin: 0;
+}
+
+.my-agent-empty p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 400;
+}
+
+.my-agent-empty button {
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 7px;
+  background: hsl(var(--panel));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.my-agent-create-secondary:focus-visible,
+.my-agent-empty button:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.65);
+  outline-offset: -2px;
+}
+
+.my-agent-create-secondary:focus-visible {
+  outline-color: var(--color-ring-discovery-solid);
+}
+
+@media (max-width: 720px) {
+  .my-agent-search {
+    flex: 1 0 100%;
+    width: 100%;
+  }
+
+  .my-agent-create-secondary {
+    margin-left: auto;
+  }
+
+}
+
+@media (max-width: 560px) {
+  .my-agent-create-secondary {
+    grid-row: auto;
+  }
+}
+
+@media (min-width: 721px) and (max-width: 1180px) {
+  .my-agent-search {
+    flex: 1 1 248px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .my-agent-loading-mark,
+  .my-agent-compatibility-spinner {
+    animation: none;
+  }
+
+  .my-agent-filter-select,
+  .my-agent-create-secondary {
+    transition: none;
+  }
+
+  .my-agent-use-spinner {
+    animation: none;
+  }
+
+}
+
+.my-agent-wake-note {
+  margin: 8px 0 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.my-agent-wake-note[role="alert"] {
+  position: relative;
+  z-index: 2;
+  min-width: 0;
+  min-height: 0;
+  max-height: 3em;
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: hsl(var(--destructive));
+}
+
+.my-agent-error-tooltip {
+  max-height: min(320px, 60vh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+/* Review controls belong to the footer so card content cannot overlap them */
+.my-agent-card.has-review {
+  height: auto;
+  min-height: 192px;
+}
+
+.my-agent-card.has-review .resource-card__content {
+  flex: 1 0 auto;
+}
+
+.my-agent-card.has-review .resource-card__footer {
+  height: auto;
+  flex-basis: auto;
+  align-items: flex-end;
+}
+
+.my-agent-card-footer {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+
+.agent-review-card-controls {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-review-card-status {
+  font-size: 12px;
+  line-height: 20px;
+  color: hsl(var(--muted-foreground));
+}
+
+.agent-review-card-action {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.my-agent-grid:has(.has-review) > .resource-create-card {
+  height: 100%;
+  min-height: 192px;
+}

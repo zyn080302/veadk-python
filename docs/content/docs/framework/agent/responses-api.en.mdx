@@ -1,6 +1,5 @@
 ---
-title: "Responses API Support"
-description: "Use the Volcengine Ark Responses API for efficient context management, multimodal understanding, and context caching."
+title: "Responses API"
 ---
 
 The Responses API is the latest API released by Volcengine Ark. It natively supports efficient context management and offers a more concise input/output format. Its tool-calling approach is more convenient — it preserves the ease of use of the Chat API while combining stronger agentic capabilities.
@@ -9,20 +8,20 @@ As foundation model technology keeps advancing, the Responses API provides a mor
 
 ## Tutorial
 
-Currently only the `veadk-python` version supports the Responses API, and it has a specific requirement on the `google-adk` version (`google-adk>=1.21.0`). Make sure your environment meets the requirement.
+Currently only the `veadk-python` version supports the Responses API, and it has a specific requirement on the `google-adk` version (`google-adk>=1.34.0`). Make sure your environment meets the requirement.
 
 <Tabs items={['pip', 'uv']}>
 <Tab value="pip">
 
 ```bash
-pip install "google-adk>=1.21.0"
+pip install "google-adk>=1.34.0"
 ```
 
 </Tab>
 <Tab value="uv">
 
 ```bash
-uv pip install "google-adk>=1.21.0"
+uv pip install "google-adk>=1.34.0"
 ```
 
 </Tab>
@@ -39,6 +38,17 @@ from veadk import Agent
 
 root_agent = Agent(
     enable_responses=True, # Enable the Responses API
+)
+```
+
+**Model fallbacks**
+
+The Responses API also accepts a `model_name` list for resilience. If a request fails, VeADK tries each subsequent model in order until one succeeds or all models fail.
+
+```python
+root_agent = Agent(
+    enable_responses=True,
+    model_name=["doubao-seed-1-8-251228", "deepseek-r1-250528"],
 )
 ```
 
@@ -351,7 +361,7 @@ Note: The `cached_content_token_count` of turn N is not necessarily equal to the
 
 ## Notes
 
-1. **Version requirement**: You must ensure `google-adk>=1.21.0`.
+1. **Version requirement**: You must ensure `google-adk>=1.34.0`.
 2. **Model support**: Make sure the model you use supports the Responses API (note: Doubao series models after version 0615 generally support it unless otherwise stated).
 3. **Caching mechanism**: When VeADK enables the Responses API with a Volcengine Ark model, context (session) caching is enabled by default. However, if `output_schema` is set on the Agent, caching is automatically disabled because that field conflicts with the caching mechanism.
 
@@ -361,10 +371,3 @@ Note: The `cached_content_token_count` of turn N is not necessarily equal to the
 2. [Volcengine Ark: Context Caching](https://www.volcengine.com/docs/82379/1602228?lang=zh#3e69e743)
 3. [Volcengine Ark: Cached Token Billing](https://www.volcengine.com/docs/82379/1544106?lang=zh)
 4. [Volcengine Ark: Multimodal Understanding](https://www.volcengine.com/docs/82379/1958521?lang=zh)
-
-## Next steps
-
-<Cards>
-  <Card title="Create an agent" href="/en/docs/framework/agent/create" description="Configure the model, tools, and extra parameters." />
-  <Card title="Short-term memory" href="/en/docs/framework/memory/short-term" description="Manage session context across multi-turn conversations." />
-</Cards>

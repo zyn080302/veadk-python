@@ -79,6 +79,17 @@
   line-height: 1.5;
   color: hsl(var(--muted-foreground));
 }
+.stk-card-status {
+  flex-shrink: 0;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: hsl(var(--secondary));
+  color: hsl(var(--muted-foreground));
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
 .stk-card-arrow {
   flex-shrink: 0;
   width: 18px;
@@ -91,6 +102,18 @@
 .stk-card:hover .stk-card-arrow {
   opacity: 1;
   transform: translateX(0);
+}
+.stk-card-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.stk-card-disabled:hover {
+  border-color: hsl(var(--border));
+  background: hsl(var(--card));
+  box-shadow: none;
+}
+.stk-card-disabled .stk-card-arrow {
+  display: none;
 }
 .stk-footer {
   margin-top: 18px;

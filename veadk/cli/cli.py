@@ -12,15 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Provider bootstrap must run before importing CLI command modules.
+# ruff: noqa: E402
+
+import os
+import sys
 
 import click
+
+
+def _bootstrap_serve_provider(argv: list[str] | None = None) -> None:
+    """Select the serve provider before command modules load configuration."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] not in {"frontend", "studio"}:
+        return
+
+    provider = (
+        os.environ.get("AGENTKIT_CLOUD_PROVIDER")
+        or os.environ.get("CLOUD_PROVIDER")
+        or "volcengine"
+    )
+    for index, argument in enumerate(args[1:]):
+        if argument.startswith("--provider="):
+            provider = argument.partition("=")[2]
+            break
+        if argument == "--provider" and index + 2 < len(args):
+            provider = args[index + 2]
+            break
+    provider = provider.strip().lower()
+    if provider == "volces":
+        provider = "volcengine"
+    if provider not in {"volcengine", "byteplus"}:
+        return
+    os.environ["AGENTKIT_CLOUD_PROVIDER"] = provider
+    os.environ["CLOUD_PROVIDER"] = provider
+
+
+_bootstrap_serve_provider()
 
 from veadk.cli.cli_agentkit import agentkit
 from veadk.cli.cli_clean import clean
 from veadk.cli.cli_create import create
 from veadk.cli.cli_deploy import deploy
 from veadk.cli.cli_eval import eval
-from veadk.cli.cli_frontend import frontend
+from veadk.cli.cli_frontend import frontend, studio
+from veadk.cli.cli_github_cicd_pipeline import github_cicd_pipeline
+from veadk.cli.cli_harness import harness
 from veadk.cli.cli_init import init
 from veadk.cli.cli_kb import kb
 from veadk.cli.cli_pipeline import pipeline
@@ -51,7 +88,9 @@ veadk.add_command(create)
 veadk.add_command(prompt)
 veadk.add_command(web)
 veadk.add_command(frontend)
+veadk.add_command(studio)
 veadk.add_command(pipeline)
+veadk.add_command(github_cicd_pipeline)
 veadk.add_command(eval)
 veadk.add_command(kb)
 veadk.add_command(uploadevalset)
@@ -59,6 +98,7 @@ veadk.add_command(update)
 veadk.add_command(clean)
 veadk.add_command(rl_group)
 veadk.add_command(agentkit)
+veadk.add_command(harness)
 
 if __name__ == "__main__":
     veadk()

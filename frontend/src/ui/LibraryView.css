@@ -1,0 +1,28 @@
+.library-panels,
+.library-panel {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.library-panel[hidden] {
+  display: none;
+}
+
+.library-view.is-detail .library-panels,
+.library-view.is-detail .library-panel {
+  min-height: 0;
+}
+
+.library-view.is-detail .library-panel > .skillcenter:not(.resource-collection),
+.library-view.is-detail .library-panel > .knowledge-library:not(.resource-collection) {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  background: transparent;
+}

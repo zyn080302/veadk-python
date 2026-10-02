@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import inspect
+import json
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -23,6 +25,30 @@ if TYPE_CHECKING:
     from veadk.runner import Runner
 
 logger = get_logger(__name__)
+
+
+def _patch_markdown_stream_merge() -> None:
+    """Disable lark_channel's "overlap dedup" streaming merge.
+
+    ``lark_channel``'s ``MarkdownStreamController.append`` merges each chunk via
+    ``merge_streaming_text``, which tries to auto-detect accumulated vs. delta
+    producers and drops the longest suffix-of-prev that is also a prefix-of-chunk.
+    Google ADK's LiteLlm streams *pure deltas*, so that heuristic corrupts output
+    whenever a delta's leading char equals the accumulated tail — e.g. "404"->"40",
+    "2100"->"210", "2026-07-23"->"2026-07-2". We patch it to a plain concatenation.
+    """
+    try:
+        from lark_channel.channel.outbound.streaming import markdown_stream
+
+        def _concat(prev: str, chunk: str) -> str:
+            return (prev or "") + (chunk or "")
+
+        markdown_stream.merge_streaming_text = _concat
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to patch markdown-stream merge: %s", exc)
+
+
+_patch_markdown_stream_merge()
 
 MessageHandler = Callable[["FeishuMessageContext"], Awaitable[str | None] | str | None]
 SessionIdFactory = Callable[[Any], str]
@@ -43,6 +69,207 @@ def _read_attr(obj: Any, *path: str) -> Any:
             return None
         current = getattr(current, key, None)
     return current
+
+
+def _call_in_fresh_event_loop(method: Callable[[], Any]) -> Any:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        result = method()
+        if inspect.isawaitable(result):
+            return loop.run_until_complete(result)
+        return result
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def _stringify_card_elements(elements: Any) -> str:
+    if elements is None:
+        return ""
+    if isinstance(elements, str):
+        return elements
+    if isinstance(elements, (list, tuple)):
+        parts: list[str] = []
+        for element in elements:
+            piece = _stringify_card_elements(element)
+            if piece:
+                parts.append(piece)
+        return "\n".join(parts)
+    if isinstance(elements, dict):
+        for key in ("content", "text", "plain_text", "value"):
+            value = elements.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+            if isinstance(value, dict):
+                nested = _stringify_card_elements(value)
+                if nested:
+                    return nested
+        nested_parts: list[str] = []
+        for key in ("elements", "columns", "actions", "fields"):
+            nested = _stringify_card_elements(elements.get(key))
+            if nested:
+                nested_parts.append(nested)
+        if nested_parts:
+            return "\n".join(nested_parts)
+        return ""
+    text = getattr(elements, "text", None) or getattr(elements, "content", None)
+    if isinstance(text, str):
+        return text
+    return ""
+
+
+try:
+    from lark_oapi.channel.types import (
+        InteractiveContent,
+        MergeForwardContent,
+        TextContent,
+    )
+
+    _LARK_TYPES_AVAILABLE = True
+except ImportError:
+    InteractiveContent = None  # type: ignore[assignment,misc]
+    MergeForwardContent = None  # type: ignore[assignment,misc]
+    TextContent = None  # type: ignore[assignment,misc]
+    _LARK_TYPES_AVAILABLE = False
+
+
+def _extract_interactive_text(content: Any) -> str:
+    """Extract title + body text from an ``InteractiveContent``-like value.
+
+    Prefers ``content.raw['title'] / ['elements']`` (matching lark_oapi's
+    ``InteractiveContent.raw``, a dict), then falls back to attribute access
+    for duck-typed test doubles.
+    """
+    raw = getattr(content, "raw", None)
+    title = ""
+    elements: Any = None
+    if isinstance(raw, dict):
+        title = str(raw.get("title", "") or "")
+        elements = raw.get("elements")
+    elif raw is not None:
+        title = str(getattr(raw, "title", "") or "")
+        elements = getattr(raw, "elements", None)
+    body = _stringify_card_elements(elements)
+    if title and body:
+        return f"{title}\n{body}"
+    return title or body
+
+
+def _extract_text_content(content: Any) -> str:
+    text = getattr(content, "text", None)
+    if isinstance(text, str) and text:
+        return text
+    raw = getattr(content, "raw", None)
+    if isinstance(raw, dict):
+        candidate = raw.get("text")
+        if isinstance(candidate, str):
+            return candidate
+    return ""
+
+
+def _extract_merge_forward_text(content: Any) -> str:
+    items = getattr(content, "items", None) or []
+    parts: list[str] = []
+    for item in items:
+        sub_content = getattr(item, "content", None)
+        piece = _dispatch_content(sub_content)
+        if piece:
+            parts.append(piece)
+    return "\n\n".join(parts)
+
+
+def _dispatch_content(content: Any) -> str:
+    """Route ``MessageContent`` to a kind-specific extractor.
+
+    Uses ``isinstance`` against the concrete ``lark_oapi.channel.types`` classes
+    when available, and falls back to the string ``kind`` discriminator so
+    hand-crafted objects (tests, mocks) still work.
+    """
+    if content is None:
+        return ""
+
+    if _LARK_TYPES_AVAILABLE:
+        if isinstance(content, InteractiveContent):
+            return _extract_interactive_text(content)
+        if isinstance(content, MergeForwardContent):
+            return _extract_merge_forward_text(content)
+        if isinstance(content, TextContent):
+            return _extract_text_content(content)
+
+    kind = getattr(content, "kind", None)
+    if kind == "interactive":
+        return _extract_interactive_text(content)
+    if kind == "merge_forward":
+        return _extract_merge_forward_text(content)
+    if kind == "text":
+        return _extract_text_content(content)
+
+    return _extract_text_content(content)
+
+
+def _extract_message_text(message: Any) -> str:
+    content = getattr(message, "content", None)
+    text = _dispatch_content(content)
+    if text:
+        return text
+    fallback = getattr(message, "content_text", "")
+    return str(fallback or "")
+
+
+def _extract_text_from_body(msg_type: str, content_json: str) -> str:
+    """Extract readable text from an ``im/v1`` ``Message.body.content`` payload.
+
+    ``body.content`` is a JSON string whose shape depends on ``msg_type``
+    (text / post / interactive / merge_forward / ...). This is used to inline
+    parent/thread history that we fetch via the OpenAPI, which returns raw JSON
+    rather than the parsed ``MessageContent`` objects delivered over WebSocket.
+    """
+    if not content_json:
+        return ""
+    try:
+        payload = json.loads(content_json)
+    except Exception:
+        return content_json.strip()
+
+    if not isinstance(payload, dict):
+        return str(payload)
+
+    if msg_type == "text":
+        return str(payload.get("text", "") or "").strip()
+    if msg_type == "post":
+        title = str(payload.get("title", "") or "")
+        pieces: list[str] = []
+        for paragraph in payload.get("content", []) or []:
+            if not isinstance(paragraph, list):
+                continue
+            line_parts: list[str] = []
+            for node in paragraph:
+                if isinstance(node, dict):
+                    text = (
+                        node.get("text") or node.get("content") or node.get("user_name")
+                    )
+                    if isinstance(text, str) and text:
+                        line_parts.append(text)
+            if line_parts:
+                pieces.append("".join(line_parts))
+        body = "\n".join(pieces)
+        return f"{title}\n{body}".strip() if title else body
+    if msg_type == "interactive":
+        title_data = (
+            payload.get("header", {}).get("title", {})
+            if isinstance(payload.get("header"), dict)
+            else {}
+        )
+        title = ""
+        if isinstance(title_data, dict):
+            title = str(title_data.get("content", "") or "")
+        body = _stringify_card_elements(payload.get("elements") or payload.get("card"))
+        return f"{title}\n{body}".strip() if title else body
+    if msg_type == "merge_forward":
+        return str(payload.get("content", "") or payload.get("text", "") or "").strip()
+
+    return _stringify_card_elements(payload)
 
 
 @dataclass(slots=True)
@@ -73,6 +300,8 @@ class FeishuChannelExtension:
     memory, long-term memory and tracing continue to work without changes.
     """
 
+    CHANNEL_SDK_COMPAT = True
+
     def __init__(
         self,
         runner: "Runner",
@@ -89,6 +318,9 @@ class FeishuChannelExtension:
         channel_kwargs: dict[str, Any] | None = None,
         streaming: bool = False,
         reactions: bool = False,
+        include_parent_message: bool = True,
+        include_thread_history: bool = True,
+        thread_history_limit: int = 20,
     ) -> None:
         self.runner = runner
         self.session_id_factory = session_id_factory or self.default_session_id_factory
@@ -104,6 +336,40 @@ class FeishuChannelExtension:
         self.streaming = (
             streaming
             or str(os.getenv("TOOL_FEISHU_CHANNEL_STREAMING", "")).lower() == "true"
+        )
+        self.include_parent_message = include_parent_message
+        self.include_thread_history = include_thread_history
+        self.thread_history_limit = max(1, int(thread_history_limit))
+        self._app_id = (
+            app_id
+            or os.getenv("TOOL_FEISHU_CHANNEL_APP_ID")
+            or os.getenv("TOOL_LARK_ENDPOINT")
+        )
+        self._app_secret = (
+            app_secret
+            or os.getenv("TOOL_FEISHU_CHANNEL_APP_SECRET")
+            or os.getenv("TOOL_LARK_API_KEY")
+        )
+        self._openapi_client: Any = None
+
+        # Lifecycle / graceful-shutdown state.
+        #
+        # ``start()`` captures the long-lived app event loop and spawns a
+        # background reconnect loop; inbound WS messages are processed as
+        # tracked tasks *on that loop* so they survive the WS teardown. On
+        # ``shutdown()`` we close the WebSocket first (during a rolling update
+        # Feishu re-routes new events to another instance that still holds a WS
+        # connection) and then drain messages already received — their replies
+        # go out over the OpenAPI HTTP client, which does not depend on the WS.
+        self._draining = False
+        self._inflight: set[asyncio.Task[Any]] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._retry_task: asyncio.Task[Any] | None = None
+        self._reconnect_interval = float(
+            os.getenv("TOOL_FEISHU_CHANNEL_RECONNECT_INTERVAL", "3")
+        )
+        self._drain_timeout = float(
+            os.getenv("TOOL_FEISHU_CHANNEL_DRAIN_TIMEOUT", "300")
         )
 
         if channel is not None:
@@ -148,16 +414,132 @@ class FeishuChannelExtension:
         return {"text": text}
 
     async def connect(self) -> Any:
-        return await self._maybe_await(self.channel.connect())
+        connect = getattr(self.channel, "start", None) or self.channel.connect
+        if inspect.iscoroutinefunction(connect):
+            return await connect()
+        return await asyncio.to_thread(_call_in_fresh_event_loop, connect)
 
     async def disconnect(self) -> Any:
-        disconnect = getattr(self.channel, "disconnect", None)
+        disconnect = getattr(self.channel, "stop", None) or getattr(
+            self.channel, "disconnect", None
+        )
         if disconnect is None:
             return None
-        result = disconnect()
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        if inspect.iscoroutinefunction(disconnect):
+            return await disconnect()
+        return await asyncio.to_thread(_call_in_fresh_event_loop, disconnect)
+
+    @property
+    def is_draining(self) -> bool:
+        """True once a graceful shutdown has begun (WS closing / draining).
+
+        The reconnect loop checks this and stops reconnecting, otherwise it
+        would re-open the WebSocket we just closed for shutdown.
+        """
+        return self._draining
+
+    def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Begin serving: capture the app loop and spawn the reconnect loop.
+
+        Call this from within the running app event loop (e.g. an ASGI
+        ``startup`` hook). The captured loop is where inbound WS messages are
+        processed, so in-flight work survives a later WebSocket teardown.
+        Idempotent.
+        """
+        if self._retry_task is not None and not self._retry_task.done():
+            return
+        self._draining = False
+        self._loop = loop or asyncio.get_running_loop()
+        self._retry_task = self._loop.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Keep the channel connected, retrying with a fixed backoff.
+
+        Owns the connect/retry policy that callers used to implement inline, so
+        it can cooperate with :meth:`shutdown` and stop reconnecting once a
+        drain has begun.
+        """
+        attempt = 0
+        while not self._draining:
+            attempt += 1
+            try:
+                logger.info(
+                    "Connecting Feishu channel WebSocket (attempt #%d)...", attempt
+                )
+                await self.connect()
+                # ``connect()`` returning without raising means the WS session
+                # ended; log before we back off and retry.
+                logger.warning(
+                    "Feishu channel WebSocket disconnected (after attempt #%d).",
+                    attempt,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Feishu channel connection error on attempt #%d: %s", attempt, exc
+                )
+            if self._draining:
+                break
+            logger.info(
+                "Reconnecting Feishu channel in %.1fs (next attempt #%d).",
+                self._reconnect_interval,
+                attempt + 1,
+            )
+            await asyncio.sleep(self._reconnect_interval)
+
+    async def shutdown(self, *, drain_timeout: float | None = None) -> None:
+        """Close the WS, then drain in-flight messages before returning.
+
+        Intended as an ASGI ``shutdown`` hook. Safe to call multiple times;
+        only the first call performs the teardown.
+
+        1. Stop reconnecting and close the WebSocket so no *new* messages are
+           accepted (Feishu re-routes them to another live instance).
+        2. Wait (up to ``drain_timeout``) for messages already received to
+           finish replying over the OpenAPI HTTP client, which does not depend
+           on the WebSocket. Defaults to ``TOOL_FEISHU_CHANNEL_DRAIN_TIMEOUT``.
+        """
+        if self._draining:
+            return
+        if drain_timeout is None:
+            drain_timeout = self._drain_timeout
+        self._draining = True
+        logger.info(
+            "Shutting down Feishu channel: closing WebSocket and draining %d in-flight message(s)...",
+            len(self._inflight),
+        )
+
+        # 1. Stop the reconnect loop and close the WebSocket. The OpenAPI HTTP
+        #    client used for replies is unaffected.
+        if self._retry_task is not None:
+            self._retry_task.cancel()
+            try:
+                await self._retry_task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
+            self._retry_task = None
+        try:
+            await self.disconnect()
+        except Exception as exc:  # pragma: no cover - best-effort teardown
+            logger.warning("Error while closing Feishu WebSocket: %s", exc)
+
+        # 2. Let already-received messages finish replying.
+        await self.drain(timeout=drain_timeout)
+        logger.info("Feishu channel drained; shutdown complete.")
+
+    async def drain(self, timeout: float = 300.0) -> None:
+        """Wait for all in-flight message tasks to finish (bounded by timeout)."""
+        pending = [t for t in self._inflight if not t.done()]
+        if not pending:
+            return
+        _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        if still_pending:
+            logger.warning(
+                "Drain timed out after %.1fs; cancelling %d unfinished message(s).",
+                timeout,
+                len(still_pending),
+            )
+            for task in still_pending:
+                task.cancel()
 
     async def handle_webhook_request(
         self, headers: dict[str, str], body: bytes | str
@@ -171,14 +553,56 @@ class FeishuChannelExtension:
         return result
 
     async def _on_message(self, message: Any) -> None:
-        text = str(getattr(message, "content_text", "") or "").strip()
+        """WebSocket inbound entry point.
+
+        Runs on ``lark_channel``'s background WS loop, which
+        :meth:`FeishuChannel.stop` tears down on shutdown. To keep already
+        received messages replying *after* the WS is closed, we hand the actual
+        processing off to the long-lived app loop (captured by :meth:`start`)
+        as a tracked task and return immediately, so nothing stays in-flight on
+        the WS loop.
+
+        We do NOT drop messages while draining: closing the WebSocket is what
+        stops new events (during a rolling update Feishu re-routes them to
+        another instance that still holds a WS connection), so any message that
+        still reaches us here was already accepted and should be replied to.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            # No dedicated app loop was captured (e.g. tests, webhook mode):
+            # process inline on the current loop.
+            await self._process_message(message)
+            return
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is loop:
+            self._spawn_inflight(message)
+        else:
+            loop.call_soon_threadsafe(self._spawn_inflight, message)
+
+    def _spawn_inflight(self, message: Any) -> None:
+        """Create + track a message-processing task on the app loop."""
+        task = asyncio.ensure_future(self._process_message(message))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _process_message(self, message: Any) -> None:
+        text = _extract_message_text(message).strip()
         if self.ignore_empty_messages and not text:
             logger.debug(
                 f"Ignore empty Feishu message: {getattr(message, 'message_id', '')}"
             )
             return
+        logger.debug(f"Received Feishu message: {getattr(message, 'message_id', '')}")
 
-        context = self.build_message_context(message=message, text=text)
+        prefix = await self._collect_reference_context(message)
+        composed_text = f"{prefix}\n\n{text}".strip() if prefix else text
+
+        context = self.build_message_context(message=message, text=composed_text)
 
         if self.reactions and context.message_id:
             try:
@@ -199,8 +623,9 @@ class FeishuChannelExtension:
                 )
 
                 if hasattr(self.channel, "client"):
-                    response = await self._maybe_await(
-                        self.channel.client.im.v1.message_reaction.create(request)
+                    openapi_client = self._get_openapi_client() or self.channel.client
+                    response = await asyncio.to_thread(
+                        openapi_client.im.v1.message_reaction.create, request
                     )
 
                     if not response.success():
@@ -262,10 +687,15 @@ class FeishuChannelExtension:
                         new_message=converted_message,
                         run_config=run_config,
                     ):
-                        if event.content and event.content.parts:
-                            for part in event.content.parts:
-                                if not getattr(part, "thought", False) and part.text:
-                                    await stream.append(part.text)
+                        if not getattr(event, "partial", False):
+                            continue
+                        if not (event.content and event.content.parts):
+                            continue
+                        for part in event.content.parts:
+                            if getattr(part, "thought", False):
+                                continue
+                            if part.text:
+                                await stream.append(part.text)
 
             await self._maybe_await(
                 self.channel.stream(
@@ -334,9 +764,7 @@ class FeishuChannelExtension:
             union_id=union_id,
             open_id=open_id,
             raw_message=message,
-            text=text
-            if text is not None
-            else str(getattr(message, "content_text", "") or ""),
+            text=text if text is not None else _extract_message_text(message),
         )
 
     def _build_channel(
@@ -347,12 +775,15 @@ class FeishuChannelExtension:
         channel_kwargs: dict[str, Any] | None,
     ) -> Any:
         try:
-            from lark_oapi.channel import FeishuChannel
-        except ImportError as exc:
-            raise ImportError(
-                "Feishu channel extension requires `lark-oapi`. "
-                "Install `veadk-python[extensions]` or `pip install lark-oapi`."
-            ) from exc
+            from lark_channel import FeishuChannel
+        except ImportError:
+            try:
+                from lark_oapi.channel import FeishuChannel
+            except ImportError as legacy_exc:
+                raise ImportError(
+                    "Feishu channel extension requires `lark-channel-sdk` "
+                    "(or legacy `lark-oapi`). Install `veadk-python[extensions]`."
+                ) from legacy_exc
 
         resolved_app_id = (
             app_id
@@ -388,3 +819,156 @@ class FeishuChannelExtension:
         if inspect.isawaitable(value):
             return await value
         return value
+
+    def _get_openapi_client(self) -> Any:
+        """Return a lark ``Client`` that can call OpenAPI (im/v1 message.get etc.).
+
+        ``FeishuChannel.client`` on the WebSocket path is a CallbackClient that
+        does NOT carry a tenant_access_token when calling HTTP OpenAPI, so
+        requests come back with code=99991661 "Missing access token". We build
+        (and cache) a dedicated ``lark.Client`` from app_id/app_secret for HTTP
+        calls instead.
+        """
+        if self._openapi_client is not None:
+            return self._openapi_client
+        if not self._app_id or not self._app_secret:
+            logger.debug(
+                "Cannot build OpenAPI client: app_id/app_secret not configured."
+            )
+            return None
+        try:
+            import lark_oapi as lark
+        except ImportError:
+            return None
+        try:
+            self._openapi_client = (
+                lark.Client.builder()
+                .app_id(self._app_id)
+                .app_secret(self._app_secret)
+                .build()
+            )
+        except Exception as exc:
+            logger.warning("Failed to build lark OpenAPI client: %s", exc)
+            return None
+        return self._openapi_client
+
+    async def _collect_reference_context(self, message: Any) -> str:
+        if not (self.include_parent_message or self.include_thread_history):
+            return ""
+        client = self._get_openapi_client()
+        if client is None:
+            return ""
+
+        thread_id = _coalesce(
+            _read_attr(message, "conversation", "thread_id"),
+            getattr(message, "thread_id", None),
+        )
+        parent_id = _coalesce(
+            getattr(message, "parent_id", None),
+            getattr(message, "reply_to_message_id", None),
+            _read_attr(message, "reply", "message_id"),
+        )
+        root_id = getattr(message, "root_id", None) or thread_id
+        message_id = getattr(message, "message_id", "")
+
+        blocks: list[str] = []
+
+        if self.include_thread_history and thread_id:
+            history = await self._fetch_thread_messages(client, thread_id)
+            rendered = self._render_history_block(history, exclude_ids={message_id})
+            if rendered:
+                blocks.append(f"[飞书话题历史 thread_id={thread_id}]\n{rendered}")
+        elif self.include_parent_message and parent_id:
+            parent = await self._fetch_message(client, parent_id)
+            rendered = self._render_message_line(parent) if parent else ""
+            if rendered:
+                blocks.append(f"[引用消息 message_id={parent_id}]\n{rendered}")
+            elif root_id and root_id != parent_id:
+                root_msg = await self._fetch_message(client, root_id)
+                rendered = self._render_message_line(root_msg) if root_msg else ""
+                if rendered:
+                    blocks.append(f"[根消息 message_id={root_id}]\n{rendered}")
+
+        return "\n\n".join(blocks)
+
+    async def _fetch_message(self, client: Any, message_id: str) -> Any:
+        try:
+            from lark_oapi.api.im.v1 import GetMessageRequest
+        except ImportError:
+            return None
+        req = GetMessageRequest.builder().message_id(message_id).build()
+        try:
+            resp = await asyncio.to_thread(client.im.v1.message.get, req)
+        except Exception as exc:
+            logger.warning("Feishu get message %s failed: %s", message_id, exc)
+            return None
+        if not getattr(resp, "success", lambda: False)():
+            logger.error(
+                "Feishu get message %s non-success: code=%s msg=%s",
+                message_id,
+                getattr(resp, "code", None),
+                getattr(resp, "msg", None),
+            )
+            return None
+        items = getattr(getattr(resp, "data", None), "items", None) or []
+        return items[0] if items else None
+
+    async def _fetch_thread_messages(self, client: Any, thread_id: str) -> list[Any]:
+        try:
+            from lark_oapi.api.im.v1 import ListMessageRequest
+        except ImportError:
+            return []
+        req = (
+            ListMessageRequest.builder()
+            .container_id_type("thread")
+            .container_id(thread_id)
+            .sort_type("ByCreateTimeAsc")
+            .page_size(self.thread_history_limit)
+            .build()
+        )
+        try:
+            resp = await asyncio.to_thread(client.im.v1.message.list, req)
+        except Exception as exc:
+            logger.warning("Feishu list thread %s failed: %s", thread_id, exc)
+            return []
+        if not getattr(resp, "success", lambda: False)():
+            logger.debug(
+                "Feishu list thread %s non-success: code=%s msg=%s",
+                thread_id,
+                getattr(resp, "code", None),
+                getattr(resp, "msg", None),
+            )
+            return []
+        return list(getattr(getattr(resp, "data", None), "items", None) or [])
+
+    def _render_history_block(
+        self, messages: list[Any], exclude_ids: set[str] | None = None
+    ) -> str:
+        exclude_ids = exclude_ids or set()
+        lines: list[str] = []
+        for msg in messages:
+            if getattr(msg, "message_id", None) in exclude_ids:
+                continue
+            line = self._render_message_line(msg)
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_message_line(msg: Any) -> str:
+        if msg is None:
+            return ""
+        msg_type = getattr(msg, "msg_type", "") or ""
+        body = getattr(msg, "body", None)
+        content = getattr(body, "content", "") if body is not None else ""
+        text = _extract_text_from_body(msg_type, content).strip()
+        if not text:
+            return ""
+        sender = getattr(msg, "sender", None)
+        sender_id = _coalesce(
+            getattr(sender, "id", None),
+            getattr(sender, "sender_id", None),
+            getattr(msg, "sender_id", None),
+        )
+        prefix = f"@{sender_id}" if sender_id else "user"
+        return f"{prefix} ({msg_type}): {text}"

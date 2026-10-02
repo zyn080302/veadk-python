@@ -12,8 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenAI Codex SDK runtime."""
+"""OpenAI Codex SDK runtime.
 
-from veadk.runtime.codex.runtime import CodexRuntime
+The implementation is imported lazily so configuration, translation, and tool
+bridge helpers remain usable when the optional ``openai-codex`` SDK is absent.
 
-__all__ = ["CodexRuntime"]
+:func:`current_workspace` is deliberately *not* lazy: an ADK tool imports it to
+find the directory the sandbox is working in, and that tool module has to stay
+importable in processes where the Codex SDK is not installed (the same tool is
+routinely run by other runtimes, and by unit tests).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from veadk.runtime.codex.config import CodexRuntimeConfig
+from veadk.runtime.codex.workspace import current_workspace
+
+__all__ = ["CodexRuntime", "CodexRuntimeConfig", "current_workspace"]
+
+
+def __getattr__(name: str) -> Any:
+    if name != "CodexRuntime":
+        raise AttributeError(name)
+    from veadk.runtime.codex.runtime import CodexRuntime
+
+    return CodexRuntime

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -111,13 +113,20 @@ class SkillsTool(BaseTool):
 
         working_dir = get_session_path(session_id=tool_context.session.id)
         skill_dir = working_dir / "skills"
-        region = os.getenv("AGENTKIT_TOOL_REGION", "cn-beijing")
+        cloud_provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
+        default_region = (
+            "ap-southeast-1" if cloud_provider == "byteplus" else "cn-beijing"
+        )
+        region = (
+            os.getenv("AGENTKIT_TOOL_REGION")
+            or (os.getenv("REGION") if cloud_provider != "byteplus" else None)
+            or default_region
+        )
 
         if skill_name not in self.skills:
             # 1. Download skill from TOS if not found locally
             user_skill_dir = skill_dir / skill_name
             if not user_skill_dir.exists() or not user_skill_dir.is_dir():
-                cloud_provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
                 if cloud_provider == "vestack":
                     error_msg = f"Error: Skill '{skill_name}' not found locally or in skill space. Downloading from TOS_SKILLS_DIR is not supported in vestack environment."
                     logger.error(error_msg)
@@ -129,19 +138,10 @@ class SkillsTool(BaseTool):
                 )
 
                 try:
-                    from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
                     from veadk.integrations.ve_tos.ve_tos import VeTOS
+                    from veadk.skills.utils import _get_cloud_credentials
 
-                    access_key = os.getenv("VOLCENGINE_ACCESS_KEY")
-                    secret_key = os.getenv("VOLCENGINE_SECRET_KEY")
-                    session_token = ""
-
-                    if not (access_key and secret_key):
-                        # Try to get from vefaas iam
-                        cred = get_credential_from_vefaas_iam()
-                        access_key = cred.access_key_id
-                        secret_key = cred.secret_access_key
-                        session_token = cred.session_token
+                    access_key, secret_key, session_token = _get_cloud_credentials()
 
                     tos_skills_dir = os.getenv(
                         "TOS_SKILLS_DIR"
@@ -230,121 +230,75 @@ class SkillsTool(BaseTool):
                     f"Attempting to download skill '{skill_name}' from skill space..."
                 )
                 try:
-                    from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
-                    from veadk.integrations.ve_tos.ve_tos import VeTOS
-
-                    access_key = os.getenv("VOLCENGINE_ACCESS_KEY")
-                    secret_key = os.getenv("VOLCENGINE_SECRET_KEY")
-                    session_token = ""
-
-                    if not (access_key and secret_key):
-                        # Try to get from vefaas iam
-                        cred = get_credential_from_vefaas_iam()
-                        access_key = cred.access_key_id
-                        secret_key = cred.secret_access_key
-                        session_token = cred.session_token
-
-                    tos_bucket, tos_path = skill.bucket_name, skill.path
-
-                    save_path = skill_dir / f"{skill_name}.zip"
-
-                    cloud_provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
-                    if cloud_provider == "vestack":
-                        success = self._download_skill_via_vestack(
-                            skill=skill,
-                            tos_path=tos_path,
-                            cloud_provider=cloud_provider,
-                            access_key=access_key,
-                            secret_key=secret_key,
-                            session_token=session_token,
-                            skill_name=skill_name,
-                            save_path=save_path,
+                    if Path(skill_name).name != skill_name or skill_name in {".", ".."}:
+                        raise ValueError("Skill name must be a single directory name")
+                    # Stage on the same filesystem as the destination. ZIPs never
+                    # enter the public skill directory and are removed on failure too.
+                    with tempfile.TemporaryDirectory(
+                        prefix=".skill-install-", dir=working_dir
+                    ) as temp:
+                        stage = Path(temp)
+                        save_path = stage / "package.zip"
+                        logger.info(
+                            f"Downloading skill '{skill_name}' (id={skill.id}, version={skill.version_id})"
                         )
-                    else:
-                        # Initialize VeTOS client
-                        tos_client = VeTOS(
-                            ak=access_key,
-                            sk=secret_key,
-                            session_token=session_token,
-                            bucket_name=tos_bucket,
-                            region=region,
-                        )
-
-                        success = tos_client.download(
-                            bucket_name=tos_bucket,
-                            object_key=tos_path,
-                            save_path=save_path,
-                        )
-
-                    if not success:
-                        return (
-                            f"Error: Failed to download skill '{skill_name}' from TOS."
-                        )
-
-                    # Extract downloaded zip into the skill directory
-                    import zipfile
-                    import shutil
-
-                    # Remove existing skill directory to ensure clean extraction
-                    target_skill_dir = skill_dir / skill_name
-                    if target_skill_dir.exists():
-                        try:
-                            shutil.rmtree(target_skill_dir)
-                            logger.info(
-                                f"Removed existing skill directory: {target_skill_dir}"
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to remove existing skill directory {target_skill_dir}: {e}"
-                            )
-
+                        self._download_space_archive(skill, save_path, region)
+                        self._install_skill_archive(save_path, skill_dir, skill_name)
+                    legacy_zip = skill_dir / f"{skill_name}.zip"
                     try:
-                        with zipfile.ZipFile(save_path, "r") as z:
-                            z.extractall(path=str(skill_dir))
-                    except zipfile.BadZipFile:
-                        logger.error(
-                            f"Downloaded file for '{skill_name}' is not a valid zip"
-                        )
-                        return f"Error: Downloaded file for skill '{skill_name}' is not a valid zip archive."
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to extract skill zip for '{skill_name}': {e}"
-                        )
-                        return f"Error: Failed to extract skill '{skill_name}' from zip: {e}"
-
-                    logger.info(
-                        f"Successfully downloaded skill '{skill_name}' from skill space"
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        f"Failed to download skill '{skill_name}' from skill space: {e}"
-                    )
-                    return (
-                        f"Error: Skill '{skill_name}' not found locally and failed to download from skill space: {e}. "
-                        f"Check the available skills list in the tool description."
-                    )
-            else:
-                # 3. Use the local skill
-                # Create symlink to skills directory
-                skills_mount = Path(skill.path)
-                skills_link = skill_dir / skill_name
-                if skills_mount.exists() and not skills_link.exists():
-                    try:
-                        skills_link.symlink_to(skills_mount)
-                        logger.debug(
-                            f"Created symlink: {skills_link} -> {skills_mount}"
-                        )
-                    except FileExistsError:
-                        # Symlink already exists (race condition from concurrent session setup)
-                        pass
-                    except Exception as e:
-                        # Log but don't fail - skills can still be accessed via absolute path
+                        legacy_zip.unlink(missing_ok=True)
+                    except OSError as exc:
                         logger.warning(
-                            f"Failed to create skills symlink for {str(skills_mount)}: {e}"
+                            f"Skill '{skill_name}' installed but legacy ZIP cleanup failed: {type(exc).__name__}"
                         )
+                    logger.info(
+                        f"Installed skill '{skill_name}' at {skill_dir / skill_name}; temporary ZIP cleaned"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Failed to install skill '{skill_name}': {type(exc).__name__}: {exc}"
+                    )
+                    return f"Error: Failed to install skill '{skill_name}': {exc}"
 
-        skill_file = skill_dir / skill_name / "SKILL.md"
+            else:
+                # Refresh an existing link when a configured local source moves.
+                skills_mount = Path(skill.path).resolve()
+                skills_link = skill_dir / skill_name
+                try:
+                    if Path(skill_name).name != skill_name or skill_name in {".", ".."}:
+                        raise ValueError("Skill name must be a single directory name")
+                    if not skills_mount.is_dir():
+                        raise FileNotFoundError(
+                            "Configured local skill directory is missing"
+                        )
+                    if skills_link.exists() and not skills_link.is_symlink():
+                        raise FileExistsError(
+                            "Skill destination is not a managed symlink"
+                        )
+                    if (
+                        not skills_link.is_symlink()
+                        or skills_link.resolve() != skills_mount
+                    ):
+                        with tempfile.TemporaryDirectory(
+                            prefix=".skill-link-", dir=working_dir
+                        ) as temp:
+                            staging = Path(temp) / "link"
+                            staging.symlink_to(skills_mount)
+                            os.replace(staging, skills_link)
+                        logger.info(
+                            "Updated local skill link: %s -> %s",
+                            skills_link,
+                            skills_mount,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to link local skill '%s': %s",
+                        skill_name,
+                        type(exc).__name__,
+                    )
+                    return f"Error: Failed to link local skill '{skill_name}': {exc}"
+
+        skill_file = self._find_skill_file(skill_dir, skill_name)
         if not skill_file.exists():
             return f"Error: Skill '{skill_name}' has no SKILL.md file."
 
@@ -362,6 +316,155 @@ class SkillsTool(BaseTool):
         except Exception as e:
             logger.error(f"Failed to invoke skill {skill_name}: {e}")
             return f"Error invoking skill '{skill_name}': {e}"
+
+    def _download_space_archive(
+        self, skill: Skill, save_path: Path, region: str
+    ) -> None:
+        skill_name = skill.name
+        if skill.source_type == "skillhub":
+            from veadk.skills.utils import download_skillhub_skill
+
+            success = download_skillhub_skill(skill, save_path)
+        else:
+            from veadk.integrations.ve_tos.ve_tos import VeTOS
+            from veadk.skills.utils import _get_cloud_credentials
+
+            access_key, secret_key, session_token = _get_cloud_credentials()
+
+            tos_bucket, tos_path = skill.bucket_name, skill.path
+
+            cloud_provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
+            if cloud_provider == "vestack":
+                success = self._download_skill_via_vestack(
+                    skill=skill,
+                    tos_path=tos_path,
+                    cloud_provider=cloud_provider,
+                    access_key=access_key,
+                    secret_key=secret_key,
+                    session_token=session_token,
+                    skill_name=skill_name,
+                    save_path=save_path,
+                )
+            else:
+                # Initialize VeTOS client
+                tos_client = VeTOS(
+                    ak=access_key,
+                    sk=secret_key,
+                    session_token=session_token,
+                    bucket_name=tos_bucket,
+                    region=region,
+                )
+
+                success = tos_client.download(
+                    bucket_name=tos_bucket,
+                    object_key=tos_path,
+                    save_path=save_path,
+                )
+        if not success:
+            raise RuntimeError("Skill archive download failed")
+
+    def _install_skill_archive(
+        self, zip_path: Path, skill_dir: Path, skill_name: str
+    ) -> None:
+        extracted = zip_path.parent / "extracted"
+        extracted.mkdir()
+        self._safe_extract_zip(zip_path, extracted)
+        root_readme = extracted / "SKILL.md"
+        if root_readme.is_file():
+            selected = root_readme
+            layout = "root"
+        else:
+            candidates = sorted(
+                (p for p in extracted.rglob("SKILL.md") if p.is_file()),
+                key=lambda p: (len(p.relative_to(extracted).parts), str(p)),
+            )
+            if not candidates:
+                raise ValueError("Skill archive has no SKILL.md file")
+            selected = candidates[0]
+            layout = (
+                "wrapped"
+                if len(selected.relative_to(extracted).parts) == 2
+                else "nested fallback"
+            )
+            if len(candidates) > 1 or layout == "nested fallback":
+                logger.warning(
+                    f"Skill '{skill_name}' package fallback: {len(candidates)} SKILL.md candidates; "
+                    f"selected {selected.relative_to(extracted)} by depth and path"
+                )
+        # Validate readability before moving the existing installation aside.
+        selected.read_text(encoding="utf-8")
+        logger.info(
+            f"Skill '{skill_name}' package layout={layout}; selected={selected.relative_to(extracted)}; "
+            f"destination={skill_dir / skill_name}"
+        )
+        target = skill_dir / skill_name
+        backup_root = None
+        if target.exists() or target.is_symlink():
+            backup_root = Path(
+                tempfile.mkdtemp(prefix=".skill-backup-", dir=skill_dir.parent)
+            )
+            try:
+                target.rename(backup_root / "previous")
+            except BaseException:
+                backup_root.rmdir()
+                raise
+        try:
+            selected.parent.rename(target)
+        except BaseException:
+            if backup_root is not None:
+                try:
+                    (backup_root / "previous").rename(target)
+                except OSError:
+                    logger.error(
+                        f"Skill '{skill_name}' rollback failed; previous installation retained at {backup_root}"
+                    )
+                    raise
+                backup_root.rmdir()
+                logger.warning(
+                    f"Skill '{skill_name}' installation failed; previous installation restored"
+                )
+            raise
+        if backup_root is not None:
+            try:
+                shutil.rmtree(backup_root)
+            except OSError as exc:
+                logger.warning(
+                    f"Skill '{skill_name}' installed but backup cleanup failed at {backup_root}: {type(exc).__name__}"
+                )
+
+    def _find_skill_file(self, skill_dir: Path, skill_name: str) -> Path:
+        skill_root = skill_dir / skill_name
+        skill_file = skill_root / "SKILL.md"
+        if skill_file.exists():
+            return skill_file
+
+        if skill_root.exists():
+            # Pick the shallowest SKILL.md to avoid matching nested examples,
+            # and sort for deterministic results.
+            nested_skill_files = sorted(
+                skill_root.rglob("SKILL.md"),
+                key=lambda p: (len(p.relative_to(skill_root).parts), str(p)),
+            )
+            if nested_skill_files:
+                return nested_skill_files[0]
+
+        return skill_file
+
+    def _safe_extract_zip(self, zip_path: Path, dest_dir: Path) -> None:
+        """Extract a zip archive while guarding against path traversal.
+
+        Rejects any member whose resolved path would escape ``dest_dir``
+        (e.g. absolute paths or paths containing ``..``).
+        """
+        import zipfile
+
+        dest_root = Path(dest_dir).resolve()
+        with zipfile.ZipFile(zip_path, "r") as z:
+            for member in z.namelist():
+                target = (dest_root / member).resolve()
+                if target != dest_root and dest_root not in target.parents:
+                    raise ValueError(f"Unsafe path detected in zip archive: '{member}'")
+            z.extractall(path=str(dest_root))
 
     def _download_skill_via_vestack(
         self,
@@ -398,7 +501,14 @@ class SkillsTool(BaseTool):
         }
 
         agentkit_tool_service = os.getenv("AGENTKIT_TOOL_SERVICE_CODE", "agentkit")
-        region = os.getenv("AGENTKIT_TOOL_REGION", "cn-beijing")
+        default_region = (
+            "ap-southeast-1" if cloud_provider == "byteplus" else "cn-beijing"
+        )
+        region = (
+            os.getenv("AGENTKIT_TOOL_REGION")
+            or (os.getenv("REGION") if cloud_provider != "byteplus" else None)
+            or default_region
+        )
         default_sld = "byteplusapi" if cloud_provider == "byteplus" else "volcengineapi"
         agentkit_skill_host = os.getenv(
             "AGENTKIT_SKILL_HOST",
@@ -498,39 +608,14 @@ class SkillsTool(BaseTool):
     def _upload_skill_metrics(self, span: _Span, skill_name: str, result: str) -> None:
         """Upload skill metrics to the telemetry system."""
         try:
-            import time
-            from veadk.tracing.telemetry.telemetry import meter_uploader
+            from veadk.tracing.telemetry import portal_metrics
 
-            if meter_uploader:
-                # 初始化属性，包含技能相关信息
-                skill = self.skills.get(skill_name)
-                attributes = {
-                    "skill_name": skill_name,
-                    "tool_name": self.name,
-                    "skill_space_id": (
-                        skill.skill_space_id if skill and skill.skill_space_id else ""
-                    ),
-                    "skill_id": skill.id if skill and skill.id else "",
-                    "gen_ai.operation.name": "execute_skill",
-                    "error_type": (
-                        "skill_execution_error" if result.startswith("Error:") else ""
-                    ),
-                }
-
-                # 计算 span 执行耗时（秒）
-                latency_seconds = 0
-                if hasattr(span, "start_time"):
-                    # 计算耗时（秒）
-                    latency_seconds = (time.time_ns() - span.start_time) / 1e9  # type: ignore
-
-                # 记录技能执行延迟
-                if hasattr(meter_uploader, "skill_invoke_latency"):
-                    # 使用 skill_invoke_latency 记录技能执行延迟（秒）
-                    meter_uploader.skill_invoke_latency.record(
-                        latency_seconds, attributes
-                    )
-                    logger.debug(
-                        f"Uploaded skill metrics for {skill_name} with latency {latency_seconds:.4f}s and attributes {attributes}"
-                    )
+            portal_metrics.portal_metric_recorder.record_skill_call(
+                span,
+                skill_name,
+                self.name,
+                self.skills.get(skill_name),
+                result,
+            )
         except Exception as e:
             logger.warning(f"Failed to upload skill metrics: {e}")

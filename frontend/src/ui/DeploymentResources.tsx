@@ -1,0 +1,786 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+import {
+  listDeploymentResources,
+  type DeploymentResource,
+  type DeploymentResourceMode,
+  type DeploymentResourceQuery,
+  type DeployResources,
+  type EnvironmentContainerRepository,
+} from "../adk/client";
+import { i18n } from "../i18n";
+import {
+  DeploymentSelect,
+  type DeploymentSelectOption,
+} from "./DeploymentSelect";
+import "./DeploymentResources.css";
+
+function resourceModeOptions(t: TFunction): DeploymentSelectOption[] {
+  return [
+    {
+      value: "auto",
+      label: t("deploymentResources.mode.auto"),
+      description: t("deploymentResources.mode.autoDescription"),
+      badge: t("deploymentResources.mode.recommended"),
+    },
+    {
+      value: "create",
+      label: t("deploymentResources.mode.create"),
+      description: t("deploymentResources.mode.createDescription"),
+    },
+    {
+      value: "existing",
+      label: t("deploymentResources.mode.existing"),
+      description: t("deploymentResources.mode.existingDescription"),
+    },
+  ];
+}
+
+export const DEFAULT_DEPLOY_RESOURCES: DeployResources = {
+  tos: { mode: "auto" },
+  cr: { mode: "auto" },
+  codePipeline: { mode: "auto" },
+};
+
+interface ResourceListState {
+  items: DeploymentResource[];
+  serviceRegion: string;
+  totalCount: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+  search: string;
+  setSearch: (value: string) => void;
+  reload: () => void;
+  loadMore: () => void;
+}
+
+function useDeploymentResourceList(
+  query: DeploymentResourceQuery | null,
+): ResourceListState {
+  const [items, setItems] = useState<DeploymentResource[]>([]);
+  const [serviceRegion, setServiceRegion] = useState("");
+  const [pageNumber, setPageNumber] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [loadedQueryKey, setLoadedQueryKey] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+  const loadingRef = useRef(false);
+  const requestRef = useRef<AbortController | null>(null);
+  const baseQueryKey = query ? JSON.stringify(query) : "";
+  const queryKey = query
+    ? JSON.stringify({ ...query, search: debouncedSearch })
+    : "";
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    setSearch("");
+    setDebouncedSearch("");
+  }, [baseQueryKey]);
+
+  const loadPage = useCallback((nextPage: number, replace: boolean) => {
+    if (!queryKey) return;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    const request = JSON.parse(queryKey) as DeploymentResourceQuery;
+    if (replace) setItems([]);
+    loadingRef.current = true;
+    setLoading(true);
+    setError(null);
+    listDeploymentResources(
+      { ...request, pageNumber: nextPage, pageSize: 100 },
+      controller.signal,
+    )
+      .then((result) => {
+        setItems((current) => {
+          if (replace) return result.items;
+          const seen = new Set(current.map((item) => `${item.id}\u0000${item.name}`));
+          return [
+            ...current,
+            ...result.items.filter(
+              (item) => !seen.has(`${item.id}\u0000${item.name}`),
+            ),
+          ];
+        });
+        setServiceRegion(result.serviceRegion);
+        setPageNumber(result.pageNumber);
+        setTotalCount(result.totalCount);
+        setHasMore(result.hasMore);
+        setLoadedQueryKey(queryKey);
+      })
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setLoadedQueryKey(queryKey);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (requestRef.current === controller) {
+          requestRef.current = null;
+          loadingRef.current = false;
+          setLoading(false);
+        }
+      });
+  }, [queryKey]);
+
+  useEffect(() => {
+    if (!queryKey) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      loadingRef.current = false;
+      setItems([]);
+      setServiceRegion("");
+      setPageNumber(1);
+      setTotalCount(0);
+      setHasMore(false);
+      setLoadedQueryKey("");
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    loadPage(1, true);
+    return () => requestRef.current?.abort();
+  }, [loadPage, queryKey, reloadKey]);
+
+  const queryReady = Boolean(queryKey)
+    && loadedQueryKey === queryKey
+    && search.trim() === debouncedSearch;
+  const reload = useCallback(() => {
+    setLoadedQueryKey("");
+    setReloadKey((key) => key + 1);
+  }, []);
+  const loadMore = useCallback(() => {
+    if (!queryReady || loadingRef.current || !hasMore) return;
+    loadPage(pageNumber + 1, false);
+  }, [hasMore, loadPage, pageNumber, queryReady]);
+
+  return {
+    items,
+    serviceRegion,
+    totalCount,
+    hasMore: queryReady ? hasMore : false,
+    loading: Boolean(queryKey) && (!queryReady || loading),
+    error,
+    search,
+    setSearch,
+    reload,
+    loadMore,
+  };
+}
+
+function resourceOptions(
+  items: DeploymentResource[],
+  valueField: "id" | "name",
+): DeploymentSelectOption[] {
+  return items.map((item) => ({
+    value: item[valueField],
+    label: item.name,
+    description: [item.status, item.region, item.id]
+      .filter(Boolean)
+      .join(" · "),
+  }));
+}
+
+function ResourcePicker({
+  ariaLabel,
+  value,
+  valueLabel,
+  state,
+  disabled,
+  disabledMessage,
+  valueField = "id",
+  onChange,
+}: {
+  ariaLabel: string;
+  value: string;
+  valueLabel?: string;
+  state: ResourceListState;
+  disabled: boolean;
+  disabledMessage?: string;
+  valueField?: "id" | "name";
+  onChange: (resource: DeploymentResource) => void;
+}) {
+  const { t } = useTranslation("ui");
+  const options = useMemo(
+    () => resourceOptions(state.items, valueField),
+    [state.items, valueField],
+  );
+  return (
+    <div className="pp-resource-picker">
+      <DeploymentSelect
+        ariaLabel={ariaLabel}
+        value={value}
+        valueLabel={valueLabel}
+        placeholder={state.loading ? t("common.loading") : t("deploymentResources.selectExisting")}
+        options={options}
+        disabled={disabled || Boolean(state.error)}
+        searchValue={state.search}
+        searchPlaceholder={t("deploymentResources.searchResource")}
+        loading={state.loading}
+        hasMore={state.hasMore}
+        emptyMessage={state.search.trim() ? t("deploymentResources.noMatch") : t("deploymentResources.noAvailable")}
+        onSearchChange={state.setSearch}
+        onLoadMore={state.loadMore}
+        onChange={(selectedValue) => {
+          const resource = state.items.find(
+            (item) => item[valueField] === selectedValue,
+          );
+          if (resource) onChange(resource);
+        }}
+      />
+      {disabledMessage ? (
+        <span className="pp-resource-status">{disabledMessage}</span>
+      ) : state.error ? (
+        <div className="pp-resource-error" role="alert">
+          <span>{state.error}</span>
+          <button type="button" onClick={state.reload}>{t("common.retry")}</button>
+        </div>
+      ) : state.loading && state.items.length === 0 ? (
+        <span className="pp-resource-status" aria-live="polite">
+          {state.search.trim() ? t("deploymentResources.searching") : t("deploymentResources.loading")}
+        </span>
+      ) : state.items.length === 0 ? (
+        <span className="pp-resource-status">
+          {state.search.trim() ? t("deploymentResources.noMatchSentence") : t("deploymentResources.noAvailableSentence")}
+        </span>
+      ) : state.serviceRegion ? (
+        <span className="pp-resource-status">
+          {t("deploymentResources.loadedSummary", {
+            region: state.serviceRegion,
+            loaded: state.items.length,
+            total: state.totalCount > 0 ? `/${state.totalCount}` : "",
+          })}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+export function ContainerRepositorySelector({
+  region,
+  value,
+  disabled = false,
+  onChange,
+}: {
+  region: string;
+  value: EnvironmentContainerRepository | undefined;
+  disabled?: boolean;
+  onChange: (value: EnvironmentContainerRepository) => void;
+}) {
+  const { t } = useTranslation("ui");
+  const registryList = useDeploymentResourceList(
+    region ? { kind: "cr-registry", region } : null,
+  );
+  const namespaceList = useDeploymentResourceList(
+    region && value?.registry
+      ? { kind: "cr-namespace", region, registry: value.registry }
+      : null,
+  );
+  const repositoryList = useDeploymentResourceList(
+    region && value?.registry && value.namespace
+      ? {
+          kind: "cr-repository",
+          region,
+          registry: value.registry,
+          namespace: value.namespace,
+        }
+      : null,
+  );
+
+  const current: EnvironmentContainerRepository = value ?? {
+    region,
+    registry: "",
+    namespace: "",
+    repository: "",
+  };
+
+  return (
+    <div className="pp-resource-fields pp-resource-fields-three environment-repository-fields">
+      <label className="pp-resource-field">
+        <span>{t("deploymentResources.registryInstance")}</span>
+        <ResourcePicker
+          ariaLabel={t("deploymentResources.registryAriaLabel")}
+          value={current.registry}
+          valueLabel={current.registry}
+          state={registryList}
+          disabled={disabled || !region}
+          valueField="name"
+          onChange={(resource) => onChange({
+            region,
+            registry: resource.name,
+            namespace: "",
+            repository: "",
+          })}
+        />
+      </label>
+      <label className="pp-resource-field">
+        <span>{t("deploymentResources.namespace")}</span>
+        <ResourcePicker
+          ariaLabel={t("deploymentResources.namespaceAriaLabel")}
+          value={current.namespace}
+          valueLabel={current.namespace}
+          state={namespaceList}
+          disabled={disabled || !current.registry}
+          disabledMessage={!current.registry ? t("deploymentResources.selectRegistryFirst") : undefined}
+          valueField="name"
+          onChange={(resource) => onChange({
+            ...current,
+            region,
+            namespace: resource.name,
+            repository: "",
+          })}
+        />
+      </label>
+      <label className="pp-resource-field">
+        <span>{t("deploymentResources.repository")}</span>
+        <ResourcePicker
+          ariaLabel={t("deploymentResources.existingRepository")}
+          value={current.repository}
+          valueLabel={current.repository}
+          state={repositoryList}
+          disabled={disabled || !current.registry || !current.namespace}
+          disabledMessage={!current.registry
+            ? t("deploymentResources.selectRegistryFirst")
+            : !current.namespace
+              ? t("deploymentResources.selectNamespaceFirst")
+              : undefined}
+          valueField="name"
+          onChange={(resource) => onChange({
+            ...current,
+            region,
+            repository: resource.name,
+          })}
+        />
+      </label>
+    </div>
+  );
+}
+
+function ModeField({
+  resource,
+  value,
+  disabled,
+  onChange,
+}: {
+  resource: string;
+  value: DeploymentResourceMode;
+  disabled: boolean;
+  onChange: (mode: DeploymentResourceMode) => void;
+}) {
+  const { t } = useTranslation("ui");
+  return (
+    <label className="pp-resource-field pp-resource-mode">
+      <span>{t("deploymentResources.configurationMode")}</span>
+      <DeploymentSelect
+        ariaLabel={t("deploymentResources.configurationModeAriaLabel", { resource })}
+        value={value}
+        placeholder={t("deploymentResources.selectConfigurationMode")}
+        options={resourceModeOptions(t)}
+        disabled={disabled}
+        onChange={(mode) => onChange(mode as DeploymentResourceMode)}
+      />
+    </label>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  placeholder,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="pp-resource-field">
+      <span>{label}</span>
+      <input
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        autoComplete="off"
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+    </label>
+  );
+}
+
+function AutomaticResourceNames({
+  items,
+  note,
+}: {
+  items: { label: string; name: string }[];
+  note?: string;
+}) {
+  const { t } = useTranslation("ui");
+  return (
+    <div className="pp-resource-auto-names">
+      <span>{t("deploymentResources.automaticNames")}</span>
+      <dl>
+        {items.map((item) => (
+          <div key={item.label}>
+            <dt>{item.label}</dt>
+            <dd title={item.name}>{item.name}</dd>
+          </div>
+        ))}
+      </dl>
+      {note && <small>{note}</small>}
+    </div>
+  );
+}
+
+export function deploymentResourcesError(resources: DeployResources): string | null {
+  if (resources.tos.mode !== "auto" && !resources.tos.bucket?.trim()) {
+    return i18n.t("ui:deploymentResources.validation.tos");
+  }
+  if (
+    resources.cr.mode !== "auto" &&
+    (!resources.cr.instance?.trim() ||
+      !resources.cr.namespace?.trim() ||
+      !resources.cr.repository?.trim())
+  ) {
+    return i18n.t("ui:deploymentResources.validation.cr");
+  }
+  if (
+    resources.codePipeline.mode !== "auto" &&
+    (!resources.codePipeline.workspaceName?.trim() ||
+      !resources.codePipeline.pipelineName?.trim())
+  ) {
+    return i18n.t("ui:deploymentResources.validation.codePipeline");
+  }
+  if (
+    resources.codePipeline.mode === "existing" &&
+    (!resources.codePipeline.workspaceId?.trim() ||
+      !resources.codePipeline.pipelineId?.trim())
+  ) {
+    return i18n.t("ui:deploymentResources.validation.existingCodePipeline");
+  }
+  return null;
+}
+
+export function DeploymentResources({
+  value,
+  agentName,
+  runtimeName,
+  region,
+  disabled,
+  validationError,
+  onChange,
+}: {
+  value: DeployResources;
+  agentName: string;
+  runtimeName: string;
+  region: string;
+  disabled: boolean;
+  validationError: string | null;
+  onChange: (resources: DeployResources) => void;
+}) {
+  const { t } = useTranslation("ui");
+  const resolvedAgentName = agentName.trim() || "agentkit-app";
+  const resolvedRuntimeName = runtimeName.trim() || resolvedAgentName;
+  const automaticBucketName =
+    region && region !== "cn-beijing"
+      ? t("deploymentResources.autoBucketWithRegion", { region: region.startsWith("cn-") ? region.slice(3) : region })
+      : t("deploymentResources.autoBucket");
+  const tosList = useDeploymentResourceList(
+    value.tos.mode === "existing" ? { kind: "tos-bucket", region } : null,
+  );
+  const registryList = useDeploymentResourceList(
+    value.cr.mode === "existing" ? { kind: "cr-registry", region } : null,
+  );
+  const namespaceList = useDeploymentResourceList(
+    value.cr.mode === "existing" && value.cr.instance
+      ? { kind: "cr-namespace", region, registry: value.cr.instance }
+      : null,
+  );
+  const repositoryList = useDeploymentResourceList(
+    value.cr.mode === "existing" && value.cr.instance && value.cr.namespace
+      ? {
+          kind: "cr-repository",
+          region,
+          registry: value.cr.instance,
+          namespace: value.cr.namespace,
+        }
+      : null,
+  );
+  const workspaceList = useDeploymentResourceList(
+    value.codePipeline.mode === "existing"
+      ? { kind: "cp-workspace", region }
+      : null,
+  );
+  const pipelineList = useDeploymentResourceList(
+    value.codePipeline.mode === "existing" && value.codePipeline.workspaceId
+      ? {
+          kind: "cp-pipeline",
+          region,
+          workspaceId: value.codePipeline.workspaceId,
+        }
+      : null,
+  );
+
+  const patch = (next: Partial<DeployResources>) =>
+    onChange({ ...value, ...next });
+
+  return (
+    <div className="pp-resource-list">
+      <div className="pp-resource-item">
+        <div className="pp-resource-name">{t("deploymentResources.tosBucket")}</div>
+        <div className="pp-resource-grid">
+          <ModeField
+            resource={t("deploymentResources.tosBucket")}
+            value={value.tos.mode}
+            disabled={disabled}
+            onChange={(mode) => patch({ tos: { mode } })}
+          />
+          {value.tos.mode === "create" && (
+            <TextField
+              label={t("deploymentResources.bucketName")}
+              value={value.tos.bucket ?? ""}
+              placeholder={t("deploymentResources.bucketNamePlaceholder")}
+              disabled={disabled}
+              onChange={(bucket) => patch({ tos: { ...value.tos, bucket } })}
+            />
+          )}
+          {value.tos.mode === "existing" && (
+            <label className="pp-resource-field">
+              <span>{t("deploymentResources.existingBucket")}</span>
+              <ResourcePicker
+                ariaLabel={t("deploymentResources.existingTosBucket")}
+                value={value.tos.bucket ?? ""}
+                valueLabel={value.tos.bucket}
+                state={tosList}
+                disabled={disabled}
+                onChange={(resource) =>
+                  patch({ tos: { ...value.tos, bucket: resource.name } })
+                }
+              />
+            </label>
+          )}
+          {value.tos.mode === "auto" && (
+            <AutomaticResourceNames
+              items={[
+                { label: t("deploymentResources.bucket"), name: automaticBucketName },
+              ]}
+              note={t("deploymentResources.accountIdResolved")}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="pp-resource-item">
+        <div className="pp-resource-name">{t("deploymentResources.containerRegistry")}</div>
+        <div className="pp-resource-grid">
+          <ModeField
+            resource="CR"
+            value={value.cr.mode}
+            disabled={disabled}
+            onChange={(mode) => patch({ cr: { mode } })}
+          />
+          {value.cr.mode === "create" && (
+            <div className="pp-resource-fields pp-resource-fields-three">
+              <TextField
+                label={t("deploymentResources.instanceName")}
+                value={value.cr.instance ?? ""}
+                placeholder={t("deploymentResources.crInstance")}
+                disabled={disabled}
+                onChange={(instance) => patch({ cr: { ...value.cr, instance } })}
+              />
+              <TextField
+                label={t("deploymentResources.namespace")}
+                value={value.cr.namespace ?? ""}
+                placeholder={t("deploymentResources.namespace")}
+                disabled={disabled}
+                onChange={(namespace) => patch({ cr: { ...value.cr, namespace } })}
+              />
+              <TextField
+                label={t("deploymentResources.repository")}
+                value={value.cr.repository ?? ""}
+                placeholder={t("deploymentResources.repository")}
+                disabled={disabled}
+                onChange={(repository) => patch({ cr: { ...value.cr, repository } })}
+              />
+            </div>
+          )}
+          {value.cr.mode === "existing" && (
+            <div className="pp-resource-fields pp-resource-fields-three">
+              <label className="pp-resource-field">
+                <span>{t("deploymentResources.crInstance")}</span>
+                <ResourcePicker
+                  ariaLabel={t("deploymentResources.existingCrInstance")}
+                  value={value.cr.instance ?? ""}
+                  valueLabel={value.cr.instance}
+                  state={registryList}
+                  disabled={disabled}
+                  valueField="name"
+                  onChange={(resource) =>
+                    patch({
+                      cr: { mode: "existing", instance: resource.name },
+                    })
+                  }
+                />
+              </label>
+              <label className="pp-resource-field">
+                <span>{t("deploymentResources.namespace")}</span>
+                <ResourcePicker
+                  ariaLabel={t("deploymentResources.existingCrNamespace")}
+                  value={value.cr.namespace ?? ""}
+                  valueLabel={value.cr.namespace}
+                  state={namespaceList}
+                  disabled={disabled || !value.cr.instance}
+                  valueField="name"
+                  onChange={(resource) =>
+                    patch({
+                      cr: {
+                        ...value.cr,
+                        namespace: resource.name,
+                        repository: undefined,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label className="pp-resource-field">
+                <span>{t("deploymentResources.repository")}</span>
+                <ResourcePicker
+                  ariaLabel={t("deploymentResources.existingCrRepository")}
+                  value={value.cr.repository ?? ""}
+                  valueLabel={value.cr.repository}
+                  state={repositoryList}
+                  disabled={disabled || !value.cr.namespace}
+                  valueField="name"
+                  onChange={(resource) =>
+                    patch({
+                      cr: { ...value.cr, repository: resource.name },
+                    })
+                  }
+                />
+              </label>
+            </div>
+          )}
+          {value.cr.mode === "auto" && (
+            <AutomaticResourceNames
+              items={[
+                { label: t("deploymentResources.crInstance"), name: t("deploymentResources.autoRegistry") },
+                { label: t("deploymentResources.namespace"), name: "agentkit" },
+                {
+                  label: t("deploymentResources.repository"),
+                  name: t("deploymentResources.autoRepositoryName", { name: resolvedAgentName }),
+                },
+              ]}
+              note={t("deploymentResources.registryNameNote")}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="pp-resource-item">
+        <div className="pp-resource-name">CodePipeline</div>
+        <div className="pp-resource-grid">
+          <ModeField
+            resource="CodePipeline"
+            value={value.codePipeline.mode}
+            disabled={disabled}
+            onChange={(mode) => patch({ codePipeline: { mode } })}
+          />
+          {value.codePipeline.mode === "create" && (
+            <div className="pp-resource-fields">
+              <TextField
+                label={t("deploymentResources.workspaceName")}
+                value={value.codePipeline.workspaceName ?? ""}
+                placeholder={t("deploymentResources.workspaceName")}
+                disabled={disabled}
+                onChange={(workspaceName) =>
+                  patch({ codePipeline: { ...value.codePipeline, workspaceName } })
+                }
+              />
+              <TextField
+                label={t("deploymentResources.pipelineName")}
+                value={value.codePipeline.pipelineName ?? ""}
+                placeholder={t("deploymentResources.pipelineName")}
+                disabled={disabled}
+                onChange={(pipelineName) =>
+                  patch({ codePipeline: { ...value.codePipeline, pipelineName } })
+                }
+              />
+            </div>
+          )}
+          {value.codePipeline.mode === "existing" && (
+            <div className="pp-resource-fields">
+              <label className="pp-resource-field">
+                <span>{t("deploymentResources.workspace")}</span>
+                <ResourcePicker
+                  ariaLabel={t("deploymentResources.existingWorkspace")}
+                  value={value.codePipeline.workspaceId ?? ""}
+                  valueLabel={value.codePipeline.workspaceName}
+                  state={workspaceList}
+                  disabled={disabled}
+                  onChange={(resource) =>
+                    patch({
+                      codePipeline: {
+                        mode: "existing",
+                        workspaceId: resource.id,
+                        workspaceName: resource.name,
+                      },
+                    })
+                  }
+                />
+              </label>
+              <label className="pp-resource-field">
+                <span>{t("deploymentResources.compatiblePipeline")}</span>
+                <ResourcePicker
+                  ariaLabel={t("deploymentResources.existingPipeline")}
+                  value={value.codePipeline.pipelineId ?? ""}
+                  valueLabel={value.codePipeline.pipelineName}
+                  state={pipelineList}
+                  disabled={disabled || !value.codePipeline.workspaceId}
+                  onChange={(resource) =>
+                    patch({
+                      codePipeline: {
+                        ...value.codePipeline,
+                        pipelineId: resource.id,
+                        pipelineName: resource.name,
+                      },
+                    })
+                  }
+                />
+              </label>
+            </div>
+          )}
+          {value.codePipeline.mode === "auto" && (
+            <AutomaticResourceNames
+              items={[
+                { label: t("deploymentResources.workspace"), name: "agentkit-cli-workspace" },
+                {
+                  label: t("deploymentResources.pipeline"),
+                  name: resolvedRuntimeName,
+                },
+              ]}
+              note={t("deploymentResources.pipelineNameNote")}
+            />
+          )}
+        </div>
+      </div>
+      {validationError && (
+        <p className="pp-resource-validation" role="alert">
+          {validationError}
+        </p>
+      )}
+    </div>
+  );
+}

@@ -12,27 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
 import os
-from veadk.utils.misc import getenv
+import time
+
 from veadk.version import VERSION
 
 DEFAULT_AGENT_NAME = "veAgent"
 
-DEFAULT_MODEL_AGENT_NAME = "doubao-seed-1-8-251228"
+DEFAULT_MODEL_AGENT_NAME = "doubao-seed-2-1-pro-260628"
 DEFAULT_MODEL_AGENT_PROVIDER = "openai"
 DEFAULT_MODEL_AGENT_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
 DEFAULT_MODEL_EXTRA_CONFIG = {
     "extra_headers": {
-        "x-is-encrypted": getenv("MODEL_AGENT_ENCRYPTED", "true"),
+        "x-is-encrypted": os.getenv("MODEL_AGENT_ENCRYPTED") or "true",
         "veadk-source": "veadk",
         "veadk-version": VERSION,
         "User-Agent": f"VeADK/{VERSION}",
-        "X-Client-Request-Id": getenv("MODEL_AGENT_CLIENT_REQ_ID", f"veadk/{VERSION}"),
+        "X-Client-Request-Id": os.getenv("MODEL_AGENT_CLIENT_REQ_ID")
+        or f"veadk/{VERSION}",
     },
     "extra_body": {
         "caching": {
-            "type": getenv("MODEL_AGENT_CACHING", "enabled"),
+            "type": os.getenv("MODEL_AGENT_CACHING") or "enabled",
         },
         # "thinking": {
         #     "type": "disabled"
@@ -79,16 +80,20 @@ DEFAULT_NACOS_INSTANCE_NAME = "veadk"
 provider = os.getenv("CLOUD_PROVIDER")
 
 if provider and provider.lower() == "byteplus":
-    DEFAULT_MODEL_AGENT_NAME = "seed-1-6-250915"
+    DEFAULT_MODEL_AGENT_NAME = "seed-2-0-lite-260228"
     DEFAULT_MODEL_AGENT_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
     DEFAULT_IMAGE_EDIT_MODEL_NAME = "seededit-3-0-i2i-250628"
     DEFAULT_IMAGE_EDIT_MODEL_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
-    DEFAULT_VIDEO_MODEL_NAME = "seedance-1-5-pro-251215"
+    DEFAULT_VIDEO_MODEL_NAME = "dreamina-seedance-2-0-260128"
     DEFAULT_VIDEO_MODEL_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
-    DEFAULT_IMAGE_GENERATE_MODEL_NAME = "seedream-4-5-251128"
+    DEFAULT_IMAGE_GENERATE_MODEL_NAME = "dola-seedream-5-0-pro-260628"
     DEFAULT_IMAGE_GENERATE_MODEL_API_BASE = (
         "https://ark.ap-southeast.bytepluses.com/api/v3"
     )
 DEFAULT_MODEL_EMBEDDING_NAME = "doubao-embedding-vision-250615"
 DEFAULT_MODEL_EMBEDDING_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
 DEFAULT_MODEL_EMBEDDING_DIM = 2048
+
+if provider and provider.lower() == "byteplus":
+    DEFAULT_MODEL_EMBEDDING_NAME = "skylark-embedding-vision-250615"
+    DEFAULT_MODEL_EMBEDDING_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"

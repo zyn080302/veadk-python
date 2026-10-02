@@ -9,10 +9,12 @@ export interface StackCardDef {
   icon: ComponentType<{ className?: string }>;
   title: string;
   desc: string;
+  status?: string;
   onClick: () => void;
+  disabled?: boolean;
 }
 
-/** A vertical list of wide "long bar" cards — used for the 添加 Agent chooser
+/** A vertical list of wide "long bar" cards used for the add-Agent chooser
  *  and the create-mode picker. */
 export function StackCards({ title, sub, cards, footer }: {
   title: string;
@@ -31,8 +33,9 @@ export function StackCards({ title, sub, cards, footer }: {
           <motion.button
             key={c.key}
             type="button"
-            className="stk-card"
-            onClick={c.onClick}
+            className={`stk-card ${c.disabled ? "stk-card-disabled" : ""}`}
+            onClick={c.disabled ? undefined : c.onClick}
+            disabled={c.disabled}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.18, ease: "easeOut", delay: i * 0.04 }}
@@ -44,6 +47,7 @@ export function StackCards({ title, sub, cards, footer }: {
               <span className="stk-card-title">{c.title}</span>
               <span className="stk-card-desc">{c.desc}</span>
             </span>
+            {c.status && <span className="stk-card-status">{c.status}</span>}
             <ChevronRight className="stk-card-arrow" />
           </motion.button>
         ))}

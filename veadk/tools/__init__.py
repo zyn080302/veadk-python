@@ -20,9 +20,8 @@ from veadk.tools.demo_tools import get_city_weather, get_location_weather
 
 # Common built-in tools addressable by name, for dynamic mounting (e.g. a
 # harness spec listing tool names). Values are "module:attr" import paths so
-# importing this package does NOT eagerly pull each tool's dependencies — some
-# tools (e.g. image/video generation) build a client at import time and require
-# credentials. They are resolved lazily on first use via get_builtin_tool().
+# importing this package does NOT eagerly pull each tool's dependencies. They
+# are resolved lazily on first use via get_builtin_tool().
 _BUILTIN_TOOLS: dict[str, str] = {
     # Web
     "web_search": "veadk.tools.builtin_tools.web_search:web_search",
@@ -37,7 +36,12 @@ _BUILTIN_TOOLS: dict[str, str] = {
     "image_generate": "veadk.tools.builtin_tools.image_generate:image_generate",
     "image_edit": "veadk.tools.builtin_tools.image_edit:image_edit",
     "video_generate": "veadk.tools.builtin_tools.video_generate:video_generate",
+    "video_task_query": "veadk.tools.builtin_tools.video_generate:video_task_query",
+    "ppt_generate": "veadk.tools.builtin_tools.ppt_generate:ppt_generate",
     "text_to_speech": "veadk.tools.builtin_tools.tts:text_to_speech",
+    # Demo / example tools
+    "get_city_weather": "veadk.tools.demo_tools:get_city_weather",
+    "get_location_weather": "veadk.tools.demo_tools:get_location_weather",
 }
 
 

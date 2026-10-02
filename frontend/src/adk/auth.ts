@@ -1,13 +1,20 @@
 // Auth forwarding for cloud deployments.
 //
-// This frontend never puts anything in the page querystring itself, so any
-// query params present on load must have been injected by the identity gateway
-// (auth token, signature, etc.) — whatever their custom names. We therefore
-// capture the entire incoming querystring, stash it, strip it from the visible
-// address bar, and re-attach it verbatim to every API request and to any page
-// navigation. Cookies (e.g. VeADK's `veadk_session`) are sent automatically.
+// Except for local development helpers, query params present on load are
+// injected by the identity gateway (auth token, signature, etc.). Capture and
+// forward those auth params while keeping local-only params in the address bar.
+// Cookies (e.g. VeADK's `veadk_session`) are sent automatically.
 
 const STORAGE_KEY = "veadk_auth_qs";
+const LOCAL_QUERY_KEYS = new Set([
+  "view",
+  "source",
+  "sessionId",
+  "artifactSha256",
+  "validationReportSha256",
+  "projectId",
+  "versionId",
+]);
 
 let cached: string | null = null;
 
@@ -15,14 +22,35 @@ let cached: string | null = null;
 function authQuery(): string {
   if (cached !== null) return cached;
 
-  const incoming = window.location.search.replace(/^\?/, "");
-  if (incoming) {
-    sessionStorage.setItem(STORAGE_KEY, incoming);
-    // Keep it out of the address bar / history / bookmarks.
-    window.history.replaceState(null, "", window.location.pathname + window.location.hash);
-    cached = incoming;
+  const incoming = new URLSearchParams(window.location.search);
+  const forwarded = new URLSearchParams();
+  const local = new URLSearchParams();
+  const intelligentDeploymentDeepLink =
+    incoming.get("view") === "runtime-deploy"
+    && incoming.get("source") === "intelligent-development";
+  incoming.forEach((value, key) => {
+    (
+      intelligentDeploymentDeepLink && LOCAL_QUERY_KEYS.has(key)
+        ? local
+        : forwarded
+    ).append(key, value);
+  });
+  const forwardedQuery = forwarded.toString();
+  if (forwardedQuery) {
+    sessionStorage.setItem(STORAGE_KEY, forwardedQuery);
+    cached = forwardedQuery;
   } else {
     cached = sessionStorage.getItem(STORAGE_KEY) ?? "";
+  }
+  if (forwardedQuery) {
+    const localQuery = local.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname
+        + (localQuery ? `?${localQuery}` : "")
+        + window.location.hash,
+    );
   }
   return cached;
 }

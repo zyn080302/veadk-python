@@ -27,6 +27,7 @@ from veadk.config import getenv, veadk_environments
 from veadk.integrations.ve_apig.ve_apig import APIGateway
 from veadk.integrations.ve_faas.ve_faas import VeFaaS
 from veadk.integrations.ve_identity.identity_client import IdentityClient
+from veadk.utils.cloud_provider import DEFAULT_CLOUD_PROVIDER, CloudProvider
 from veadk.utils.logger import get_logger
 from veadk.utils.misc import formatted_timestamp
 
@@ -45,6 +46,8 @@ class CloudAgentEngine(BaseModel):
         volcengine_secret_key (str): Secret key for Volcengine authentication.
             Defaults to VOLCENGINE_SECRET_KEY environment variable.
         region (str): Region for Volcengine services. Defaults to "cn-beijing".
+        project (str): Volcengine project for the VeFaaS function. Defaults to
+            "default".
         _vefaas_service (VeFaaS): Internal VeFaaS client instance, initialized post-creation.
         _veapig_service (APIGateway): Internal VeAPIG client instance, initialized post-creation.
         _veidentity_service (IdentityClient): Internal Identity client instance, initialized post-creation.
@@ -68,7 +71,15 @@ class CloudAgentEngine(BaseModel):
     volcengine_secret_key: str = getenv(
         "VOLCENGINE_SECRET_KEY", "", allow_false_values=True
     )
+    volcengine_session_token: str = getenv(
+        "VOLCENGINE_SESSION_TOKEN", "", allow_false_values=True
+    ) or getenv("VOLC_SESSIONTOKEN", "", allow_false_values=True)
     region: str = "cn-beijing"
+    project: str = "default"
+    provider: CloudProvider = DEFAULT_CLOUD_PROVIDER
+    vefaas_application_template_id: str = getenv(
+        "VEFAAS_APPLICATION_TEMPLATE_ID", "", allow_false_values=True
+    )
 
     def model_post_init(self, context: Any, /) -> None:
         """Initializes the internal VeFaaS service after Pydantic model validation.
@@ -85,20 +96,35 @@ class CloudAgentEngine(BaseModel):
         Note:
             This is a Pydantic lifecycle method, ensuring service readiness after init.
         """
+        if (
+            self.provider != "byteplus"
+            and "region" not in self.model_fields_set
+            and os.getenv("REGION")
+        ):
+            self.region = os.getenv("REGION") or self.region
+
         self._vefaas_service = VeFaaS(
             access_key=self.volcengine_access_key,
             secret_key=self.volcengine_secret_key,
+            session_token=self.volcengine_session_token,
             region=self.region,
+            project_name=self.project,
+            provider=self.provider,
+            application_template_id=self.vefaas_application_template_id,
         )
         self._veapig_service = APIGateway(
             access_key=self.volcengine_access_key,
             secret_key=self.volcengine_secret_key,
             region=self.region,
+            session_token=self.volcengine_session_token,
+            provider=self.provider,
         )
         self._veidentity_service = IdentityClient(
             access_key=self.volcengine_access_key,
             secret_key=self.volcengine_secret_key,
+            session_token=self.volcengine_session_token,
             region=self.region,
+            provider=self.provider,
         )
 
     def _prepare(self, path: str, name: str):
@@ -220,7 +246,17 @@ class CloudAgentEngine(BaseModel):
         auth_method: str = "none",
         identity_user_pool_name: str = "",
         identity_client_name: str = "",
+        identity_user_pool_uid: str = "",
+        identity_client_uid: str = "",
+        client_secret: str = "",
+        reuse_gateway: bool = False,
         local_test: bool = False,
+        enable_mcp_session: bool = True,
+        keep_failed_deploy: bool = False,
+        disable_gateway_cors: bool = False,
+        cpu_milli: int | None = None,
+        memory_mb: int | None = None,
+        max_instance: int | None = None,
     ) -> CloudApp:
         """Deploys a local agent project to Volcengine FaaS, creating necessary resources.
 
@@ -237,6 +273,10 @@ class CloudAgentEngine(BaseModel):
             identity_user_pool_name (str, optional): Custom user pool name. Defaults to timestamped.
             identity_client_name (str, optional): Custom client name. Defaults to timestamped.
             local_test (bool): Perform FastAPI server test before deploy. Defaults to False.
+            disable_gateway_cors (bool): Disable route-wide APIG CORS. Defaults to False.
+            cpu_milli: Function CPU in millicores; omitted to use platform defaults.
+            memory_mb: Function memory in MB; omitted to preserve existing settings.
+            max_instance: Maximum function instances; omitted to preserve cloud settings.
 
         Returns:
             CloudApp: Deployed application with endpoint, name, and ID.
@@ -273,7 +313,10 @@ class CloudAgentEngine(BaseModel):
         if local_test:
             self._try_launch_fastapi_server(path)
 
-        if not gateway_name:
+        # When reusing a gateway, leave gateway_name empty so VeFaaS.deploy picks
+        # an existing serverless gateway (avoids hitting the per-account gateway
+        # quota on every deploy).
+        if not gateway_name and not reuse_gateway:
             gateway_name = f"{application_name}-gw-{formatted_timestamp()}"
         if not gateway_service_name:
             gateway_service_name = f"{application_name}-gw-svr-{formatted_timestamp()}"
@@ -294,6 +337,12 @@ class CloudAgentEngine(BaseModel):
                 gateway_service_name=gateway_service_name,
                 gateway_upstream_name=gateway_upstream_name,
                 enable_key_auth=enable_key_auth,
+                enable_mcp_session=enable_mcp_session,
+                keep_failed_deploy=keep_failed_deploy,
+                disable_gateway_cors=disable_gateway_cors,
+                cpu_milli=cpu_milli,
+                memory_mb=memory_mb,
+                max_instance=max_instance,
             )
             _ = function_id  # for future use
 
@@ -302,14 +351,25 @@ class CloudAgentEngine(BaseModel):
             )
 
             if auth_method == "oauth2":
-                # Get or create the Identity user pool.
-                identity_user_pool = self._veidentity_service.get_user_pool(
-                    name=identity_user_pool_name,
-                )
-                if not identity_user_pool:
-                    identity_user_pool = self._veidentity_service.create_user_pool(
+                # Resolve the Identity user pool: reuse an existing one by UID
+                # when given (frontend deploy passes --user-pool-id), else
+                # get-or-create by name.
+                if identity_user_pool_uid:
+                    identity_user_pool = self._veidentity_service.get_user_pool(
+                        uid=identity_user_pool_uid,
+                    )
+                    if not identity_user_pool:
+                        raise ValueError(
+                            f"User pool not found by UID: {identity_user_pool_uid}"
+                        )
+                else:
+                    identity_user_pool = self._veidentity_service.get_user_pool(
                         name=identity_user_pool_name,
                     )
+                    if not identity_user_pool:
+                        identity_user_pool = self._veidentity_service.create_user_pool(
+                            name=identity_user_pool_name,
+                        )
                 identity_user_pool_id = identity_user_pool[0]
                 identity_user_pool_domain = identity_user_pool[1]
 
@@ -336,24 +396,41 @@ class CloudAgentEngine(BaseModel):
                 plugin_name = ""
                 plugin_config = {}
                 if use_adk_web:
-                    # Get or create the Identity client.
+                    # Resolve the Identity client: reuse an existing one by UID
+                    # when given (frontend deploy passes --allowed-client-id),
+                    # else get-or-create by name.
                     identity_client_id = ""
                     identity_client_secret = ""
-                    identity_client = self._veidentity_service.get_user_pool_client(
-                        user_pool_uid=identity_user_pool_id,
-                        name=identity_client_name,
-                    )
-                    if identity_client:
-                        identity_client_id = identity_client[0]
-                        identity_client_secret = identity_client[1]
-                    else:
-                        identity_client_id, identity_client_secret = (
-                            self._veidentity_service.create_user_pool_client(
-                                user_pool_uid=identity_user_pool_id,
-                                name=identity_client_name,
-                                client_type="WEB_APPLICATION",
-                            )
+                    if identity_client_uid:
+                        identity_client = self._veidentity_service.get_user_pool_client(
+                            user_pool_uid=identity_user_pool_id,
+                            client_uid=identity_client_uid,
                         )
+                        if identity_client:
+                            identity_client_id = identity_client[0]
+                            identity_client_secret = identity_client[1]
+                        else:
+                            identity_client_id = identity_client_uid
+                        # GetUserPoolClient may not return the secret; fall back
+                        # to an explicitly provided one.
+                        if not identity_client_secret and client_secret:
+                            identity_client_secret = client_secret
+                    else:
+                        identity_client = self._veidentity_service.get_user_pool_client(
+                            user_pool_uid=identity_user_pool_id,
+                            name=identity_client_name,
+                        )
+                        if identity_client:
+                            identity_client_id = identity_client[0]
+                            identity_client_secret = identity_client[1]
+                        else:
+                            identity_client_id, identity_client_secret = (
+                                self._veidentity_service.create_user_pool_client(
+                                    user_pool_uid=identity_user_pool_id,
+                                    name=identity_client_name,
+                                    client_type="WEB_APPLICATION",
+                                )
+                            )
 
                     self._veidentity_service.register_callback_for_user_pool_client(
                         user_pool_uid=identity_user_pool_id,
@@ -389,11 +466,16 @@ class CloudAgentEngine(BaseModel):
                     plugin_config=json.dumps(plugin_config),
                 )
 
-            return CloudApp(
+            cloud_app = CloudApp(
                 vefaas_application_name=application_name,
                 vefaas_endpoint=vefaas_application_url,
                 vefaas_application_id=app_id,
             )
+            # Expose the function id so callers can do a post-deploy env update
+            # + re-release (e.g. injecting OAUTH2_REDIRECT_URI once the public
+            # URL is known).
+            cloud_app.vefaas_function_id = function_id
+            return cloud_app
         except Exception as e:
             raise ValueError(
                 f"Failed to deploy local agent project to Volcengine FaaS platform. Error: {e}"

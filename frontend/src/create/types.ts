@@ -6,7 +6,7 @@ export interface MemoryConfig {
   longTerm: boolean;
 }
 
-/** A custom function tool the user wants — codegen emits a stub for it. */
+/** A custom function tool the user wants — the backend generator emits a stub for it. */
 export interface CustomTool {
   name: string;
   description: string;
@@ -21,19 +21,122 @@ export interface McpTool {
   url?: string;
   /** http transport: optional bearer token -> Authorization header. */
   authToken?: string;
+  /** Environment variable used by generated code for the bearer token. */
+  authTokenEnv?: string;
+  /** Server-confirmed configured state; recovered values stay editor-only. */
+  credentialConfigured?: boolean;
+  /** Original published endpoint for a server-managed credential. Editor-only. */
+  credentialSourceUrl?: string;
+  /** Original published credential reference. Editor-only and never a value. */
+  credentialSourceAuthTokenEnv?: string;
   /** stdio transport: the command to launch (e.g. "npx"). */
   command?: string;
   /** stdio transport: command args (e.g. ["-y", "@playwright/mcp@latest"]). */
   args?: string[];
 }
 
-/** A skill selected from the Skill Hub (findskill.com); its files get bundled
- *  into the generated project under skills/<name>/. */
-export interface SelectedSkill {
-  slug: string;
+/** One server-authorized MCP credential restored into the in-memory editor. */
+export interface McpCredentialValue {
+  agentName: string;
   name: string;
-  namespace: string;
+  url: string;
+  authTokenEnv: string;
+  value: string;
 }
+
+// Import and re-export the multi-source SelectedSkill (and related types) from
+// the skills module. Importing locally brings the names into scope so the
+// AgentDraft interface below can reference SelectedSkill, while `export type`
+// makes them available to external importers of "./types" unchanged.
+import type { SelectedSkill, SkillHit, SkillSource } from "./skills/types";
+import type { GlobalContextConfig } from "./globalContext";
+import { DEFAULT_KB_BACKEND } from "./veadkCatalog";
+import { createT } from "./i18n";
+import {
+  defaultModelName,
+  VOLCENGINE_DEFAULT_MODEL_NAME,
+  type CloudProvider,
+} from "../adk/cloudProvider";
+export type { SelectedSkill, SkillHit, SkillSource };
+
+
+export interface NetworkConfig {
+  /** "public" (default, public endpoint), "private" (VPC only), or "both". */
+  mode: "public" | "private" | "both";
+  /** Required when mode is private/both. */
+  vpcId?: string;
+  /** Comma-separated subnet IDs for private/both mode. */
+  subnetIds?: string;
+  /** Whether the private network has shared internet access. */
+  enableSharedInternetAccess?: boolean;
+}
+
+export interface A2aRegistryConfig {
+  enabled: boolean;
+  /** REGISTRY_SPACE_ID. */
+  registrySpaceId: string;
+  /** REGISTRY_TOP_K. Empty means the UI supplies the explicit default. */
+  registryTopK?: string;
+  /** REGISTRY_REGION. Empty means the UI supplies the explicit default. */
+  registryRegion?: string;
+  /** REGISTRY_ENDPOINT. Empty means the UI supplies the explicit default. */
+  registryEndpoint?: string;
+}
+
+export interface DeploymentConfig {
+  feishuEnabled: boolean;
+  /** Explicit AgentKit Runtime resource name. */
+  runtimeName?: string;
+  /** Whether the user explicitly edited runtimeName instead of using the Root Agent default. */
+  runtimeNameCustomized?: boolean;
+  network?: NetworkConfig;
+  /** Safe Ark API Key metadata used to restore the selection when editing. */
+  modelApiKeyId?: string;
+  modelApiKeyName?: string;
+  /** Values entered for feature-specific runtime configuration.
+   *  Draft and YAML persistence intentionally preserve these values. */
+  envValues?: Record<string, string>;
+}
+
+export type CloudCliToolId = "lark-cli" | "github-cli" | "pandoc";
+export const MAX_CLOUD_DOCKERFILE_LENGTH = 65_536;
+
+export interface CloudEnvironmentConfig {
+  /** User-owned environment selected for this Agent. */
+  environmentId: string;
+  /** Immutable build version selected with the environment. */
+  environmentVersionId: string;
+  /** Legacy inline environment fields kept for draft migration only. */
+  cliTools?: CloudCliToolId[];
+  dockerfile?: string;
+}
+
+export type HarnessSidecarOptionId =
+  | "context_engine"
+  | "compressor"
+  | "verifier"
+  | "long_run_control"
+  | "mcp_resilience";
+
+export type HarnessSidecarProfileId = "default" | "ops";
+
+export interface HarnessSidecarIntent {
+  enabled: boolean;
+  profile: HarnessSidecarProfileId;
+  componentOverrides: Record<HarnessSidecarOptionId, boolean>;
+  catalogVersion?: string;
+  planHash?: string;
+  globalContext?: GlobalContextConfig;
+}
+
+export interface ModelFallbackEndpointDraft {
+  modelName: string;
+  modelProvider?: string;
+  modelApiBase?: string;
+  modelApiKeyEnv?: string;
+}
+
+export type ModelFallbackDraft = string | ModelFallbackEndpointDraft;
 
 /** A draft VeADK agent configuration produced by a creation flow. */
 export interface AgentDraft {
@@ -41,9 +144,28 @@ export interface AgentDraft {
   description: string;
   /** System prompt. */
   instruction: string;
+  /** Enable runtime resource discovery and dynamic sub-Agent delegation. */
+  dynamicAgentDelegation?: boolean;
+  /**
+   * Agent kind for the custom flow. "llm" is a VeADK `Agent` (LlmAgent);
+   * "sequential"/"parallel"/"loop" are orchestrators from `google.adk.agents`
+   * that only schedule their sub_agents (no model/instruction/tools/memory of
+   * their own); "a2a" is a leaf remote Agent configured through an AgentKit
+   * A2A center. Defaults to "llm" when absent.
+   */
+  agentType?: "llm" | "sequential" | "parallel" | "loop" | "a2a";
+  /** Cloud provider selected by the Studio shell. */
+  cloudProvider?: CloudProvider;
+  /** Max iterations for a "loop" orchestrator (LoopAgent.max_iterations). */
+  maxIterations?: number;
+  /** Remote agent URL for an "a2a" agent (RemoteVeAgent.url). */
+  a2aUrl?: string;
   model?: string;
   /** Model configuration (optional). Empty values fall back to veadk config/env. */
+  modelSource?: "ark" | "custom";
   modelName?: string;
+  /** Fallback models tried in order after modelName. Strings reuse the primary provider. */
+  modelFallbacks?: ModelFallbackDraft[];
   modelProvider?: string;
   modelApiBase?: string;
   /** Free-text tool names (legacy; intelligent/template modes still use these). */
@@ -53,24 +175,29 @@ export interface AgentDraft {
   knowledgebase: boolean;
   /** Observability / tracing. */
   tracing: boolean;
-  enableA2ui: boolean;
   /** Nested sub-agents (the custom flow supports recursive creation). */
   subAgents: AgentDraft[];
 
-  /* ---- custom-mode codegen selections (all optional / additive) ---- */
+  /* ---- custom-mode generation selections (all optional / additive) ---- */
   /** Ids of selected built-in tools (see veadkCatalog BUILTIN_TOOLS). */
   builtinTools?: string[];
-  /** User-defined function tools — codegen emits runnable stubs. */
+  /** User-defined function tools — the backend generator emits runnable stubs. */
   customTools?: CustomTool[];
-  /** MCP tool servers — codegen emits an MCPToolset per entry. */
+  /** MCP tool servers — the backend generator emits an MCPToolset per entry. */
   mcpTools?: McpTool[];
+  /** AgentKit A2A center configuration for a remote Agent. */
+  a2aRegistry?: A2aRegistryConfig;
   /** Chosen backends when memory is enabled. */
   shortTermBackend?: string;
   longTermBackend?: string;
+  /** Existing long-term memory collection/index selected for managed backends. */
+  longTermMemoryIndex?: string;
   /** Persist finished sessions into long-term memory. */
   autoSaveSession?: boolean;
   /** Chosen knowledgebase backend when knowledgebase is enabled. */
   knowledgebaseBackend?: string;
+  /** Existing knowledgebase collection/index selected for managed backends. */
+  knowledgebaseIndex?: string;
   /** Selected tracing exporter ids (apmplus | cozeloop | tls). */
   tracingExporters?: string[];
   /** Skills picked from the Skill Hub — downloaded into the project at build. */
@@ -81,36 +208,70 @@ export interface AgentDraft {
     nodes: { id: string; agent: AgentDraft }[];
     edges: { from: string; to: string }[];
   };
+  /** Deployment-time options that do not change generated agent code. */
+  deployment?: DeploymentConfig;
+  /** Optional command-line tools installed into the cloud runtime image. */
+  cloudEnvironment?: CloudEnvironmentConfig;
+  /** Root Runtime-level Harness Sidecar selection. Never set on sub-Agents. */
+  harnessSidecar?: HarnessSidecarIntent;
 }
 
-export function emptyDraft(): AgentDraft {
+// Pre-filled defaults so description / system prompt / model are never empty
+// when the custom wizard opens. `DEFAULT_MODEL_NAME` mirrors veadk's
+// DEFAULT_MODEL_AGENT_NAME (veadk/consts.py).
+export const DEFAULT_MODEL_NAME = VOLCENGINE_DEFAULT_MODEL_NAME;
+
+export function emptyDraft(cloudProvider: CloudProvider = "volcengine"): AgentDraft {
   return {
     name: "",
-    description: "",
-    instruction: "",
+    description: createT("defaults.description"),
+    instruction: createT("defaults.instruction"),
+    dynamicAgentDelegation: false,
+    agentType: "llm",
+    cloudProvider,
+    maxIterations: 3,
+    a2aUrl: "",
     tools: [],
     skills: [],
     memory: { shortTerm: false, longTerm: false },
     knowledgebase: false,
     tracing: false,
-    enableA2ui: false,
     subAgents: [],
     builtinTools: [],
     customTools: [],
     mcpTools: [],
-    modelName: "",
+    a2aRegistry: {
+      enabled: false,
+      registrySpaceId: "",
+      registryTopK: "",
+      registryRegion: "",
+      registryEndpoint: "",
+    },
+    modelName: defaultModelName(cloudProvider),
+    modelFallbacks: [],
+    modelSource: "ark",
     modelProvider: "",
     modelApiBase: "",
     shortTermBackend: "local",
     longTermBackend: "local",
+    longTermMemoryIndex: "",
     autoSaveSession: false,
-    knowledgebaseBackend: "local",
+    knowledgebaseBackend: DEFAULT_KB_BACKEND,
+    knowledgebaseIndex: "",
     tracingExporters: [],
     selectedSkills: [],
+    cloudEnvironment: { environmentId: "", environmentVersionId: "" },
+    deployment: {
+      feishuEnabled: false,
+      modelApiKeyId: "",
+      modelApiKeyName: "",
+    },
   };
 }
 
 export interface CreateModeProps {
+  /** Cloud provider selected by the Studio shell. */
+  cloudProvider?: CloudProvider;
   /** Return to the quick-create card menu. */
   onBack: () => void;
   /** Called when the user finishes assembling an agent. */

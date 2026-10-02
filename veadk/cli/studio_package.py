@@ -1,0 +1,305 @@
+# Copyright (c) 2025 Beijing Volcano Engine Technology Co., Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Build the source bundle used by a VeFaaS-hosted Studio."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from frontend.service.studio_release_server.publisher import (
+    stage_studio_wheel_source,
+    validate_studio_wheel,
+)
+from veadk.cli.frontend_branding import SiteLogo
+from veadk.cli.studio_dependencies import (
+    STUDIO_AGENTKIT_CLI_ARTIFACT,
+    stage_studio_agentkit_cli_archive,
+    stage_studio_dependency_sources,
+    stage_studio_dependency_wheels,
+)
+from frontend.service.studio_release_server.offline_runtime import (
+    build_studio_offline_runtime,
+)
+from veadk.utils.cloud_provider import DEFAULT_CLOUD_PROVIDER, CloudProvider
+
+
+def stage_studio_provider_requirements(
+    package_dir: Path,
+    provider: CloudProvider = DEFAULT_CLOUD_PROVIDER,
+) -> str:
+    """Stage provider-specific wheels and return their requirements lines."""
+    stage_studio_agentkit_cli_archive(package_dir)
+    if provider != "byteplus":
+        return ""
+    dependencies = stage_studio_dependency_wheels(package_dir, provider=provider)
+    return "".join(f"./{path.name}\n" for path in dependencies)
+
+
+def studio_run_script(
+    site_logo_filename: str | None = None,
+    *,
+    provider: CloudProvider | None = DEFAULT_CLOUD_PROVIDER,
+    runtime_manifest_filename: str | None = None,
+    bundle_agentkit_cli: bool = True,
+) -> str:
+    """Return the authenticated VeFaaS entrypoint used by Studio."""
+    provider_argument = (
+        provider
+        if provider is not None
+        else '"${CLOUD_PROVIDER:-${AGENTKIT_CLOUD_PROVIDER:-volcengine}}"'
+    )
+    command = (
+        "python3 -m veadk.cli.studio_start "
+        f"--provider {provider_argument} --auth-mode frontend"
+    )
+    if site_logo_filename:
+        command += f' --site-logo "$ROOT_DIR/{site_logo_filename}"'
+    command += ' --host "$HOST" --port "$PORT"\n'
+    if runtime_manifest_filename:
+        managed_source = (
+            "export VEADK_STUDIO_AGENTKIT_CLI_RUNTIME_MANIFEST="
+            f'"$ROOT_DIR/{runtime_manifest_filename}"\n'
+        )
+        companion = (
+            "python3 -m veadk.cli.studio_companion "
+            f'--runtime-manifest "$ROOT_DIR/{runtime_manifest_filename}" '
+            f"--provider {provider_argument}\n"
+        )
+    elif bundle_agentkit_cli:
+        managed_source = (
+            "export VEADK_STUDIO_AGENTKIT_CLI_ARCHIVE="
+            f'"$ROOT_DIR/{STUDIO_AGENTKIT_CLI_ARTIFACT.filename}"\n'
+        )
+        companion = (
+            "python3 -m veadk.cli.studio_companion "
+            f'--archive "$ROOT_DIR/{STUDIO_AGENTKIT_CLI_ARTIFACT.filename}"\n'
+        )
+    else:
+        managed_source = ""
+        companion = (
+            f"python3 -m veadk.cli.studio_companion --provider {provider_argument}\n"
+        )
+    return (
+        "#!/bin/bash\n"
+        "set -ex\n"
+        'ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        "unset VEADK_STUDIO_AGENTKIT_CLI_ARCHIVE "
+        "VEADK_STUDIO_AGENTKIT_CLI_RUNTIME_MANIFEST\n"
+        f"{managed_source}"
+        'cd "$ROOT_DIR"\n'
+        'if [ -d "output" ]; then cd ./output/; fi\n'
+        "HOST=0.0.0.0\n"
+        "PORT=${_FAAS_RUNTIME_PORT:-8000}\n"
+        'export PYTHONPATH="./site-packages${PYTHONPATH:+:$PYTHONPATH}"\n'
+        'if [ "${VEADK_STUDIO_IDENTITY_ROLES:-}" = "1" ]; then\n'
+        "  python3 -c 'from frontend.server.user_management.policy import StudioAccessPolicy; "
+        "assert StudioAccessPolicy.from_csv(None, None, identity_roles=True).enabled' || {\n"
+        '    echo "This Studio runtime does not support Identity roles; use a compatible release or --from-source" >&2\n'
+        "    exit 1\n"
+        "  }\n"
+        "fi\n"
+        'trap \'kill "${COMPANION_PID:-}" "${STUDIO_PID:-}" '
+        "2>/dev/null || true' INT TERM\n"
+        f"{companion.rstrip()} &\n"
+        "COMPANION_PID=$!\n"
+        f"{command.rstrip()} &\n"
+        "STUDIO_PID=$!\n"
+        'if ! wait "$COMPANION_PID"; then\n'
+        '  kill "$STUDIO_PID" 2>/dev/null || true\n'
+        '  wait "$STUDIO_PID" 2>/dev/null || true\n'
+        "  exit 1\n"
+        "fi\n"
+        "COMPANION_PID=\n"
+        'if wait "$STUDIO_PID"; then\n'
+        '  echo "studio_process_exited_unexpectedly" >&2\n'
+        "fi\n"
+        "exit 1\n"
+    )
+
+
+def build_frontend_assets(
+    source_root: Path,
+    output_dir: Path,
+    *,
+    changelog: tuple[str, ...] = (),
+) -> None:
+    """Build the checkout's React frontend into an isolated directory."""
+    _validate_source_checkout(source_root)
+    npm = shutil.which("npm")
+    if npm is None:
+        raise ValueError("npm is required to build the Studio frontend.")
+    build_environment = os.environ.copy()
+    build_environment["VITE_STUDIO_RELEASE_CHANGELOG"] = json.dumps(
+        list(changelog), ensure_ascii=False
+    )
+    frontend_root = source_root / "frontend"
+    try:
+        subprocess.run(
+            [npm, "ci"], cwd=frontend_root, env=build_environment, check=True
+        )
+        subprocess.run(
+            [npm, "run", "build", "--", "--outDir", str(output_dir)],
+            cwd=frontend_root,
+            env=build_environment,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise ValueError(
+            f"Studio frontend build failed with exit code {error.returncode}."
+        ) from error
+    if not (output_dir / "index.html").is_file():
+        raise ValueError("Studio frontend build produced no index.html.")
+
+
+def write_studio_package(
+    package_dir: Path,
+    *,
+    requirements: str,
+    site_logo: SiteLogo | None,
+    provider: CloudProvider | None = DEFAULT_CLOUD_PROVIDER,
+    bundle_agentkit_cli: bool = True,
+) -> None:
+    """Write the Studio entrypoint, requirements, and optional logo."""
+    package_dir.mkdir(parents=True, exist_ok=True)
+    logo_filename = (
+        f"site-logo.{site_logo.extension}" if site_logo is not None else None
+    )
+    (package_dir / "run.sh").write_text(
+        studio_run_script(
+            logo_filename,
+            provider=provider,
+            bundle_agentkit_cli=bundle_agentkit_cli,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    (package_dir / "run.sh").chmod(0o755)
+    if site_logo is not None and logo_filename is not None:
+        (package_dir / logo_filename).write_bytes(site_logo.content)
+    (package_dir / "requirements.txt").write_text(requirements, encoding="utf-8")
+
+
+def build_local_studio_requirements(
+    source_root: Path,
+    package_dir: Path,
+    *,
+    frontend_assets: Path | None = None,
+    dependency_wheels: Path | None = None,
+    provider: CloudProvider = DEFAULT_CLOUD_PROVIDER,
+    offline_runtime: bool = True,
+    optimize_cold_start: bool = False,
+) -> str:
+    """Build a local VeADK wheel and return exact deployment requirements.
+
+    Release and first-deploy callers retain the fully offline Runtime. Ordinary
+    source updates can opt into the smaller historical package contract: the
+    local VeADK wheel plus the few provider-specific compatibility wheels.
+    """
+    _validate_source_checkout(source_root)
+    package_dir.mkdir(parents=True, exist_ok=True)
+    wheel_source = package_dir / "wheel-source"
+    _stage_wheel_source(
+        source_root,
+        frontend_assets or source_root / "veadk" / "webui",
+        wheel_source,
+    )
+
+    uv = shutil.which("uv")
+    if uv:
+        command = [uv, "build", "--wheel", str(wheel_source), "-o", str(package_dir)]
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "-o",
+            str(package_dir),
+            str(wheel_source),
+        ]
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as error:
+        raise ValueError(
+            f"Local VeADK wheel build failed with exit code {error.returncode}."
+        ) from error
+    wheels = list(package_dir.glob("veadk*.whl"))
+    if not wheels:
+        raise ValueError("Local source build produced no veadk wheel.")
+    validate_studio_wheel(wheels[0], wheel_source)
+
+    shutil.rmtree(package_dir / "wheel-source", ignore_errors=True)
+    if not offline_runtime:
+        dependencies = stage_studio_dependency_wheels(
+            package_dir,
+            source_dir=dependency_wheels,
+            provider=provider,
+        )
+        return "".join(
+            f"./{name}\n"
+            for name in (*(path.name for path in dependencies), wheels[0].name)
+        )
+
+    prepared_dependencies = package_dir / ".studio-runtime-inputs"
+    prepared_dependencies.mkdir()
+    dependency_sources = stage_studio_dependency_sources(
+        prepared_dependencies,
+        source_dir=dependency_wheels,
+    )
+    stage_studio_agentkit_cli_archive(
+        package_dir,
+        source_dir=dependency_wheels,
+    )
+
+    requirements = build_studio_offline_runtime(
+        source_root,
+        package_dir,
+        veadk_wheel=wheels[0],
+        dependency_sources=dependency_sources,
+        optimize_cold_start=optimize_cold_start,
+    )
+    shutil.rmtree(prepared_dependencies)
+    return requirements
+
+
+def _validate_source_checkout(source_root: Path) -> None:
+    """Require the files needed to build Studio from a source checkout."""
+    required_paths = (
+        source_root / "pyproject.toml",
+        source_root / "uv.lock",
+        source_root / "README.md",
+        source_root / "LICENSE",
+        source_root / "frontend" / "package.json",
+        source_root / "frontend" / "package-lock.json",
+        source_root / "veadk",
+    )
+    if not all(path.exists() for path in required_paths):
+        raise ValueError(
+            f"Not a VeADK source checkout: {source_root}. Expected pyproject.toml, "
+            "uv.lock, README.md, LICENSE, frontend/package.json, "
+            "frontend/package-lock.json, and veadk/."
+        )
+
+
+def _stage_wheel_source(
+    source_root: Path, frontend_assets: Path, wheel_source: Path
+) -> None:
+    """Copy package sources and substitute freshly built frontend assets."""
+    stage_studio_wheel_source(source_root, frontend_assets, wheel_source)

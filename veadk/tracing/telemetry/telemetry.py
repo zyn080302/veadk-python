@@ -30,29 +30,13 @@ from veadk.tracing.telemetry.attributes.extractors.types import (
     ToolAttributesParams,
 )
 from veadk.tracing.telemetry.content_tracing import should_trace_content
+from veadk.tracing.telemetry import portal_metrics
 from veadk.utils.logger import get_logger
 from veadk.utils.misc import safe_json_serialize
 
 logger = get_logger(__name__)
 
-meter_uploader = None
-
-
-def init_global_meter_uploader_from_exporters(exporters):
-    """Initialize global meter_uploader from a list of exporters.
-
-    Args:
-        exporters: List of exporter instances to search for meter_uploader
-    """
-    global meter_uploader
-    for exporter in exporters:
-        if hasattr(exporter, "meter_uploader") and exporter.meter_uploader:
-            meter_uploader = exporter.meter_uploader
-            logger.debug(
-                "Global meter_uploader initialized from exporter: {}",
-                exporter.__class__.__name__,
-            )
-            break
+_LLM_REQUEST_EVENTS_RECORDED_ATTR = "_veadk_llm_request_events_recorded"
 
 
 def _upload_call_llm_metrics(
@@ -61,10 +45,10 @@ def _upload_call_llm_metrics(
     llm_request: LlmRequest,
     llm_response: LlmResponse,
 ) -> None:
-    """Upload LLM call metrics to configured meter uploaders.
+    """Record LLM call metrics through the global MeterProvider.
 
-    This function extracts meter uploaders from agent tracers and records
-    LLM call metrics including token usage, latency, and request/response details.
+    Recording is independent from exporter configuration. OpenTelemetry's
+    default proxy instruments remain no-op until a real provider is installed.
 
     Args:
         invocation_context: Context containing agent, session, and user information
@@ -72,18 +56,9 @@ def _upload_call_llm_metrics(
         llm_request: The request sent to the language model
         llm_response: The response received from the language model
     """
-    from veadk.agent import Agent
-
-    if isinstance(invocation_context.agent, Agent):
-        tracers = invocation_context.agent.tracers
-        for tracer in tracers:
-            for exporter in getattr(tracer, "exporters", []):
-                if getattr(exporter, "meter_uploader", None):
-                    global meter_uploader
-                    meter_uploader = exporter.meter_uploader
-                    exporter.meter_uploader.record_call_llm(
-                        invocation_context, event_id, llm_request, llm_response
-                    )
+    portal_metrics.portal_metric_recorder.record_call_llm(
+        invocation_context, event_id, llm_request, llm_response
+    )
 
 
 def _upload_tool_call_metrics(
@@ -91,7 +66,7 @@ def _upload_tool_call_metrics(
     args: dict[str, Any],
     function_response_event: Event,
 ):
-    """Upload tool call metrics to the global meter uploader.
+    """Record tool call metrics through the global MeterProvider.
 
     Records tool execution metrics including function name, arguments,
     execution time, and response details for observability and debugging.
@@ -101,16 +76,10 @@ def _upload_tool_call_metrics(
         args: Arguments passed to the tool function
         function_response_event: Event containing the tool's response data
 
-    Note:
-        - Requires global meter_uploader to be initialized
     """
-    global meter_uploader
-    if meter_uploader:
-        meter_uploader.record_tool_call(tool, args, function_response_event)
-    else:
-        logger.debug(
-            "Meter uploader is not initialized yet. Skip recording tool call metrics."
-        )
+    portal_metrics.portal_metric_recorder.record_tool_call(
+        tool, args, function_response_event
+    )
 
 
 def _set_agent_input_attribute(
@@ -212,10 +181,28 @@ def _set_agent_output_attribute(span: Span, llm_response: LlmResponse) -> None:
 
     content = llm_response.content
     if content and content.parts:
+        output_parts = []
+        for part in content.parts:
+            if not part.text:
+                output_parts = []
+                break
+            output_parts.append(
+                {
+                    "type": "reasoning" if getattr(part, "thought", False) else "text",
+                    "content": part.text,
+                }
+            )
+
+        output = (
+            {"messages": [{"role": content.role, "parts": output_parts}]}
+            if output_parts
+            else content.model_dump(exclude_none=True)
+        )
+
         # set gen_ai.output attribute required by APMPlus
         span.set_attribute(
             "gen_ai.output",
-            safe_json_serialize(content.model_dump(exclude_none=True)),
+            safe_json_serialize(output),
         )
 
         for idx, part in enumerate(content.parts):
@@ -370,6 +357,7 @@ def trace_call_llm(
     event_id: str,
     llm_request: LlmRequest,
     llm_response: LlmResponse,
+    span: Span | None = None,
     *args,
     **kwargs,
 ) -> None:
@@ -393,8 +381,13 @@ def trace_call_llm(
         event_id: Unique identifier for this LLM call event
         llm_request: The request object sent to the language model
         llm_response: The response object received from the language model
+        span: The owning call_llm span supplied by newer ADK releases
     """
-    span: Span = trace.get_current_span()  # type: ignore
+    # Newer ADK releases pass the owning ``call_llm`` span explicitly because
+    # the current span is the nested model-instrumentation span at this point.
+    # Older ADK releases only pass the original four arguments.
+    if span is None:
+        span = trace.get_current_span()  # type: ignore
 
     from veadk.agent import Agent
 
@@ -434,8 +427,19 @@ def trace_call_llm(
     )
 
     for attr_name, attr_extractor in llm_attributes_mapping.items():
+        if attr_name == "gen_ai.messages" and getattr(
+            span, _LLM_REQUEST_EVENTS_RECORDED_ATTR, False
+        ):
+            continue
+
         response: ExtractorResponse = attr_extractor(params)
         ExtractorResponse.update_span(span, attr_name, response)
+
+        # ADK invokes this hook once for every streamed response chunk. Request
+        # events belong to the call_llm span, so emit them only on the first
+        # chunk while continuing to record response choices for every chunk.
+        if attr_name == "gen_ai.messages":
+            setattr(span, _LLM_REQUEST_EVENTS_RECORDED_ATTR, True)
 
     _upload_call_llm_metrics(invocation_context, event_id, llm_request, llm_response)
 

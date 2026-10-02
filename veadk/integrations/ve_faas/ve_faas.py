@@ -13,16 +13,18 @@
 # limitations under the License.
 
 import json
-import time
+import os
 import shutil
 import tempfile
+import time
+import urllib.request
 from pathlib import Path
-from cookiecutter.main import cookiecutter
-import veadk.integrations.ve_faas as vefaas
-from veadk.version import VERSION
+from typing import Any, cast
+
 import requests
 import volcenginesdkcore
 import volcenginesdkvefaas
+from cookiecutter.main import cookiecutter
 from volcenginesdkvefaas.models.env_for_create_function_input import (
     EnvForCreateFunctionInput,
 )
@@ -31,28 +33,203 @@ from volcenginesdkvefaas.models.tag_for_create_function_input import (
 )
 
 import veadk.config
+import veadk.integrations.ve_faas as vefaas
 from veadk.integrations.ve_apig.ve_apig import APIGateway
+from veadk.integrations.ve_faas.release_progress import (
+    ReleaseProgress,
+    extract_release_log_urls as _extract_release_log_urls,
+)
+from veadk.integrations.ve_faas.upload_progress import CodeUploadProgress
 from veadk.integrations.ve_faas.ve_faas_utils import (
     signed_request,
     zip_and_encode_folder,
 )
+from veadk.utils.cloud_provider import (
+    DEFAULT_CLOUD_PROVIDER,
+    CloudProvider,
+    default_vefaas_application_template_id,
+    vefaas_openapi_host,
+    configure_openapi_tls,
+)
 from veadk.utils.logger import get_logger
 from veadk.utils.misc import formatted_timestamp, getenv
 from veadk.utils.volcengine_sign import ve_request
+from veadk.version import VERSION
 
 logger = get_logger(__name__)
 
+_LARGE_CODE_BUNDLE_BYTES = 64 * 1024 * 1024
+_STANDARD_CODE_UPLOAD_TIMEOUT_SECONDS = 300
+_LARGE_CODE_UPLOAD_TIMEOUT_SECONDS = 1800
+_LARGE_CODE_UPLOAD_ATTEMPTS = 2
+
+
+def _code_upload_timeout_seconds(code_zip_size: int) -> int:
+    """Keep ordinary uploads unchanged while allowing bounded large bundles."""
+
+    if code_zip_size > _LARGE_CODE_BUNDLE_BYTES:
+        return _LARGE_CODE_UPLOAD_TIMEOUT_SECONDS
+    return _STANDARD_CODE_UPLOAD_TIMEOUT_SECONDS
+
+
+_APPLICATION_REVISION_LOG_MAX_BYTES = 50_000
+_TRANSIENT_VEFAAS_ERROR_MARKERS = (
+    "connection aborted",
+    "connection error",
+    "connection reset",
+    "connection timed out",
+    "gateway timeout",
+    "read timed out",
+    "request timeout",
+    "service unavailable",
+    "temporarily unavailable",
+    "the handshake operation timed out",
+    "too many requests",
+)
+
+
+def _is_transient_vefaas_error(error: BaseException) -> bool:
+    """Return whether a VeFaaS request can safely be retried."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (TimeoutError, ConnectionError, requests.Timeout, requests.ConnectionError),
+        ):
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in _TRANSIENT_VEFAAS_ERROR_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _download_release_log_url(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=30) as log_stream:
+        return log_stream.read().decode("utf-8", "replace")
+
+
+def _release_failure_labels(provider: CloudProvider) -> dict[str, str]:
+    if provider == "byteplus":
+        return {
+            "console_logs": "Control Plane Logs",
+            "tos_logs": "FaaS Data Plane Logs",
+            "final_status": "Final VeFaaS Status",
+            "empty_console_logs": "No control plane logs were returned.",
+            "empty_tos_logs": "No linked FaaS data plane logs were found.",
+            "tos_log": "FaaS data plane log",
+            "source": "Source",
+            "content": "Content",
+            "download_failed": "download failed",
+        }
+    return {
+        "console_logs": "控制面日志",
+        "tos_logs": "FaaS 数据面日志",
+        "final_status": "最终 VeFaaS 状态",
+        "empty_console_logs": "未返回控制面日志。",
+        "empty_tos_logs": "未发现可下载的 FaaS 数据面日志链接。",
+        "tos_log": "FaaS 数据面日志",
+        "source": "来源",
+        "content": "内容",
+        "download_failed": "下载失败",
+    }
+
+
+def _format_release_failure_text(
+    *,
+    raw_logs: str,
+    full_response: dict[str, Any],
+    provider: CloudProvider = DEFAULT_CLOUD_PROVIDER,
+) -> str:
+    labels = _release_failure_labels(provider)
+    linked_log_sections: list[str] = []
+    for index, url in enumerate(_extract_release_log_urls(raw_logs), start=1):
+        try:
+            linked_log = _download_release_log_url(url)
+        except Exception as error:  # noqa: BLE001 - diagnostics must not mask failure
+            linked_log_sections.append(
+                f"[{index}] {labels['tos_log']} {labels['download_failed']}: {error}"
+            )
+        else:
+            linked_log_sections.append(
+                "\n".join(
+                    (
+                        f"[{index}] {labels['tos_log']}",
+                        f"{labels['source']}: {url}",
+                        f"{labels['content']}:",
+                        linked_log,
+                    )
+                )
+            )
+
+    console_text = raw_logs.strip() or labels["empty_console_logs"]
+    tos_text = "\n\n".join(linked_log_sections) or labels["empty_tos_logs"]
+
+    status_text = json.dumps(
+        full_response.get("Result", full_response),
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    sections = [
+        f"{labels['console_logs']}\n{'-' * 40}\n{console_text}",
+        f"{labels['tos_logs']}\n{'-' * 40}\n{tos_text}",
+        f"{labels['final_status']}\n{'-' * 40}\n{status_text}",
+    ]
+    return "\n\n".join(sections)
+
+
+def _release_revision_number(response: dict[str, Any]) -> int | None:
+    """Best-effort extraction across slightly different VeFaaS response shapes."""
+    stack: list[Any] = [response]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in {"RevisionNumber", "NewRevisionNumber"}:
+                    try:
+                        return int(cast(Any, nested))
+                    except (TypeError, ValueError):
+                        pass
+                stack.append(nested)
+        elif isinstance(value, list):
+            stack.extend(value)
+    return None
+
 
 class VeFaaS:
-    def __init__(self, access_key: str, secret_key: str, region: str = "cn-beijing"):
+    def __init__(
+        self,
+        access_key: str,
+        secret_key: str,
+        session_token: str = "",
+        region: str = "",
+        project_name: str = "default",
+        provider: CloudProvider = DEFAULT_CLOUD_PROVIDER,
+        application_template_id: str | None = None,
+    ):
         self.ak = access_key
         self.sk = secret_key
+        self.session_token = session_token
+        self.project_name = project_name
+        self.provider = provider
+        if not region and provider != "byteplus":
+            region = os.getenv("REGION") or "cn-beijing"
+        elif not region:
+            region = "cn-beijing"
         self.region = region
+        self.openapi_host = vefaas_openapi_host(region, provider)
 
         configuration = volcenginesdkcore.Configuration()
         configuration.ak = self.ak
         configuration.sk = self.sk
+        configuration.session_token = self.session_token
         configuration.region = region
+        scheme = os.getenv("VEFAAS_OPENAPI_SCHEME", "https").strip() or "https"
+        configuration.host = f"{scheme}://{self.openapi_host}"
+        configure_openapi_tls(configuration)
 
         configuration.client_side_validation = True
         volcenginesdkcore.Configuration.set_default(configuration)
@@ -61,9 +238,40 @@ class VeFaaS:
             volcenginesdkcore.ApiClient(configuration)
         )
 
-        self.apig_client = APIGateway(self.ak, self.sk, self.region)
+        self.apig_client = APIGateway(
+            self.ak,
+            self.sk,
+            self.region,
+            session_token=self.session_token,
+            provider=self.provider,
+        )
 
-        self.template_id = "6874f3360bdbc40008ecf8c7"
+        configured_template_id = (
+            application_template_id
+            or getenv(
+                "VEFAAS_APPLICATION_TEMPLATE_ID",
+                "",
+                allow_false_values=True,
+            )
+            or ""
+        ).strip()
+        if configured_template_id:
+            self.template_id = configured_template_id
+        else:
+            self.template_id = default_vefaas_application_template_id(
+                provider,
+                region,
+            )
+
+    def _openapi_host(self) -> str:
+        return getattr(
+            self,
+            "openapi_host",
+            vefaas_openapi_host(
+                getattr(self, "region", "cn-beijing"),
+                getattr(self, "provider", DEFAULT_CLOUD_PROVIDER),
+            ),
+        )
 
     def _upload_and_mount_code(self, function_id: str, path: str):
         """Upload code to VeFaaS temp bucket and mount to function instance.
@@ -73,12 +281,14 @@ class VeFaaS:
             path (str): Local project path.
         """
         # Get zipped code data
+        logger.info("Packaging project for upload")
         code_zip_data, code_zip_size, error = zip_and_encode_folder(path)
         logger.info(
             f"Zipped project size: {code_zip_size / 1024 / 1024:.2f} MB",
         )
 
         # Upload code to VeFaaS temp bucket
+        logger.info("Preparing code upload address for function %s", function_id)
         req = volcenginesdkvefaas.GetCodeUploadAddressRequest(
             function_id=function_id, content_length=code_zip_size
         )
@@ -88,22 +298,66 @@ class VeFaaS:
         headers = {
             "Content-Type": "application/zip",
         }
-        response = requests.put(url=upload_url, data=code_zip_data, headers=headers)
-        if not (200 <= response.status_code < 300):
-            error_message = f"Upload failed to {upload_url} with status code {response.status_code}: {response.text}"
-            raise ValueError(error_message)
-
+        attempts = (
+            _LARGE_CODE_UPLOAD_ATTEMPTS
+            if code_zip_size > _LARGE_CODE_BUNDLE_BYTES
+            else 1
+        )
+        response = None
+        for attempt in range(1, attempts + 1):
+            try:
+                with CodeUploadProgress(code_zip_data, attempt, attempts) as body:
+                    response = requests.put(
+                        url=upload_url,
+                        data=body,
+                        headers=headers,
+                        timeout=(
+                            _STANDARD_CODE_UPLOAD_TIMEOUT_SECONDS,
+                            _code_upload_timeout_seconds(code_zip_size),
+                        ),
+                    )
+                    if not (200 <= response.status_code < 300):
+                        raise ValueError(
+                            "Function code upload failed with status code "
+                            f"{response.status_code}."
+                        )
+                break
+            except (requests.ConnectionError, requests.Timeout) as upload_error:
+                if attempt == attempts:
+                    raise ValueError("Function code upload request failed.") from None
+                logger.warning(
+                    "Large function code upload connection was interrupted; "
+                    "retrying the same immutable payload once (%s).",
+                    type(upload_error).__name__,
+                )
+                time.sleep(1)
+            except requests.RequestException:
+                raise ValueError("Function code upload request failed.") from None
+        if response is None:
+            raise ValueError("Function code upload request failed.")
         # Mount the TOS bucket to function instance
+        logger.info("Code uploaded; attaching the bundle to function %s", function_id)
         res = signed_request(
             ak=self.ak,
             sk=self.sk,
             target="CodeUploadCallback",
             body={"FunctionId": function_id},
+            region=self.region,
+            session_token=self.session_token,
+            host=self._openapi_host(),
         )
 
+        logger.info("Code bundle attached; ready for cloud build and deployment")
         return res
 
-    def _create_function(self, function_name: str, path: str):
+    def _create_function(
+        self,
+        function_name: str,
+        path: str,
+        *,
+        cpu_milli: int | None = None,
+        memory_mb: int | None = None,
+    ):
         # Read envs
         envs = []
         for key, value in veadk.config.veadk_environments.items():
@@ -115,15 +369,17 @@ class VeFaaS:
         # Create function
         res = self.client.create_function(
             volcenginesdkvefaas.CreateFunctionRequest(
-                command="./run.sh",
+                command="bash ./run.sh",
                 name=function_name,
                 description="Created by VeADK (Volcengine Agent Development Kit)",
                 tags=[TagForCreateFunctionInput(key="provider", value="veadk")],
                 runtime="native-python3.12/v1",
                 request_timeout=1800,
                 envs=envs,
-                memory_mb=2048,
+                cpu_milli=cpu_milli,
+                memory_mb=memory_mb if memory_mb is not None else 2048,
                 role=getenv("IAM_ROLE", None, allow_false_values=True),
+                project_name=self.project_name,
             )
         )
 
@@ -147,30 +403,43 @@ class VeFaaS:
         upstream_name: str,
         service_name: str,
         enable_key_auth: bool = False,
+        enable_mcp_session: bool = True,
     ):
-        response = ve_request(
-            request_body={
-                "Name": application_name,
-                "Services": [],
-                "IAM": [],
-                "Config": {
-                    "Region": self.region,
-                    "FunctionName": function_name,
-                    "GatewayName": gateway_name,
-                    "ServiceName": service_name,
-                    "UpstreamName": upstream_name,
-                    "EnableKeyAuth": enable_key_auth,
-                    "EnableMcpSession": True,
-                },
-                "TemplateId": self.template_id,
+        request_body = {
+            "Name": application_name,
+            "Services": [],
+            "IAM": [],
+            "Config": {
+                "Region": self.region,
+                "FunctionName": function_name,
+                "GatewayName": gateway_name,
+                "ServiceName": service_name,
+                "UpstreamName": upstream_name,
+                "EnableKeyAuth": enable_key_auth,
+                "EnableMcpSession": enable_mcp_session,
             },
+        }
+        template_id = getattr(self, "template_id", "")
+        if (
+            not template_id
+            and getattr(self, "provider", DEFAULT_CLOUD_PROVIDER) == "byteplus"
+        ):
+            raise ValueError(
+                "BytePlus VeFaaS Application creation requires "
+                "VEFAAS_APPLICATION_TEMPLATE_ID or --vefaas-application-template-id. "
+                f"No built-in TemplateId is known for region {self.region}."
+            )
+        request_body["TemplateId"] = template_id
+        response = ve_request(
+            request_body=request_body,
             action="CreateApplication",
             ak=self.ak,
             sk=self.sk,
             service="vefaas",
             version="2021-03-03",
-            region="cn-beijing",
-            host="open.volcengineapi.com",
+            region=self.region,
+            host=self._openapi_host(),
+            session_token=self.session_token,
         )
 
         try:
@@ -181,59 +450,131 @@ class VeFaaS:
         except Exception as _:
             raise ValueError(f"Create application failed: {response}")
 
-    def _release_application(self, app_id: str):
-        _ = ve_request(
+    def _start_application_release(self, app_id: str) -> dict[str, Any]:
+        """Submit an Application release without waiting for completion."""
+        return ve_request(
             request_body={"Id": app_id},
             action="ReleaseApplication",
             ak=self.ak,
             sk=self.sk,
             service="vefaas",
             version="2021-03-03",
-            region="cn-beijing",
-            host="open.volcengineapi.com",
+            region=self.region,
+            host=self._openapi_host(),
+            session_token=self.session_token,
         )
 
-        status, full_response = self._get_application_status(app_id)
-        while status not in ["deploy_success", "deploy_fail"]:
-            time.sleep(10)
+    def _release_application(self, app_id: str):
+        progress = ReleaseProgress(
+            provider=getattr(self, "provider", DEFAULT_CLOUD_PROVIDER),
+            region=getattr(self, "region", ""),
+            app_id=app_id,
+            secrets=tuple(
+                getattr(self, key, "") for key in ("ak", "sk", "session_token")
+            ),
+            emit=logger.info,
+        )
+        release_response = self._start_application_release(app_id)
+        release_revision_number = _release_revision_number(release_response)
+
+        while True:
             status, full_response = self._get_application_status(app_id)
+            if release_revision_number is None:
+                # Do not attach an older stable revision's logs to this release.
+                revision = full_response.get("Result", {}).get("NewRevisionNumber")
+                if revision:
+                    release_revision_number = _release_revision_number(
+                        {"NewRevisionNumber": revision}
+                    )
+            progress.status(status, release_revision_number)
+            if status == "deploy_fail":
+                break
+            if release_revision_number is not None:
+                try:
+                    lines = self._get_application_logs(
+                        app_id=app_id,
+                        revision_number=release_revision_number,
+                        timeout=5,
+                    )
+                except Exception:
+                    # Optional diagnostics must not abort a running deployment.
+                    progress.log_error()
+                else:
+                    progress.logs(lines, final=status == "deploy_success")
+            if status == "deploy_success":
+                break
+            progress.waiting()
+            time.sleep(3)
 
         if status == "deploy_success":
             cloud_resource = full_response["Result"]["CloudResource"]
             cloud_resource = json.loads(cloud_resource)
             url = cloud_resource["framework"]["url"]["system_url"]
+            progress.complete(url)
             return url
         else:
             logger.error(
                 f"Release application failed. Application ID: {app_id}, Status: {status}"
             )
-            import re
-
-            logs = "\n".join(self._get_application_logs(app_id=app_id))
-            log_text = re.sub(
-                r'([{"\']?(key|secret|token|pass|auth|credential|access|api|ak|sk|doubao|volces|coze)[^"\'\s]*["\']?\s*[:=]\s*)(["\']?)([^"\'\s]+)(["\']?)|([A-Za-z0-9+/=]{20,})',
-                lambda m: (
-                    f"{m.group(1)}{m.group(3)}******{m.group(5)}"
-                    if m.group(1)
-                    else "******"
-                ),
-                logs,
-                flags=re.IGNORECASE,
+            try:
+                failure_logs = self._get_application_logs(
+                    app_id=app_id,
+                    revision_number=release_revision_number,
+                )
+            except Exception:
+                failure_logs = progress.snapshots.get("control", []) + [
+                    progress.text(
+                        "未能读取最终发布日志，请检查日志权限或网络；下方保留云端失败状态",
+                        "Final release logs could not be read; check log permissions or connectivity. Cloud failure status follows",
+                    )
+                ]
+            raw_logs = "\n".join(failure_logs)
+            provider = getattr(self, "provider", DEFAULT_CLOUD_PROVIDER)
+            log_text = _format_release_failure_text(
+                raw_logs=raw_logs,
+                full_response=full_response,
+                provider=provider,
             )
-            raise Exception(f"Release application failed. Logs:\n{log_text}")
+            failure_prefix = (
+                "Release application failed. Details:"
+                if provider == "byteplus"
+                else "发布 VeFaaS 应用失败，详情："
+            )
+            raise Exception(f"{failure_prefix}\n{log_text}")
 
-    def _get_application_status(self, app_id: str):
-        response = ve_request(
-            request_body={"Id": app_id},
-            action="GetApplication",
-            ak=self.ak,
-            sk=self.sk,
-            service="vefaas",
-            version="2021-03-03",
-            region="cn-beijing",
-            host="open.volcengineapi.com",
-        )
-        return response["Result"]["Status"], response
+    def _get_application_status(
+        self,
+        app_id: str,
+        *,
+        attempts: int = 3,
+        retry_delay_seconds: float = 1.0,
+        sleep=time.sleep,
+    ):
+        """Read Application status with bounded transient-network retries."""
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must not be negative")
+        for attempt in range(1, attempts + 1):
+            try:
+                response = ve_request(
+                    request_body={"Id": app_id},
+                    action="GetApplication",
+                    ak=self.ak,
+                    sk=self.sk,
+                    service="vefaas",
+                    version="2021-03-03",
+                    region=self.region,
+                    host=self._openapi_host(),
+                    session_token=self.session_token,
+                )
+            except Exception as error:
+                if attempt >= attempts or not _is_transient_vefaas_error(error):
+                    raise
+                sleep(retry_delay_seconds * attempt)
+                continue
+            return response["Result"]["Status"], response
+        raise AssertionError("unreachable")
 
     def _list_application(self, app_id: str = None, app_name: str = None):
         # firt match app_id. if app_id is None,then match app_name and remove app_id
@@ -253,6 +594,7 @@ class VeFaaS:
         page_number = 1
         all_items = []
         total_page = None
+        response: dict[str, Any] | None = None
         while True:
             try:
                 request_body.update({"PageNumber": page_number, "PageSize": page_size})
@@ -263,8 +605,9 @@ class VeFaaS:
                     sk=self.sk,
                     service="vefaas",
                     version="2021-03-03",
-                    region="cn-beijing",
-                    host="open.volcengineapi.com",
+                    region=self.region,
+                    host=self._openapi_host(),
+                    session_token=self.session_token,
                 )
                 result = response.get("Result", {})
                 items = result.get("Items", [])
@@ -282,6 +625,144 @@ class VeFaaS:
                     f"List application failed. Error: {str(e)}. Response: {response}."
                 )
         return all_items
+
+    def update_application_code_bundle(
+        self,
+        *,
+        application_id: str,
+        function_id: str,
+        path: str,
+        environment_overrides: dict[str, str] | None = None,
+        disable_gateway_cors: bool = False,
+        normalize_studio_entrypoint: bool = False,
+        cpu_milli: int | None = None,
+        memory_mb: int | None = None,
+        max_instance: int | None = None,
+    ) -> str:
+        """Replace an application's function bundle and release it.
+
+        Existing resource settings are preserved unless explicitly overridden;
+        the minimum instance count is set to one. Environment overrides are merged
+        with the complete current environment before updating the function.
+
+        Args:
+            application_id: Existing VeFaaS Application ID.
+            function_id: Function ID referenced by the Application.
+            path: Prepared function bundle directory.
+            environment_overrides: Environment values to explicitly replace.
+            disable_gateway_cors: Disable route-wide APIG CORS after release.
+            normalize_studio_entrypoint: Replace only the legacy ``./run.sh``
+                command with ``bash ./run.sh`` so platform archive mode
+                normalization cannot prevent Studio from starting. Custom
+                commands are preserved.
+            cpu_milli: Explicit function CPU override in millicores.
+            memory_mb: Explicit function memory override in MB.
+            max_instance: Explicit maximum instance count override.
+
+        Returns:
+            The existing Application URL after the new revision is released.
+        """
+        self._replace_application_code_bundle(
+            function_id=function_id,
+            path=path,
+            environment_overrides=environment_overrides,
+            normalize_studio_entrypoint=normalize_studio_entrypoint,
+            cpu_milli=cpu_milli,
+            memory_mb=memory_mb,
+        )
+        url = self._release_application(application_id)
+        self._set_function_min_instance(function_id, max_instance=max_instance)
+        if disable_gateway_cors:
+            self.ensure_application_route_methods(
+                application_id,
+                disable_cors=True,
+            )
+        return url
+
+    def submit_application_code_bundle_update(
+        self,
+        *,
+        application_id: str,
+        function_id: str,
+        path: str,
+        environment_overrides: dict[str, str] | None = None,
+        normalize_studio_entrypoint: bool = False,
+    ) -> None:
+        """Replace a function bundle and submit its Application release.
+
+        Unlike :meth:`update_application_code_bundle`, this method does not wait for
+        the new revision. It is intended for a function updating itself, because
+        the current process may stop as soon as the control plane activates the
+        replacement revision. The minimum instance count must be updated before
+        the release starts so a successful update always leaves one warm instance.
+        """
+        self._replace_application_code_bundle(
+            function_id=function_id,
+            path=path,
+            environment_overrides=environment_overrides,
+            normalize_studio_entrypoint=normalize_studio_entrypoint,
+        )
+        self._set_function_min_instance(function_id)
+        self._start_application_release(application_id)
+
+    def _replace_application_code_bundle(
+        self,
+        *,
+        function_id: str,
+        path: str,
+        environment_overrides: dict[str, str] | None,
+        request_timeout: int | None = None,
+        normalize_studio_entrypoint: bool = False,
+        cpu_milli: int | None = None,
+        memory_mb: int | None = None,
+    ) -> None:
+        """Upload a bundle and update the Function without releasing it."""
+        request_options: dict[str, Any] = {"id": function_id}
+        if cpu_milli is not None:
+            request_options["cpu_milli"] = cpu_milli
+        if memory_mb is not None:
+            request_options["memory_mb"] = memory_mb
+        if request_timeout is not None:
+            request_options["request_timeout"] = request_timeout
+        function: Any | None = None
+        if environment_overrides or normalize_studio_entrypoint:
+            function = cast(
+                Any,
+                self.client.get_function(
+                    volcenginesdkvefaas.GetFunctionRequest(id=function_id)
+                ),
+            )
+        if environment_overrides:
+            assert function is not None
+            environment = {
+                item.key: item.value for item in (getattr(function, "envs", None) or [])
+            }
+            environment.update(environment_overrides)
+            request_options["envs"] = [
+                volcenginesdkvefaas.EnvForUpdateFunctionInput(key=key, value=value)
+                for key, value in environment.items()
+            ]
+        if normalize_studio_entrypoint:
+            assert function is not None
+            if str(getattr(function, "command", "") or "").strip() == "./run.sh":
+                request_options["command"] = "bash ./run.sh"
+
+        self._upload_and_mount_code(function_id, path)
+        self.client.update_function(
+            volcenginesdkvefaas.UpdateFunctionRequest(**request_options)
+        )
+
+    def _set_function_min_instance(
+        self, function_id: str, *, max_instance: int | None = None
+    ) -> None:
+        """Keep one warm instance and optionally set the maximum instance count"""
+        self.client.update_function_resource(
+            volcenginesdkvefaas.UpdateFunctionResourceRequest(
+                function_id=function_id,
+                min_instance=1,
+                max_instance=max_instance,
+            )
+        )
 
     def _update_function_code(
         self,
@@ -357,17 +838,18 @@ class VeFaaS:
             else:
                 logger.warning("No requirements.txt found, using template default")
 
-            self._upload_and_mount_code(function_id, str(tmp_path / "src"))
-            self.client.update_function(
-                volcenginesdkvefaas.UpdateFunctionRequest(
-                    id=function_id,
-                    request_timeout=1800,  # Keep same timeout as deploy
-                )
+            self._replace_application_code_bundle(
+                function_id=function_id,
+                path=str(tmp_path / "src"),
+                environment_overrides=None,
+                request_timeout=1800,  # Keep same timeout as deploy
             )
             logger.info(
                 f"VeFaaS function {function_name} with ID {function_id} updated."
             )
             url = self._release_application(app_id)
+            self._set_function_min_instance(function_id)
+            self.ensure_application_route_methods(app_id)
             logger.info(
                 f"VeFaaS application {application_name} with ID {app_id} released."
             )
@@ -413,6 +895,107 @@ class VeFaaS:
         route_id = cloud_resource["framework"]["triggers"][0]["Routes"][0]["Id"]
         return gateway_id, service_id, route_id
 
+    def ensure_application_route_methods(
+        self,
+        app_id: str,
+        required_methods: tuple[str, ...] = ("PATCH",),
+        *,
+        disable_cors: bool = False,
+    ) -> bool:
+        """Reconcile required HTTP methods and optional APIG CORS hardening."""
+        from volcenginesdkapig20221112 import (
+            AdvancedSettingForUpdateRouteInput,
+            AllowOriginForUpdateRouteInput,
+            CorsPolicySettingForUpdateRouteInput,
+            GetRouteRequest,
+            MatchRuleForUpdateRouteInput,
+            PathForUpdateRouteInput,
+            TimeoutSettingForUpdateRouteInput,
+            UpdateRouteRequest,
+            UpstreamListForUpdateRouteInput,
+        )
+
+        route_ids = self.get_application_route(app_id=app_id)
+        if route_ids is None:
+            raise ValueError(f"Application route not found for {app_id}")
+        _, _, route_id = route_ids
+        response = self.apig_client.apig_20221112_client.get_route(
+            GetRouteRequest(id=route_id),
+            async_req=True,
+        ).get()
+        route = response.route
+        methods = list(route.match_rule.method or [])
+        missing = [method for method in required_methods if method not in methods]
+        advanced_setting = getattr(route, "advanced_setting", None)
+        cors = getattr(advanced_setting, "cors_policy_setting", None)
+        cors_enabled = bool(getattr(cors, "enable", False))
+        if not missing and not (disable_cors and cors_enabled):
+            return False
+        methods.extend(missing)
+
+        path = route.match_rule.path
+        cors_methods = list(getattr(cors, "allow_methods", None) or [])
+        cors_methods.extend(method for method in missing if method not in cors_methods)
+        cors_update = None
+        if disable_cors:
+            cors_update = CorsPolicySettingForUpdateRouteInput(enable=False)
+        elif cors is not None:
+            cors_update = CorsPolicySettingForUpdateRouteInput(
+                allow_credentials=cors.allow_credentials,
+                allow_headers=cors.allow_headers,
+                allow_methods=cors_methods,
+                allow_origins=[
+                    AllowOriginForUpdateRouteInput(
+                        match_type=origin.match_type,
+                        value=origin.value,
+                    )
+                    for origin in (cors.allow_origins or [])
+                ],
+                enable=cors.enable,
+                expose_headers=cors.expose_headers,
+                max_age=cors.max_age,
+            )
+        timeout = getattr(advanced_setting, "timeout_setting", None)
+        timeout_update = (
+            TimeoutSettingForUpdateRouteInput(
+                enable=timeout.enable,
+                timeout=timeout.timeout,
+            )
+            if timeout is not None
+            else None
+        )
+
+        self.apig_client.apig_20221112_client.update_route(
+            UpdateRouteRequest(
+                id=route.id,
+                name=route.name,
+                enable=route.enable,
+                priority=route.priority,
+                match_rule=MatchRuleForUpdateRouteInput(
+                    method=methods,
+                    path=PathForUpdateRouteInput(
+                        match_content=path.match_content,
+                        match_type=path.match_type,
+                    ),
+                ),
+                upstream_list=[
+                    UpstreamListForUpdateRouteInput(
+                        ai_provider_settings=upstream.ai_provider_settings,
+                        upstream_id=upstream.upstream_id,
+                        version=upstream.version,
+                        weight=upstream.weight,
+                    )
+                    for upstream in route.upstream_list
+                ],
+                advanced_setting=AdvancedSettingForUpdateRouteInput(
+                    cors_policy_setting=cors_update,
+                    timeout_setting=timeout_update,
+                ),
+            ),
+            async_req=True,
+        ).get()
+        return True
+
     def find_app_id_by_name(self, name: str):
         apps = self._list_application(app_name=name)
         for app in apps:
@@ -430,11 +1013,58 @@ class VeFaaS:
                 sk=self.sk,
                 service="vefaas",
                 version="2021-03-03",
-                region="cn-beijing",
-                host="open.volcengineapi.com",
+                region=self.region,
+                host=self._openapi_host(),
+                session_token=self.session_token,
             )
         except Exception as e:
             logger.error(f"Delete application failed. Response: {e}")
+
+    def delete_function(self, function_id: str):
+        try:
+            self.client.delete_function(
+                volcenginesdkvefaas.DeleteFunctionRequest(id=function_id)
+            )
+        except Exception as e:
+            logger.error(f"Delete function failed. Function ID: {function_id}. {e}")
+
+    def update_function_envs_and_release(
+        self, function_id: str, extra_envs: dict
+    ) -> None:
+        """Merge ``extra_envs`` into the function's env vars and re-release it.
+
+        Used for the frontend's two-phase deploy: after the public URL is known,
+        inject ``OAUTH2_REDIRECT_URI`` and re-release so the SSO callback matches
+        the real endpoint. Waits (bounded) for the release to settle.
+        """
+        import time
+
+        from volcenginesdkvefaas import (
+            EnvForUpdateFunctionInput,
+            GetReleaseStatusRequest,
+            ReleaseRequest,
+            UpdateFunctionRequest,
+        )
+
+        import veadk.config
+
+        merged = {**veadk.config.veadk_environments, **extra_envs}
+        envs = [EnvForUpdateFunctionInput(key=k, value=v) for k, v in merged.items()]
+        self.client.update_function(UpdateFunctionRequest(id=function_id, envs=envs))
+        # revision_number=0 releases the latest revision.
+        self.client.release(ReleaseRequest(function_id=function_id, revision_number=0))
+
+        for _ in range(60):
+            status = self.client.get_release_status(
+                GetReleaseStatusRequest(function_id=function_id)
+            )
+            state = str(getattr(status, "status", "") or "").lower()
+            if "succ" in state or state == "done":
+                return
+            if "fail" in state or "error" in state:
+                raise RuntimeError(f"Function re-release failed: {state}")
+            time.sleep(5)
+        logger.warning("Function re-release did not settle within timeout.")
 
     def deploy(
         self,
@@ -444,6 +1074,12 @@ class VeFaaS:
         gateway_service_name: str = "",
         gateway_upstream_name: str = "",
         enable_key_auth: bool = False,
+        enable_mcp_session: bool = True,
+        keep_failed_deploy: bool = False,
+        disable_gateway_cors: bool = False,
+        cpu_milli: int | None = None,
+        memory_mb: int | None = None,
+        max_instance: int | None = None,
     ) -> tuple[str, str, str]:
         """Deploy an agent project to VeFaaS service.
 
@@ -454,6 +1090,10 @@ class VeFaaS:
             gateway_service_name (str, optional): Gateway service name. Defaults to "".
             gateway_upstream_name (str, optional): Gateway upstream name. Defaults to "".
             enable_key_auth (bool, optional): Enable key auth. Defaults to False.
+            disable_gateway_cors (bool, optional): Disable route-wide APIG CORS.
+            cpu_milli: Function CPU override in millicores.
+            memory_mb: Function memory override in MB; new functions default to 2048.
+            max_instance: Maximum instance override; omitted to preserve cloud settings.
 
         Returns:
             tuple[str, str, str]: (url, app_id, function_id)
@@ -461,6 +1101,48 @@ class VeFaaS:
         # Naming check
         if "_" in name:
             raise ValueError("Function or Application name cannot contain '_'.")
+
+        # Treat deployments as idempotent by application name.  Studio uses a
+        # stable application name so subsequent `studio deploy` runs should
+        # replace the existing function bundle instead of attempting to create
+        # another function with the same deterministic `<name>-fn` name.
+        existing_app_id = self.find_app_id_by_name(name)
+        if existing_app_id:
+            _, application_response = self._get_application_status(existing_app_id)
+            cloud_resource = json.loads(application_response["Result"]["CloudResource"])
+            function = cloud_resource.get("framework", {}).get("function", {})
+            function_id = str(function.get("Id") or "")
+            function_name = str(function.get("Name") or f"{name}-fn")
+            if not function_id:
+                raise ValueError(
+                    f"Function '{function_name}' not found for existing "
+                    f"application '{name}'."
+                )
+
+            logger.info(
+                f"VeFaaS application {name} already exists with ID "
+                f"{existing_app_id}; updating function {function_name} "
+                f"with ID {function_id}."
+            )
+            url = self.update_application_code_bundle(
+                application_id=existing_app_id,
+                function_id=function_id,
+                path=path,
+                environment_overrides={
+                    key: value
+                    for key, value in veadk.config.veadk_environments.items()
+                    if value is not None
+                },
+                disable_gateway_cors=disable_gateway_cors,
+                normalize_studio_entrypoint=True,
+                cpu_milli=cpu_milli,
+                memory_mb=memory_mb,
+                max_instance=max_instance,
+            )
+            logger.info(
+                f"VeFaaS application {name} with ID {existing_app_id} updated on {url}."
+            )
+            return url, existing_app_id, function_id
 
         # Give default names
         if not gateway_name:
@@ -484,27 +1166,59 @@ class VeFaaS:
             gateway_upstream_name = f"{name}-gw-us-{formatted_timestamp()}"
 
         function_name = f"{name}-fn"
+        function_id = ""
+        app_id = ""
 
         logger.info(
             f"Start to create VeFaaS function {function_name} with path {path}. Gateway: {gateway_name}, Gateway Service: {gateway_service_name}, Gateway Upstream: {gateway_upstream_name}."
         )
-        function_name, function_id = self._create_function(function_name, path)
-        logger.info(f"VeFaaS function {function_name} with ID {function_id} created.")
+        try:
+            function_name, function_id = self._create_function(
+                function_name, path, cpu_milli=cpu_milli, memory_mb=memory_mb
+            )
+            logger.info(
+                f"VeFaaS function {function_name} with ID {function_id} created."
+            )
 
-        logger.info(f"Start to create VeFaaS application {name}.")
-        app_id = self._create_application(
-            name,
-            function_name,
-            gateway_name,
-            gateway_upstream_name,
-            gateway_service_name,
-            enable_key_auth,
-        )
+            logger.info(f"Start to create VeFaaS application {name}.")
+            app_id = self._create_application(
+                name,
+                function_name,
+                gateway_name,
+                gateway_upstream_name,
+                gateway_service_name,
+                enable_key_auth,
+                enable_mcp_session,
+            )
 
-        logger.info(f"VeFaaS application {name} with ID {app_id} created.")
-        logger.info(f"Start to release VeFaaS application {app_id}.")
-        url = self._release_application(app_id)
-        logger.info(f"VeFaaS application {name} with ID {app_id} released.")
+            logger.info(f"VeFaaS application {name} with ID {app_id} created.")
+            logger.info(f"Start to release VeFaaS application {app_id}.")
+            url = self._release_application(app_id)
+            self._set_function_min_instance(function_id, max_instance=max_instance)
+            self.ensure_application_route_methods(
+                app_id,
+                disable_cors=disable_gateway_cors,
+            )
+            logger.info(f"VeFaaS application {name} with ID {app_id} released.")
+        except Exception:
+            if keep_failed_deploy:
+                logger.warning(
+                    "Keeping failed VeFaaS deployment resources for inspection. "
+                    f"Application ID: {app_id or 'not created'}, "
+                    f"Function ID: {function_id or 'not created'}."
+                )
+                raise
+            if app_id:
+                logger.info(
+                    f"Cleaning up VeFaaS application {app_id} after failed deploy."
+                )
+                self.delete(app_id)
+            if function_id:
+                logger.info(
+                    f"Cleaning up VeFaaS function {function_id} after failed deploy."
+                )
+                self.delete_function(function_id)
+            raise
 
         logger.info(f"VeFaaS application {name} with ID {app_id} deployed on {url}.")
 
@@ -532,6 +1246,9 @@ class VeFaaS:
                 source=image,  # Container image URL
                 request_timeout=1800,  # Request timeout in seconds
                 envs=envs,  # Environment variables from configuration
+                memory_mb=4096,
+                role=getenv("IAM_ROLE", None, allow_false_values=True),
+                project_name=self.project_name,
             )
         )
 
@@ -568,7 +1285,8 @@ class VeFaaS:
                     service="vefaas",
                     version="2021-03-03",
                     region="cn-beijing",
-                    host="open.volcengineapi.com",
+                    host=self._openapi_host(),
+                    session_token=self.session_token,
                 )
 
                 current_status = query_resp.get("Result", {}).get("Ready", False)
@@ -584,7 +1302,8 @@ class VeFaaS:
                     service="vefaas",
                     version="2021-03-03",
                     region="cn-beijing",
-                    host="open.volcengineapi.com",
+                    host=self._openapi_host(),
+                    session_token=self.session_token,
                 )
 
                 # Handle EnableUserCrVpcTunnel response correctly
@@ -609,7 +1328,8 @@ class VeFaaS:
                     service="vefaas",
                     version="2021-03-03",
                     region="cn-beijing",
-                    host="open.volcengineapi.com",
+                    host=self._openapi_host(),
+                    session_token=self.session_token,
                 )
 
                 final_status = verify_resp.get("Result", {}).get("Ready", False)
@@ -655,6 +1375,9 @@ class VeFaaS:
                 source=image,  # Container image URL
                 request_timeout=1800,  # Request timeout in seconds
                 envs=envs,  # Environment variables from configuration
+                memory_mb=4096,
+                role=getenv("IAM_ROLE", None, allow_false_values=True),
+                project_name=self.project_name,
             )
         )
 
@@ -752,6 +1475,7 @@ class VeFaaS:
         while True:
             try:
                 url = self._release_application(app_id)
+                self.ensure_application_route_methods(app_id)
                 logger.info(f"VeFaaS application {name} with ID {app_id} released.")
                 break
             except Exception:
@@ -769,20 +1493,59 @@ class VeFaaS:
 
         return url, app_id, function_id
 
-    def _get_application_logs(self, app_id: str) -> list[str]:
-        response = _ = ve_request(
-            request_body={"Id": app_id, "Limit": 99999, "RevisionNumber": 1},
-            action="GetApplicationRevisionLog",
-            ak=self.ak,
-            sk=self.sk,
-            service="vefaas",
-            version="2021-03-03",
-            region="cn-beijing",
-            host="open.volcengineapi.com",
+    def _get_application_logs(
+        self,
+        app_id: str,
+        *,
+        revision_number: int | None = None,
+        limit: int = _APPLICATION_REVISION_LOG_MAX_BYTES,
+        timeout: float = 5,
+    ) -> list[str]:
+        if revision_number is None:
+            _, application = self._get_application_status(app_id)
+            result = application.get("Result", {})
+            revision_number = int(
+                result.get("NewRevisionNumber")
+                or result.get("StableRevisionNumber")
+                or 1
+            )
+        request_limit = max(
+            1,
+            min(limit, _APPLICATION_REVISION_LOG_MAX_BYTES),
         )
 
+        def request_page(offset: int | None = None) -> dict[str, Any]:
+            request_body = {
+                "Id": app_id,
+                "Limit": request_limit,
+                "RevisionNumber": revision_number,
+            }
+            if offset is not None:
+                request_body["Offset"] = offset
+            return ve_request(
+                request_body=request_body,
+                action="GetApplicationRevisionLog",
+                ak=self.ak,
+                sk=self.sk,
+                service="vefaas",
+                version="2021-03-03",
+                region=self.region,
+                host=self._openapi_host(),
+                session_token=self.session_token,
+                timeout=timeout,
+            )
+
+        response = request_page()
+
         try:
-            logs = response["Result"]["LogLines"]
+            result = response["Result"]
+            logs = result["LogLines"]
+            next_offset = int(result.get("NextOffset") or 0)
+            if next_offset > request_limit:
+                tail_response = request_page(next_offset - request_limit)
+                tail_logs = tail_response["Result"]["LogLines"]
+                # Offset is a byte position and can land in the middle of a line.
+                return tail_logs[1:] if tail_logs else []
             return logs
         except Exception as _:
             raise ValueError(f"Get application log failed. Response: {response}")

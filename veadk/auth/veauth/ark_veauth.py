@@ -13,6 +13,10 @@
 # limitations under the License.
 
 import os
+import random
+import time
+
+import requests
 
 from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
 from veadk.utils.logger import get_logger
@@ -21,12 +25,83 @@ from veadk.utils.volcengine_sign import ve_request
 logger = get_logger(__name__)
 
 
-def get_ark_token(region: str = "cn-beijing") -> str:
+# A specific key may sit on any page. We page through until we either match by
+# name or exhaust the list.
+_ARK_PROJECT_NAME = "default"
+_ARK_PAGE_SIZE = 100
+_RAW_API_KEY_MAX_ATTEMPTS = 3
+_RAW_API_KEY_RETRY_DELAYS_SECONDS = (0.2, 0.5)
+_RAW_API_KEY_RETRYABLE_ERROR_CODES = {
+    "InternalError",
+    "InternalServiceTimeout",
+    "RequestTimeout",
+    "ServiceUnavailable",
+    "Throttling",
+    "TooManyRequests",
+}
+_RAW_API_KEY_RETRYABLE_ERROR_CODE_NUMBERS = {100016}
+
+
+def _response_error(res: dict) -> dict:
+    metadata = res.get("ResponseMetadata", {})
+    if not isinstance(metadata, dict):
+        return {}
+    error = metadata.get("Error", {})
+    return error if isinstance(error, dict) else {}
+
+
+def _is_retryable_raw_api_key_response(res: dict) -> bool:
+    error = _response_error(res)
+    return (
+        error.get("Code") in _RAW_API_KEY_RETRYABLE_ERROR_CODES
+        or error.get("CodeN") in _RAW_API_KEY_RETRYABLE_ERROR_CODE_NUMBERS
+    )
+
+
+def _sleep_before_raw_api_key_retry(attempt: int) -> None:
+    delay = _RAW_API_KEY_RETRY_DELAYS_SECONDS[
+        min(attempt - 1, len(_RAW_API_KEY_RETRY_DELAYS_SECONDS) - 1)
+    ]
+    time.sleep(delay + random.uniform(0, delay / 5))
+
+
+def get_ark_token(
+    region: str = "",
+    api_key_name: str | None = None,
+    *,
+    api_key_id: str | None = None,
+    cloud_provider: str | None = None,
+    access_key: str | None = None,
+    secret_key: str | None = None,
+    session_token: str | None = None,
+) -> str:
+    """Fetch a raw ARK API key.
+
+    Args:
+        region: VolcEngine region for signing (ARK keys are region-agnostic; this
+            only affects the signed host, kept for BytePlus routing).
+        api_key_name: When given, resolve the key whose ``Name`` matches exactly.
+            Raises ``ValueError`` if no key with that name exists. When omitted,
+            the first key in the account's list is used (legacy behavior).
+        api_key_id: When given, resolve this exact key ID without selecting a
+            different key. Takes precedence over ``api_key_name``.
+        cloud_provider: Optional explicit provider routing override.
+        access_key: Optional Volcengine access key. Defaults to the environment.
+        secret_key: Optional Volcengine secret key. Defaults to the environment.
+        session_token: Optional STS session token. Defaults to the environment.
+
+    Returns:
+        The raw API key string.
+    """
     logger.info("Fetching ARK token...")
 
-    access_key = os.getenv("VOLCENGINE_ACCESS_KEY")
-    secret_key = os.getenv("VOLCENGINE_SECRET_KEY")
-    session_token = ""
+    access_key = access_key or os.getenv("VOLCENGINE_ACCESS_KEY")
+    secret_key = secret_key or os.getenv("VOLCENGINE_SECRET_KEY")
+    session_token = (
+        session_token
+        or os.getenv("VOLCENGINE_SESSION_TOKEN")
+        or os.getenv("VOLC_SESSIONTOKEN", "")
+    )
 
     if not (access_key and secret_key):
         # try to get from vefaas iam
@@ -35,47 +110,116 @@ def get_ark_token(region: str = "cn-beijing") -> str:
         secret_key = cred.secret_access_key
         session_token = cred.session_token
 
-    provider = os.getenv("CLOUD_PROVIDER")
+    region = region or os.getenv("REGION") or "cn-beijing"
+    provider = cloud_provider or os.getenv("CLOUD_PROVIDER")
     host = "open.volcengineapi.com"
     if provider and provider.lower() == "byteplus":
         region = "ap-southeast-1"
         host = "open.byteplusapi.com"
 
-    res = ve_request(
-        request_body={"ProjectName": "default", "Filter": {"AllowAll": True}},
-        header={"X-Security-Token": session_token},
-        action="ListApiKeys",
-        ak=access_key,
-        sk=secret_key,
-        service="ark",
-        version="2024-01-01",
-        region=region,
-        host=host,
-    )
-    try:
-        first_api_key_id = res["Result"]["Items"][0]["Id"]
-        logger.warning("By default, VeADK fetches the first API Key in the list.")
-        logger.info(
-            f"Try to fetch ARK API Key with id={first_api_key_id}, name={res['Result']['Items'][0]['Name']}"
+    def _list_api_keys(page_number: int) -> dict:
+        res = ve_request(
+            request_body={
+                "ProjectName": _ARK_PROJECT_NAME,
+                "Filter": {"AllowAll": True},
+                "PageNumber": page_number,
+                "PageSize": _ARK_PAGE_SIZE,
+            },
+            header={"X-Security-Token": session_token},
+            action="ListApiKeys",
+            ak=access_key,
+            sk=secret_key,
+            service="ark",
+            version="2024-01-01",
+            region=region,
+            host=host,
         )
-    except KeyError:
-        raise ValueError(f"Failed to get ARK api key list: {res}")
+        try:
+            return res["Result"]
+        except KeyError as error:
+            raise ValueError("Failed to get ARK API key list.") from error
+
+    if api_key_id:
+        target_id = api_key_id
+        logger.info("Using the requested ARK API Key ID.")
+    elif api_key_name:
+        target_id = None
+        page = 1
+        scanned = 0
+        total = 0
+        while True:
+            result = _list_api_keys(page)
+            total = result.get("TotalCount", 0)
+            items = result.get("Items", [])
+            for item in items:
+                if item.get("Name") == api_key_name:
+                    target_id = item["Id"]
+                    break
+            scanned += len(items)
+            # Stop as soon as we match, run out of items, or cover the whole list.
+            if target_id is not None or not items or scanned >= total:
+                break
+            page += 1
+        if target_id is None:
+            raise ValueError(
+                f"ARK API Key named '{api_key_name}' not found in project "
+                f"'{_ARK_PROJECT_NAME}' (scanned {scanned} keys)."
+            )
+        logger.info("Using the requested ARK API Key.")
+    else:
+        items = _list_api_keys(1).get("Items", [])
+        if not items:
+            raise ValueError(f"No ARK API keys found in project '{_ARK_PROJECT_NAME}'.")
+        target_id = items[0]["Id"]
+        logger.warning("By default, VeADK fetches the first API Key in the list.")
+        logger.info("Fetching the first ARK API Key returned by ListApiKeys.")
 
     # get raw api key
-    res = ve_request(
-        request_body={"Id": first_api_key_id},
-        header={"X-Security-Token": session_token},
-        action="GetRawApiKey",
-        ak=access_key,
-        sk=secret_key,
-        service="ark",
-        version="2024-01-01",
-        region=region,
-        host=host,
+    request_key_id = (
+        int(target_id)
+        if isinstance(target_id, str) and target_id.isdigit()
+        else target_id
     )
-    try:
-        api_key = res["Result"]["ApiKey"]
-        logger.info(f"Successfully fetched ARK API Key (starts with {api_key[:8]}).")
-        return api_key
-    except KeyError:
-        raise ValueError(f"Failed to get ARK api key: {res}")
+    request_body = {"Id": request_key_id, "ProjectName": _ARK_PROJECT_NAME}
+    for attempt in range(1, _RAW_API_KEY_MAX_ATTEMPTS + 1):
+        try:
+            res = ve_request(
+                request_body=request_body,
+                header={"X-Security-Token": session_token},
+                action="GetRawApiKey",
+                ak=access_key,
+                sk=secret_key,
+                service="ark",
+                version="2024-01-01",
+                region=region,
+                host=host,
+            )
+        except requests.exceptions.RequestException as error:
+            if attempt >= _RAW_API_KEY_MAX_ATTEMPTS:
+                raise ValueError("Failed to get ARK api key.") from error
+            logger.warning(
+                "GetRawApiKey request failed; retrying "
+                f"({attempt}/{_RAW_API_KEY_MAX_ATTEMPTS}): {error}"
+            )
+            _sleep_before_raw_api_key_retry(attempt)
+            continue
+
+        try:
+            api_key = res["Result"]["ApiKey"]
+            logger.info("Successfully fetched ARK API Key.")
+            return api_key
+        except KeyError as error:
+            if (
+                attempt < _RAW_API_KEY_MAX_ATTEMPTS
+                and _is_retryable_raw_api_key_response(res)
+            ):
+                logger.warning(
+                    "GetRawApiKey returned a retryable error; retrying "
+                    f"({attempt}/{_RAW_API_KEY_MAX_ATTEMPTS}): "
+                    f"{_response_error(res)}"
+                )
+                _sleep_before_raw_api_key_retry(attempt)
+                continue
+            raise ValueError(f"Failed to get ARK api key: {res}") from error
+
+    raise ValueError("Failed to get ARK api key.")

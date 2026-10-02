@@ -1,0 +1,281 @@
+---
+title: "长期记忆"
+---
+
+长期记忆（Long-term Memory）跨会话、跨时间保存重要信息——用户偏好、任务历史、知识要点或长期状态。[短期记忆](/cn/docs/framework/memory/short-term)只在单次会话内有效，而长期记忆让智能体在**不同会话**之间也能记住事实。
+
+为什么需要它：
+
+- 支持跨会话的连续对话体验；
+- 让智能体在多次交互中保留学习成果和用户特定信息；
+- 减少重复询问，提升满意度与效率；
+- 支撑长期策略优化，如个性化推荐或任务追踪。
+
+## 统一入口：`LongTermMemory`
+
+无论用哪种后端，你都只与 `veadk.memory.long_term_memory.LongTermMemory` 打交道。它实现了 Google ADK 的 `BaseMemoryService`，因此可直接作为智能体的记忆服务；同时根据 `backend` 选择并初始化底层实现。
+
+```python
+from veadk.memory.long_term_memory import LongTermMemory
+
+ltm = LongTermMemory(backend="viking", app_name="ltm_demo")
+```
+
+### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `backend` | `"local" \| "opensearch" \| "redis" \| "viking" \| "mem0" \| "openviking" \| "tos_context"` 或后端实例 | `"opensearch"` | 选择后端实现，也可直接传入一个 `BaseLongTermMemoryBackend` 实例。`viking_mem` 已废弃，自动转为 `viking`。 |
+| `backend_config` | `dict` | `{}` | 传给后端构造函数的配置；若不含 `index`，会用 `index` 或 `app_name` 补齐。 |
+| `top_k` | `int` | `5` | 检索时返回最相似的片段数量。 |
+| `index` | `str` | `""` | 存储记忆所用的索引/集合名。为空时回退到 `app_name`，再为空则用 `default_app`。 |
+| `app_name` | `str` | `""` | 拥有该记忆的应用名，常用作数据隔离与 `index` 的回退值。 |
+| `user_id` | `str` | `""` | **已废弃**，仅为向后兼容保留。 |
+
+<Callout type="info">
+向量类后端（`local`、`opensearch`、`redis`）会对记忆做向量化（embedding），需要安装扩展依赖：`pip install "veadk-python[extensions]"`，并配置 embedding 模型（环境变量前缀 `MODEL_EMBEDDING_`，缺省时复用 `MODEL_AGENT_API_KEY`）。`viking`、`mem0`、`openviking` 与 `tos_context` 是托管服务，无需本地 embedding。
+</Callout>
+
+## 后端契约：`BaseLongTermMemoryBackend`
+
+所有后端都继承自 `BaseLongTermMemoryBackend`，需实现三个方法：
+
+```python
+class BaseLongTermMemoryBackend(ABC, BaseModel):
+    index: str
+
+    @abstractmethod
+    def precheck_index_naming(self): ...
+    """校验 index 命名是否合法。"""
+
+    @abstractmethod
+    def save_memory(self, user_id: str, event_strings: list[str], **kwargs) -> bool: ...
+    """把记忆写入后端。"""
+
+    @abstractmethod
+    def search_memory(self, user_id: str, query: str, top_k: int, **kwargs) -> list[str]: ...
+    """从后端按语义检索记忆。"""
+```
+
+`LongTermMemory` 负责把会话事件过滤、序列化后交给后端的 `save_memory`，并把 `search_memory` 的结果包装为 ADK 的 `MemoryEntry`。因此**上层使用方式与后端无关**，区别仅在存储介质与检索实现。要自定义后端，继承该基类实现这三个方法，并把实例直接传给 `LongTermMemory(backend=<实例>)`。
+
+## 选择后端
+
+调试可以用 `local`，生产更建议使用 `viking` 或 `mem0`。
+
+| 后端 | 存储 | 依赖 | 适用场景 | 文档 |
+| :--- | :--- | :--- | :--- | :--- |
+| `local` | 内存向量索引 | `extensions` + embedding | 本地调试 | [本地内存](/cn/docs/framework/memory/long-term/local) |
+| `viking` | VikingDB 记忆库（托管） | 火山引擎账号 | 生产推荐 | [VikingDB](/cn/docs/framework/memory/long-term/vikingdb) |
+| `mem0` | Mem0 记忆库（托管） | Mem0 API Key | 生产推荐 | [Mem0](/cn/docs/framework/memory/long-term/mem0) |
+| `openviking` | OpenViking memory（托管/自建 OpenViking 服务） | OpenViking URL 与 API Key | OpenViking 统一资源与记忆场景 | [环境变量](/cn/docs/references/configuration/environment-variables#database) |
+| `opensearch` | OpenSearch 向量库 | OpenSearch + embedding | 自建向量检索 | [OpenSearch](/cn/docs/framework/memory/long-term/opensearch) |
+| `redis` | Redis 向量库 | Redis(RediSearch) + embedding | 自建向量检索 | [Redis](/cn/docs/framework/memory/long-term/redis) |
+| `tos_context` | TOS ContextBucket（托管） | 火山引擎账号（AK/SK，临时凭证另需 `VOLCENGINE_SESSION_TOKEN`）+ `tos>=2.9.4b1` | 服务端推理与检索、按用户隔离 | [TOS ContextBucket](/cn/docs/framework/memory/long-term/tos-context#配置) |
+
+### OpenViking 配置示例
+
+`openviking` 后端会把会话写入 OpenViking session，再由 OpenViking 提取长期记忆。`Runner.user_id` 会作为 OpenViking 的 `peer_id` 使用；`DATABASE_OPENVIKING_USER_ID` 或 `backend_config["openviking_user_id"]` 表示 OpenViking 里的记忆 owner/context，未配置时使用 `default`。
+
+```bash
+export DATABASE_OPENVIKING_URL="http://127.0.0.1:1933"
+export DATABASE_OPENVIKING_API_KEY="your-openviking-api-key"
+export DATABASE_OPENVIKING_USER_ID="agent_context"
+```
+
+```python
+from veadk.memory.long_term_memory import LongTermMemory
+
+ltm = LongTermMemory(
+    backend="openviking",
+    app_name="support_app",
+    backend_config={
+        # url/api_key 也可以通过 DATABASE_OPENVIKING_URL/API_KEY 提供。
+        "openviking_user_id": "agent_context",
+        # 可选：不传时保持 VeADK 默认 policy。
+        "memory_policy": {
+            "self": {"enabled": False},
+            "peer": {"enabled": True},
+            "memory_types": ["entities", "events", "preferences"],
+        },
+    },
+)
+```
+
+也可以用环境变量覆盖 memory policy，值必须是 JSON 字符串：
+
+```bash
+export DATABASE_OPENVIKING_MEMORY_POLICY='{"self":{"enabled":false},"peer":{"enabled":true},"memory_types":["entities","events","preferences"]}'
+```
+
+## 绑定到 Agent
+
+把 `long_term_memory` 传给 `Agent` 后，智能体会**自动获得 `load_memory` 工具**，可在运行时检索过往会话。
+
+```python
+from veadk import Agent, Runner
+from veadk.memory.long_term_memory import LongTermMemory
+
+APP_NAME = "ltm_demo"
+ltm = LongTermMemory(backend="viking", app_name=APP_NAME)
+
+root_agent = Agent(
+    name="ltm_agent",
+    instruction="回答用户问题。如果答案可能在过往对话里，使用 `load_memory` 工具检索。",
+    long_term_memory=ltm,
+)
+runner = Runner(agent=root_agent, app_name=APP_NAME)
+```
+
+## 记忆管理
+
+### 写入：`add_session_to_memory`
+
+会话结束或达到某个节点时，调用异步方法 `add_session_to_memory` 把会话持久化。`LongTermMemory` 会先按默认策略过滤事件（普通后端只保留用户文本事件，OpenViking 后端保留用户与助手文本事件），再交给后端写入。
+
+```python
+completed_session = await runner.session_service.get_session(
+    app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID
+)
+await ltm.add_session_to_memory(completed_session)
+```
+
+### 检索：`search_memory`
+
+除了智能体运行时通过 `load_memory` 自动检索，你也可以直接调用异步方法 `search_memory` 做语义搜索，用于调试或自定义 RAG：
+
+```python
+response = await ltm.search_memory(
+    app_name=APP_NAME,
+    user_id=USER_ID,
+    query="favorite project",
+)
+print(response.memories)
+```
+
+<Callout type="info">
+`get_user_profile(user_id)` 仅 `viking` 后端支持，用于获取用户画像；其他后端会返回空字符串。
+</Callout>
+
+## 自动保存会话
+
+在初始化 `Agent` 时开启 `auto_save_session=True` 并配置好长期记忆，VeADK 会自动把会话写入长期记忆，无需手动调用 `add_session_to_memory`。
+
+```python
+from veadk import Agent
+from veadk.memory.long_term_memory import LongTermMemory
+
+agent = Agent(
+    name="ltm_agent",
+    auto_save_session=True,
+    long_term_memory=LongTermMemory(backend="viking", app_name="ltm_demo"),
+)
+```
+
+为避免索引被频繁初始化，VeADK 提供 `MIN_MESSAGES_THRESHOLD` 与 `MIN_TIME_THRESHOLD` 两个环境变量自定义保存周期：默认在累计 10 条 event 或间隔 60 秒时触发保存；此外，当切换 `session_id` 并发起新问答时，VeADK 会自动把上一个会话写入长期记忆。
+## 自动保存记忆策略
+开发者在 `Agent` 上配置 `auto_save_memory_policy` 来控制自动保存长期记忆时哪些 event 会被写入；不配置时等价于 `"default"`。
+```python
+from veadk import Agent
+from veadk.memory import MemoryAutoSavePolicy
+from veadk.memory.long_term_memory import LongTermMemory
+agent = Agent(
+    name="ltm_agent",
+    auto_save_session=True,
+    long_term_memory=LongTermMemory(backend="viking", app_name="ltm_demo"),
+    auto_save_memory_policy="default",
+)
+agent_all = Agent(
+    name="ltm_agent_all",
+    auto_save_session=True,
+    long_term_memory=LongTermMemory(backend="viking", app_name="ltm_demo"),
+    auto_save_memory_policy="all",
+)
+agent_custom = Agent(
+    name="ltm_agent_custom",
+    auto_save_session=True,
+    long_term_memory=LongTermMemory(backend="viking", app_name="ltm_demo"),
+    auto_save_memory_policy=MemoryAutoSavePolicy(
+        preset="custom",
+        include_roles=["user", "assistant"],
+        include_event_types=["text", "function_call", "function_response"],
+        exclude_authors=["memory_optimizer"],
+        include_thought=False,
+    ),
+)
+```
+策略字段只影响自动保存长期记忆的事件筛选，不改变短期记忆、`load_memory` 检索或后端 `save_memory` 的参数契约；手动调用 `add_session_to_memory` 时仍默认使用兼容旧版本的默认策略，只有显式传入 `auto_save_memory_policy` 才会应用自定义筛选。
+### 预置策略
+`"default"`：兼容旧行为。普通后端只保存 `role=user` 的文本事件；OpenViking 后端保存 `role=user` 与 `role=assistant` 的文本事件；默认不保存工具调用、工具返回、媒体、代码执行结果和 thought。
+`"all"`：保存 `role=user`、`role=assistant`、`role=system` 的所有可序列化事件类型，包括文本、thought、function/tool 调用与返回、媒体元信息、代码执行、转写和错误。为避免把原始二进制写入记忆，`inline_data.data` 会被替换为 `data_size` 与 `data_omitted`。
+`"custom"`：从保守默认值开始，由开发者通过 include/exclude 字段精确选择要保存或排除的事件。
+### 策略字段
+`include_roles` / `exclude_roles`：按归一化后的角色筛选，角色枚举为 `"user"`、`"assistant"`、`"system"`；ADK/GenAI 的 `content.role="model"` 会归一化为 `"assistant"`，`event.author=="user"` 或 `content.role=="user"` 会归一化为 `"user"`。
+`include_authors` / `exclude_authors`：按 `event.author` 精确匹配筛选；`author` 不是固定枚举，可能是 `"user"`、agent name、运行时桥接组件或内部处理器名称。
+`include_event_types` / `exclude_event_types`：按 event 中包含的内容类型筛选；显式设置 `include_event_types` 时以该字段为准，可直接保存非文本类型。
+`text_only`：当 `include_event_types` 未显式设置时，只允许文本类 part 通过；默认 `True`。
+`include_thought`：是否保存 `part.thought=True` 的思考文本；默认 `False`，混合事件中会移除 thought part 但保留最终文本。
+`include_empty_text`：是否允许没有文本 part 的事件通过；`"all"` 会开启它以支持错误、转写等非普通文本事件，但如果事件类型被 `exclude_event_types` 全部排除，仍不会写入空事件。
+### Event 类型推断
+`event_type` 不是 ADK Event 的原生字段，VeADK 会从 `event.content.parts` 与事件元数据推断。
+`text`：part 有 `text` 且不是 thought。
+`thought`：part 有 `text` 且 `thought=True`。
+`function_call` / `function_response`：part 含 `function_call` 或 `function_response`，这是 ADK 常用的工具调用与工具返回形态。
+`tool_call` / `tool_response`：part 含 GenAI 底层 `tool_call` 或 `tool_response`。
+`media`：part 含 `inline_data` 或 `file_data`。
+`executable_code` / `code_execution_result`：part 含代码执行请求或执行结果。
+`transcription`：event 含 `input_transcription` 或 `output_transcription`。
+`error`：event 含 `error_code` 或 `error_message`。
+## 跨会话示例
+
+下面是端到端流程：会话 #1 告诉智能体一个事实并自动归档，然后在**全新的**会话 #2 提问——智能体通过检索长期记忆（而非上下文窗口）回忆起该事实。这里用 `local` 后端，需要 `pip install "veadk-python[extensions]"`。
+
+```python
+import asyncio
+
+from veadk import Agent, Runner
+from veadk.memory.long_term_memory import LongTermMemory
+
+APP_NAME = "ltm_demo"
+USER_ID = "user-42"
+
+
+def build_runner() -> Runner:
+    ltm = LongTermMemory(backend="local", app_name=APP_NAME)
+    agent = Agent(
+        name="ltm_agent",
+        instruction=(
+            "你是个人助理。当用户问起之前告诉过你的事情时，"
+            "使用 `load_memory` 工具去回忆。"
+        ),
+        long_term_memory=ltm,
+        auto_save_session=True,
+    )
+    return Runner(agent=agent, app_name=APP_NAME, user_id=USER_ID)
+
+
+async def main() -> None:
+    runner = build_runner()
+
+    print(
+        "Session 1 ->",
+        await runner.run(
+            messages="记一下：我对花生过敏，而且我是素食者。",
+            session_id="session-1",
+        ),
+    )
+
+    print(
+        "Session 2 ->",
+        await runner.run(
+            messages="帮我推荐一道适合我的菜，要考虑我的饮食限制。",
+            session_id="session-2",
+        ),
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+智能体能在会话 #2 中识别同一用户在会话 #1 留下的偏好，给出连贯、个性化的回答（如推荐一道无花生的素食菜品）。

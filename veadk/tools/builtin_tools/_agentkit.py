@@ -14,6 +14,7 @@
 
 import json
 import os
+import time
 from typing import Any, Optional
 
 from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
@@ -22,6 +23,25 @@ from veadk.utils.logger import get_logger
 from veadk.utils.volcengine_sign import ve_request
 
 logger = get_logger(__name__)
+
+
+_SESSION_READY_TIMEOUT = 120.0
+_SESSION_POLL_INTERVAL = 1.0
+_SESSION_TERMINAL_STATUSES = frozenset({"failed", "terminating", "terminated"})
+_AGENTKIT_REQUEST_CONNECT_TIMEOUT = 10.0
+_AGENTKIT_REQUEST_MIN_READ_TIMEOUT = 60.0
+_AGENTKIT_REQUEST_TIMEOUT_BUFFER = 30.0
+
+
+def _agentkit_request_timeout(operation_timeout: int) -> tuple[float, float]:
+    """Keep the synchronous request alive longer than the tool operation."""
+    return (
+        _AGENTKIT_REQUEST_CONNECT_TIMEOUT,
+        max(
+            _AGENTKIT_REQUEST_MIN_READ_TIMEOUT,
+            float(operation_timeout) + _AGENTKIT_REQUEST_TIMEOUT_BUFFER,
+        ),
+    )
 
 
 def resolve_agentkit_tool_id(*preferred_env_names: str) -> str:
@@ -48,7 +68,11 @@ def get_agentkit_endpoint_config(
         sld = "volces"
         default_region = "cn-beijing"
 
-    region = getenv("AGENTKIT_TOOL_REGION", default_region)
+    region = getenv(
+        "AGENTKIT_TOOL_REGION",
+        (os.getenv("REGION") if cloud_provider != "byteplus" else None)
+        or default_region,
+    )
     host = getenv(host_env_name, service + "." + region + f".{sld}.com")
     scheme = getenv("AGENTKIT_TOOL_SCHEME", "https", allow_false_values=True).lower()
     if scheme not in {"http", "https"}:
@@ -152,4 +176,224 @@ def invoke_agentkit_run_code(
         host=host,
         header=header,
         scheme=scheme,
+        timeout=_agentkit_request_timeout(timeout),
     )
+
+
+def invoke_agentkit_exec_bash(
+    *,
+    tool_id: str,
+    tool_user_session_id: str,
+    command: str,
+    exec_dir: Optional[str] = None,
+    env: Optional[dict[str, str]] = None,
+    timeout: int = 30,
+    hard_timeout: Optional[int] = None,
+    max_output_length: Optional[int] = None,
+    tool_state: Optional[dict[str, Any]] = None,
+    ttl: Optional[int] = None,
+) -> dict[str, Any]:
+    """Invoke AgentKit's Bash execution operation through InvokeTool."""
+    service, region, host, scheme = get_agentkit_endpoint_config()
+    ak, sk, header = get_agentkit_credentials(tool_state)
+
+    operation_payload: dict[str, Any] = {
+        "command": command,
+        "timeout": timeout,
+    }
+    if exec_dir is not None:
+        operation_payload["exec_dir"] = exec_dir
+    if env is not None:
+        operation_payload["env"] = env
+    if hard_timeout is not None:
+        operation_payload["hard_timeout"] = hard_timeout
+    if max_output_length is not None:
+        operation_payload["max_output_length"] = max_output_length
+
+    request_body: dict[str, Any] = {
+        "ToolId": tool_id,
+        "OperationType": "ExecBash",
+        "UserSessionId": tool_user_session_id,
+        "OperationPayload": json.dumps(operation_payload),
+    }
+    if ttl is not None:
+        request_body["Ttl"] = ttl
+
+    operation_timeout = max(timeout, hard_timeout or timeout)
+
+    return ve_request(
+        request_body=request_body,
+        action="InvokeTool",
+        ak=ak,
+        sk=sk,
+        service=service,
+        version="2025-10-30",
+        region=region,
+        host=host,
+        header=header,
+        scheme=scheme,
+        timeout=_agentkit_request_timeout(operation_timeout),
+    )
+
+
+def _get_or_create_agentkit_session(
+    *,
+    client,
+    tool_id: str,
+    tool_user_session_id: str,
+    ttl: int,
+):
+    """Return the newest reusable session for ``tool_user_session_id`` or create one."""
+    from agentkit.sdk.tools import types as tools_types
+
+    try:
+        listing = client.list_sessions(
+            tools_types.ListSessionsRequest(
+                ToolId=tool_id,
+                Filters=[
+                    tools_types.FiltersItemForListSessions(
+                        Name="UserSessionId",
+                        Values=[tool_user_session_id],
+                    )
+                ],
+                PageSize=20,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"AgentKit ListSessions failed, falling back to create: {exc}")
+        listing = None
+
+    candidates = getattr(listing, "session_infos", None) or []
+    reusable = [
+        info
+        for info in candidates
+        if getattr(info, "user_session_id", None) == tool_user_session_id
+        and (getattr(info, "status", None) or "").strip().lower()
+        not in _SESSION_TERMINAL_STATUSES
+    ]
+    if reusable:
+        reusable.sort(
+            key=lambda info: getattr(info, "created_at", "") or "", reverse=True
+        )
+        chosen = reusable[0]
+        logger.debug(
+            f"Reusing AgentKit session {getattr(chosen, 'session_id', None)} "
+            f"for UserSessionId={tool_user_session_id}"
+        )
+        return chosen
+
+    return client.create_session(
+        tools_types.CreateSessionRequest(
+            ToolId=tool_id,
+            UserSessionId=tool_user_session_id,
+            Ttl=ttl,
+        )
+    )
+
+
+def ensure_agentkit_session_endpoint(
+    *,
+    tool_id: str,
+    tool_user_session_id: str,
+    tool_state: Optional[dict[str, Any]] = None,
+    ttl: int = 1800,
+    prefer_internal_endpoint: bool = False,
+    wait_until_ready: bool = False,
+    ready_timeout: float = _SESSION_READY_TIMEOUT,
+    poll_interval: float = _SESSION_POLL_INTERVAL,
+) -> str:
+    """Create or reuse an AgentKit tool session and return its endpoint."""
+    from agentkit.sdk.tools import types as tools_types
+    from agentkit.sdk.tools.client import AgentkitToolsClient
+
+    if wait_until_ready:
+        if ready_timeout < 0:
+            raise ValueError("ready_timeout must be greater than or equal to 0")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be greater than 0")
+
+    _, region, _, _ = get_agentkit_endpoint_config()
+    ak, sk, header = get_agentkit_credentials(tool_state)
+    session_token = header.get("X-Security-Token", "")
+    client = AgentkitToolsClient(
+        access_key=ak,
+        secret_key=sk,
+        region=region,
+        session_token=session_token,
+    )
+    session = _get_or_create_agentkit_session(
+        client=client,
+        tool_id=tool_id,
+        tool_user_session_id=tool_user_session_id,
+        ttl=ttl,
+    )
+    if not wait_until_ready:
+        public_endpoint = getattr(session, "endpoint", None)
+        internal_endpoint = getattr(session, "internal_endpoint", None)
+        endpoint = (
+            internal_endpoint or public_endpoint
+            if prefer_internal_endpoint
+            else public_endpoint or internal_endpoint
+        )
+        if endpoint:
+            return endpoint
+
+        session_id = session.session_id
+        if not session_id:
+            return ""
+        current_session = client.get_session(
+            tools_types.GetSessionRequest(
+                ToolId=tool_id,
+                SessionId=session_id,
+            )
+        )
+        if prefer_internal_endpoint:
+            return current_session.internal_endpoint or current_session.endpoint or ""
+        return current_session.endpoint or current_session.internal_endpoint or ""
+
+    session_id = session.session_id
+    if not session_id:
+        raise RuntimeError("AgentKit CreateSession response is missing SessionId")
+
+    deadline = time.monotonic() + ready_timeout
+    last_status = "Unknown"
+    while True:
+        current_session = client.get_session(
+            tools_types.GetSessionRequest(
+                ToolId=tool_id,
+                SessionId=session_id,
+            )
+        )
+        status = (getattr(current_session, "status", None) or "").strip()
+        last_status = status or "Unknown"
+        logger.debug(f"AgentKit session {session_id} status: {last_status}")
+        normalized_status = status.lower()
+        if normalized_status == "ready":
+            public_endpoint = getattr(current_session, "endpoint", None) or getattr(
+                session, "endpoint", None
+            )
+            internal_endpoint = getattr(
+                current_session, "internal_endpoint", None
+            ) or getattr(session, "internal_endpoint", None)
+            endpoint = (
+                internal_endpoint or public_endpoint
+                if prefer_internal_endpoint
+                else public_endpoint or internal_endpoint
+            )
+            if endpoint:
+                return endpoint
+            raise RuntimeError(
+                f"AgentKit session {session_id} is Ready but has no endpoint"
+            )
+        if normalized_status in _SESSION_TERMINAL_STATUSES:
+            raise RuntimeError(
+                f"AgentKit session {session_id} entered terminal status {last_status}"
+            )
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Timed out waiting for AgentKit session {session_id} to become "
+                f"Ready; last status: {last_status}"
+            )
+        time.sleep(min(poll_interval, remaining))

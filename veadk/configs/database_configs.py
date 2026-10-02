@@ -14,11 +14,26 @@
 
 import os
 from functools import cached_property
+from typing import Any
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from veadk.consts import DEFAULT_TOS_BUCKET_NAME
 from veadk.integrations.ve_tos.ve_tos import VeTOS
+
+
+def _region_env_fallback(configured_fields: set[str]) -> str:
+    cloud_provider = (
+        (os.getenv("AGENTKIT_CLOUD_PROVIDER") or os.getenv("CLOUD_PROVIDER") or "")
+        .strip()
+        .lower()
+    )
+    if cloud_provider == "byteplus":
+        return ""
+    if "region" in configured_fields:
+        return ""
+    return os.getenv("REGION", "").strip()
 
 
 class OpensearchConfig(BaseSettings):
@@ -69,6 +84,12 @@ class PostgreSqlConfig(BaseSettings):
 
     database: str = ""
 
+    schema: str = ""
+    """Optional PostgreSQL schema to isolate this deployment's short-term memory
+    tables in. When set, the connection's search_path is pinned to it (and the
+    schema is created if absent), so several deployments can share one database
+    while keeping their sessions in separate schemas. Env: DATABASE_POSTGRESQL_SCHEMA."""
+
     secret_token: str = ""
 
 
@@ -89,6 +110,26 @@ class RedisConfig(BaseSettings):
     """STS token for Redis auth, not supported yet."""
 
 
+class MilvusConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="DATABASE_MILVUS_")
+
+    uri: str = ""
+
+    token: str = ""
+
+    user: str = ""
+
+    password: str = ""
+
+    db_name: str = "default"
+
+    overwrite: bool = False
+
+    timeout: float | None = None
+
+    output_fields: list[str] | str = Field(default_factory=list)
+
+
 class Mem0Config(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DATABASE_MEM0_")
 
@@ -102,13 +143,37 @@ class Mem0Config(BaseSettings):
     base_url: str = ""  # "https://api.mem0.ai/v1"
 
 
+class OpenVikingConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="DATABASE_OPENVIKING_")
+
+    url: str = ""
+    """OpenViking server base URL"""
+
+    api_key: str = ""
+    """OpenViking service owner user key"""
+
+    user_id: str = ""
+    """OpenViking memory owner/context user id used in viking://user/<user_id>/..."""
+
+    memory_policy: dict[str, Any] | None = None
+    """OpenViking memory policy JSON used by LongTermMemory(backend="openviking")"""
+
+
 class VikingKnowledgebaseConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DATABASE_VIKING_")
+
+    api_key: str = ""
+    """VikingDB knowledgebase API key for searching existing collections."""
 
     project: str = "default"
     """User project in Volcengine console web."""
 
     region: str = "cn-beijing"
+
+    def model_post_init(self, __context, /) -> None:
+        region_from_region_env = _region_env_fallback(set(self.model_fields_set))
+        if region_from_region_env:
+            self.region = region_from_region_env
 
 
 class TOSConfig(BaseSettings):
@@ -118,18 +183,30 @@ class TOSConfig(BaseSettings):
 
     region: str = "cn-beijing"
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         cloud_provider = os.getenv("CLOUD_PROVIDER", "volces").lower()
+        configured_fields = set(self.model_fields_set)
+        region_from_region_env = _region_env_fallback(configured_fields)
 
         if cloud_provider == "byteplus":
-            self.endpoint = "tos-ap-southeast-1.bytepluses.com"
-            self.region = "ap-southeast-1"
+            if "endpoint" not in configured_fields:
+                self.endpoint = "tos-ap-southeast-1.bytepluses.com"
+            if "region" not in configured_fields:
+                self.region = "ap-southeast-1"
+        else:
+            if region_from_region_env:
+                self.region = region_from_region_env
+
+            if "endpoint" not in configured_fields and (
+                "region" in configured_fields or region_from_region_env
+            ):
+                self.endpoint = f"tos-{self.region}.volces.com"
 
     @cached_property
     def bucket(self) -> str:
         _bucket = os.getenv("DATABASE_TOS_BUCKET") or DEFAULT_TOS_BUCKET_NAME
 
-        VeTOS(bucket_name=_bucket).create_bucket()
+        VeTOS(region=self.region, bucket_name=_bucket).create_bucket()
         return _bucket
 
 
@@ -141,6 +218,16 @@ class NormalTOSConfig(BaseSettings):
     region: str = "cn-beijing"
 
     bucket: str
+
+    def model_post_init(self, __context, /) -> None:
+        configured_fields = set(self.model_fields_set)
+        region_from_region_env = _region_env_fallback(configured_fields)
+        if region_from_region_env:
+            self.region = region_from_region_env
+        if "endpoint" not in configured_fields and (
+            "region" in configured_fields or region_from_region_env
+        ):
+            self.endpoint = f"tos-{self.region}.volces.com"
 
 
 class TOSVectorConfig(BaseSettings):
@@ -185,6 +272,38 @@ class TOSVectorConfig(BaseSettings):
     user_agent_soft_version: str | None = None
 
     user_agent_customized_key_values: dict[str, str] | None = None
+
+    def model_post_init(self, __context, /) -> None:
+        configured_fields = set(self.model_fields_set)
+        region_from_region_env = _region_env_fallback(configured_fields)
+        if region_from_region_env:
+            self.region = region_from_region_env
+        if "endpoint" not in configured_fields and (
+            "region" in configured_fields or region_from_region_env
+        ):
+            self.endpoint = f"tosvectors-{self.region}.volces.com"
+
+
+class TOSContextBucketConfig(BaseSettings):
+    """Configuration for the TOS ContextBucket controller APIs."""
+
+    model_config = SettingsConfigDict(env_prefix="DATABASE_TOS_CONTEXT_")
+
+    endpoint: str = "tos-cn-beijing.volces.com"
+
+    region: str = "cn-beijing"
+
+    control_endpoint: str | None = None
+
+    def model_post_init(self, __context, /) -> None:
+        configured_fields = set(self.model_fields_set)
+        region_from_region_env = _region_env_fallback(configured_fields)
+        if region_from_region_env:
+            self.region = region_from_region_env
+        if "endpoint" not in configured_fields and (
+            "region" in configured_fields or region_from_region_env
+        ):
+            self.endpoint = f"tos-{self.region}.volces.com"
 
 
 class MSENacosConfig(BaseSettings):

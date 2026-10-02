@@ -1,6 +1,5 @@
 ---
-title: "Responses API 支持"
-description: "使用火山方舟 Responses API 实现高效上下文管理、多模态理解与上下文缓存。"
+title: "Responses API"
 ---
 
 Responses API 是火山方舟最新推出的 API 接口，原生支持高效的上下文管理，具备更简洁的输入输出格式。其工具调用方式更加便捷，不仅延续了 Chat API 的易用性，还结合了更强的智能代理能力。
@@ -9,20 +8,20 @@ Responses API 是火山方舟最新推出的 API 接口，原生支持高效的�
 
 ## 使用教程
 
-目前仅 `veadk-python` 版本支持 Responses API，且对 `google-adk` 版本有特定要求（`google-adk>=1.21.0`）。请确保您的环境符合要求。
+目前仅 `veadk-python` 版本支持 Responses API，且对 `google-adk` 版本有特定要求（`google-adk>=1.34.0`）。请确保您的环境符合要求。
 
 <Tabs items={['pip', 'uv']}>
 <Tab value="pip">
 
 ```bash
-pip install "google-adk>=1.21.0"
+pip install "google-adk>=1.34.0"
 ```
 
 </Tab>
 <Tab value="uv">
 
 ```bash
-uv pip install "google-adk>=1.21.0"
+uv pip install "google-adk>=1.34.0"
 ```
 
 </Tab>
@@ -39,6 +38,17 @@ from veadk import Agent
 
 root_agent = Agent(
     enable_responses=True, # 开启 Responses API
+)
+```
+
+**多模型容错**
+
+Responses API 同样支持通过 `model_name` 列表配置容错模型。请求失败时会按顺序尝试后续模型，直到成功或所有模型均失败。
+
+```python
+root_agent = Agent(
+    enable_responses=True,
+    model_name=["doubao-seed-1-8-251228", "deepseek-r1-250528"],
 )
 ```
 
@@ -351,7 +361,7 @@ asyncio.run(
 
 ## 注意事项
 
-1. **版本要求**：必须保证 `google-adk>=1.21.0`。
+1. **版本要求**：必须保证 `google-adk>=1.34.0`。
 2. **模型支持**：请确保使用的模型支持 Responses API（注：Doubao 系列模型 0615 版本之后，除特殊说明外均支持）。
 3. **缓存机制**：VeADK 开启 Responses API 并使用火山方舟模型时默认开启上下文缓存（Session 缓存）。但若在 Agent 中设置了 `output_schema`，因该字段与缓存机制冲突，系统将自动关闭缓存。
 
@@ -361,10 +371,3 @@ asyncio.run(
 2. [火山方舟：上下文缓存](https://www.volcengine.com/docs/82379/1602228?lang=zh#3e69e743)
 3. [火山方舟：缓存 Token 计费说明](https://www.volcengine.com/docs/82379/1544106?lang=zh)
 4. [火山方舟：多模态理解](https://www.volcengine.com/docs/82379/1958521?lang=zh)
-
-## 下一步
-
-<Cards>
-  <Card title="构建智能体" href="/cn/docs/framework/agent/create" description="配置模型、工具与额外参数。" />
-  <Card title="短期记忆" href="/cn/docs/framework/memory/short-term" description="管理多轮对话的会话上下文。" />
-</Cards>

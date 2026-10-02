@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "motion/react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   ArrowLeft,
   Headset,
@@ -17,6 +19,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { type CreateModeProps, type AgentDraft, emptyDraft } from "./types";
+import { displayDescription } from "./displayText";
+import {
+  defaultModelApiBase,
+  defaultModelName,
+  VOLCENGINE_DEFAULT_MODEL_NAME,
+  VOLCENGINE_MODELARK_BASE_URL,
+  type CloudProvider,
+} from "../adk/cloudProvider";
 import "./TemplateCreate.css";
 
 /** A gallery preset: an AgentDraft plus presentation metadata. */
@@ -153,19 +163,77 @@ const TEMPLATES: Template[] = [
   },
 ];
 
+function localizedTemplate(template: Template, t: TFunction<"create">): Template {
+  const key = `template.presets.${template.id}`;
+  return {
+    ...template,
+    draft: {
+      ...template.draft,
+      name: t(`${key}.name`),
+      description: t(`${key}.description`),
+      instruction: t(`${key}.instruction`),
+      subAgents: template.draft.subAgents.map((agent, index) => ({
+        ...agent,
+        name: t(`${key}.subagents.${index}.name`),
+        description: t(`${key}.subagents.${index}.description`),
+        instruction: t(`${key}.subagents.${index}.instruction`),
+      })),
+    },
+  };
+}
+
+function providerTemplateDraft(
+  draft: AgentDraft,
+  cloudProvider: CloudProvider,
+): AgentDraft {
+  if (cloudProvider !== "byteplus") return draft;
+  const byteplusModelName = defaultModelName(cloudProvider);
+  return {
+    ...draft,
+    model: draft.model === "doubao-1.5-pro-32k" ? byteplusModelName : draft.model,
+    modelName:
+      draft.modelName === VOLCENGINE_DEFAULT_MODEL_NAME
+        ? byteplusModelName
+        : draft.modelName,
+    modelApiBase:
+      !draft.modelApiBase || draft.modelApiBase === VOLCENGINE_MODELARK_BASE_URL
+        ? defaultModelApiBase(cloudProvider)
+        : draft.modelApiBase,
+    subAgents: draft.subAgents.map((child) =>
+      providerTemplateDraft(child, cloudProvider),
+    ),
+  };
+}
+
 /** Which built-in components a draft uses → tags on the card. */
-function components(d: AgentDraft) {
+function components(d: AgentDraft, t: TFunction<"create">) {
   const out: { icon: LucideIcon; label: string }[] = [];
-  if (d.tools.length) out.push({ icon: Wrench, label: "工具" });
-  if (d.memory.shortTerm || d.memory.longTerm) out.push({ icon: Brain, label: "记忆" });
-  if (d.knowledgebase) out.push({ icon: BookOpen, label: "知识库" });
-  if (d.tracing) out.push({ icon: Activity, label: "观测" });
-  if (d.subAgents.length) out.push({ icon: Network, label: `子Agent ${d.subAgents.length}` });
+  if (d.tools.length) out.push({ icon: Wrench, label: t("template.tags.tools") });
+  if (d.memory.shortTerm || d.memory.longTerm) out.push({ icon: Brain, label: t("template.tags.memory") });
+  if (d.knowledgebase) out.push({ icon: BookOpen, label: t("template.tags.knowledgeBase") });
+  if (d.tracing) out.push({ icon: Activity, label: t("template.tags.tracing") });
+  if (d.subAgents.length) out.push({ icon: Network, label: t("template.tags.subagents", { count: d.subAgents.length }) });
   return out;
 }
 
-export function TemplateCreate({ onBack, onCreate }: CreateModeProps) {
-  const [selected, setSelected] = useState<Template | null>(null);
+export function TemplateCreate({
+  cloudProvider = "volcengine",
+  onBack,
+  onCreate,
+}: CreateModeProps) {
+  const { t } = useTranslation("create");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const templates = useMemo(
+    () => TEMPLATES.map((template) => {
+      const localized = localizedTemplate(template, t);
+      return {
+        ...localized,
+        draft: providerTemplateDraft(localized.draft, cloudProvider),
+      };
+    }),
+    [cloudProvider, t],
+  );
+  const selected = templates.find((template) => template.id === selectedId) ?? null;
   // `onBack` is kept in props (an app-level breadcrumb handles leaving this
   // mode); we intentionally do not render a top-level back control here.
   void onBack;
@@ -175,11 +243,11 @@ export function TemplateCreate({ onBack, onCreate }: CreateModeProps) {
       {selected ? (
         <TemplateDetail
           template={selected}
-          onBack={() => setSelected(null)}
+          onBack={() => setSelectedId(null)}
           onCreate={onCreate}
         />
       ) : (
-        <Gallery onPick={setSelected} />
+        <Gallery templates={templates} onPick={(template) => setSelectedId(template.id)} />
       )}
     </div>
   );
@@ -187,15 +255,22 @@ export function TemplateCreate({ onBack, onCreate }: CreateModeProps) {
 
 /* ---------------- gallery ---------------- */
 
-function Gallery({ onPick }: { onPick: (t: Template) => void }) {
+function Gallery({
+  templates,
+  onPick,
+}: {
+  templates: Template[];
+  onPick: (t: Template) => void;
+}) {
+  const { t } = useTranslation("create");
   return (
     <div className="tpl-scroll">
       <div className="tpl-head">
-        <h1 className="tpl-title">从模板新建</h1>
-        <p className="tpl-sub">选择一个预制 agent 模板，按需微调后即可创建。</p>
+        <h1 className="tpl-title">{t("template.gallery.title")}</h1>
+        <p className="tpl-sub">{t("template.gallery.subtitle")}</p>
       </div>
       <div className="tpl-grid">
-        {TEMPLATES.map((t, i) => (
+        {templates.map((t, i) => (
           <motion.button
             key={t.id}
             type="button"
@@ -209,7 +284,9 @@ function Gallery({ onPick }: { onPick: (t: Template) => void }) {
               <t.icon className="icon" />
             </span>
             <span className="tpl-card-name">{t.draft.name}</span>
-            <span className="tpl-card-desc">{t.draft.description}</span>
+            <span className="tpl-card-desc">
+              {displayDescription(t.draft.description)}
+            </span>
           </motion.button>
         ))}
       </div>
@@ -228,9 +305,10 @@ function TemplateDetail({
   onBack: () => void;
   onCreate: (draft: AgentDraft) => void;
 }) {
+  const { t } = useTranslation("create");
   const [name, setName] = useState(template.draft.name);
   const Icon = template.icon;
-  const tags = components(template.draft);
+  const tags = components(template.draft, t);
 
   function handleCreate() {
     const finalName = name.trim() || template.draft.name;
@@ -240,7 +318,7 @@ function TemplateDetail({
   return (
     <div className="tpl-scroll tpl-scroll--detail">
       <button className="tpl-back" onClick={onBack}>
-        <ArrowLeft className="icon" /> 返回模板列表
+        <ArrowLeft className="icon" /> {t("template.detail.back")}
       </button>
       <motion.div
         className="tpl-detail"
@@ -254,7 +332,9 @@ function TemplateDetail({
           </span>
           <div className="tpl-detail-headtext">
             <div className="tpl-detail-name">{template.draft.name}</div>
-            <div className="tpl-detail-desc">{template.draft.description}</div>
+            <div className="tpl-detail-desc">
+              {displayDescription(template.draft.description)}
+            </div>
           </div>
         </div>
 
@@ -269,7 +349,7 @@ function TemplateDetail({
         )}
 
         <label className="tpl-field">
-          <span className="tpl-field-label">名称</span>
+          <span className="tpl-field-label">{t("template.detail.name")}</span>
           <input
             className="tpl-input"
             value={name}
@@ -279,45 +359,41 @@ function TemplateDetail({
         </label>
 
         <div className="tpl-field">
-          <span className="tpl-field-label">系统提示词</span>
+          <span className="tpl-field-label">{t("template.detail.systemPrompt")}</span>
           <p className="tpl-instruction">{template.draft.instruction}</p>
         </div>
 
         <div className="tpl-meta-grid">
           {template.draft.model && (
             <div className="tpl-meta">
-              <span className="tpl-meta-key">模型</span>
+              <span className="tpl-meta-key">{t("template.detail.model")}</span>
               <span className="tpl-meta-val tpl-mono">{template.draft.model}</span>
             </div>
           )}
           <div className="tpl-meta">
-            <span className="tpl-meta-key">工具</span>
+            <span className="tpl-meta-key">{t("template.detail.tools")}</span>
             <span className="tpl-meta-val">
-              {template.draft.tools.length ? template.draft.tools.join("、") : "无"}
+              {template.draft.tools.length ? template.draft.tools.join(", ") : t("common.none")}
             </span>
           </div>
           <div className="tpl-meta">
-            <span className="tpl-meta-key">记忆</span>
-            <span className="tpl-meta-val">{memoryLabel(template.draft)}</span>
+            <span className="tpl-meta-key">{t("template.detail.memory")}</span>
+            <span className="tpl-meta-val">{memoryLabel(template.draft, t)}</span>
           </div>
           <div className="tpl-meta">
-            <span className="tpl-meta-key">知识库</span>
-            <span className="tpl-meta-val">{template.draft.knowledgebase ? "已开启" : "关闭"}</span>
+            <span className="tpl-meta-key">{t("template.detail.knowledgeBase")}</span>
+            <span className="tpl-meta-val">{template.draft.knowledgebase ? t("common.enabled") : t("common.disabled")}</span>
           </div>
           <div className="tpl-meta">
-            <span className="tpl-meta-key">观测追踪</span>
-            <span className="tpl-meta-val">{template.draft.tracing ? "已开启" : "关闭"}</span>
-          </div>
-          <div className="tpl-meta">
-            <span className="tpl-meta-key">A2UI</span>
-            <span className="tpl-meta-val">{template.draft.enableA2ui ? "已开启" : "关闭"}</span>
+            <span className="tpl-meta-key">{t("template.detail.tracing")}</span>
+            <span className="tpl-meta-val">{template.draft.tracing ? t("common.enabled") : t("common.disabled")}</span>
           </div>
         </div>
 
         {template.draft.subAgents.length > 0 && (
           <div className="tpl-field">
             <span className="tpl-field-label">
-              子 Agent（{template.draft.subAgents.length}）
+              {t("template.detail.subagents", { count: template.draft.subAgents.length })}
             </span>
             <div className="tpl-subagents">
               {template.draft.subAgents.map((sub, i) => (
@@ -328,7 +404,9 @@ function TemplateDetail({
                       <span className="tpl-subagent-tools">{sub.tools.join("、")}</span>
                     )}
                   </div>
-                  <div className="tpl-subagent-desc">{sub.description}</div>
+                  <div className="tpl-subagent-desc">
+                    {displayDescription(sub.description)}
+                  </div>
                 </div>
               ))}
             </div>
@@ -336,16 +414,16 @@ function TemplateDetail({
         )}
 
         <button className="tpl-create" onClick={handleCreate}>
-          使用此模板创建 <ChevronRight className="icon" />
+          {t("template.detail.create")} <ChevronRight className="icon" />
         </button>
       </motion.div>
     </div>
   );
 }
 
-function memoryLabel(d: AgentDraft): string {
+function memoryLabel(d: AgentDraft, t: TFunction<"create">): string {
   const parts: string[] = [];
-  if (d.memory.shortTerm) parts.push("短期");
-  if (d.memory.longTerm) parts.push("长期");
-  return parts.length ? parts.join(" + ") : "关闭";
+  if (d.memory.shortTerm) parts.push(t("template.detail.shortTermMemory"));
+  if (d.memory.longTerm) parts.push(t("template.detail.longTermMemory"));
+  return parts.length ? parts.join(" + ") : t("common.disabled");
 }

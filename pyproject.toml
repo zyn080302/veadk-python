@@ -7,7 +7,7 @@ name = "veadk-python"
 dynamic = ["version"]
 description = "Volcengine agent development kit, integrations with Volcengine cloud services."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = { file = "LICENSE" }
 authors = [
     {name = "Yaozheng Fang", email = "fangyozheng@gmail.com"},
@@ -16,73 +16,120 @@ authors = [
     {name = "Meng Wang", email = "mengwangwm@gmail.com"}
 ]
 dependencies = [
+    "async-timeout>=5,<6; python_version < '3.11'", # asyncio.timeout backport
     "pydantic-settings==2.10.1", # Config management
-    "a2a-sdk==0.3.7", # For Google Agent2Agent protocol
+    "a2a-sdk>=0.3.7,<1.0.0", # For Google Agent2Agent protocol
     "deprecated==1.2.18",
-    "google-adk==1.32.0", # For basic agent architecture
-    "loguru==0.7.3", # For better logging
+    "google-adk>=1.34.0", # For basic agent architecture
+    # litellm and sqlalchemy are required by code paths veadk always uses
+    # (LiteLlm models, sessions). google-adk ships them in base on 1.x but moved
+    # them behind extras ([extensions]/[db]) on 2.x, so declare them directly to
+    # stay compatible across google-adk >= 1.34.0 (including 2.x).
+    "litellm>=1.83.7,<=1.83.14", # google-adk LiteLlm model ([extensions] on 2.x)
+    # The `asyncio` extra is what pulls greenlet, which SQLAlchemy's async
+    # engine requires and which ADK's DatabaseSessionService therefore needs.
+    # Plain `sqlalchemy` leaves it to a platform marker that does not cover
+    # macOS arm64, so a bare install there raised "the greenlet library is
+    # required" on the first session write to sqlite/mysql/postgres. CI never
+    # saw it: ubuntu-latest is x86_64, where the marker matches.
+    "sqlalchemy[asyncio]>=2,<3", # google-adk sessions ([db] on 2.x)
     "opentelemetry-exporter-otlp==1.37.0",
     "opentelemetry-instrumentation-logging>=0.56b0",
     "wrapt==1.17.2", # For patching built-in functions
-    "volcengine-python-sdk>=5.0.1", # For Volcengine API
-    "volcengine>=1.0.193", # For Volcengine sign
+    "volcengine-python-sdk>=5.0.36", # For Volcengine API and Ark Responses context management
+    "volcengine>=1.0.193", # For Volcengine sign and AgentKit Runtime API access
     "agent-pilot-sdk==0.1.2", # Prompt optimization by Volcengine AgentPilot/PromptPilot toolkits
     "fastmcp>=2.12.3", # For running MCP
     "trustedmcp==0.0.5", # For running TrustedMCP
-    "mcp==1.26.0", # Bumped to satisfy google-adk 1.32.0 requirement
+    "mcp==1.26.0", # Bumped to satisfy google-adk 1.34.0 requirement
     "cookiecutter==2.6.0", # For cloud deploy
     "omegaconf==2.3.0", # For agent builder
-    "psycopg2-binary==2.9.10", # For PostgreSQL database (short term memory)
+    "psycopg2-binary>=2.9.10", # For PostgreSQL database (short term memory)
     "asyncpg>=0.29.0", # For async PostgreSQL database (short term memory)
     "pymysql==1.1.1", # For MySQL database (short term memory)
     "aiomysql==0.3.2", # For async MySQL database (short term memory)
     "filetype==1.2.0",
-    "vikingdb-python-sdk>=0.1.3", # For Viking DB
-    "agentkit-sdk-python>=0.2.0",
-    "volcengine>=1.0.0",  # For AgentKit Runtime API access
+    "pypdfium2>=4.30.0", # Frontend PDF attachments are rendered as page images
+    "pillow>=10.0.0", # Encode rendered PDF pages as PNG
+    "qrcode>=8,<9", # Render Feishu app-registration links for Studio setup
+    "vikingdb-python-sdk>=0.1.32", # For Viking DB
+    "agentkit-sdk-python>=0.8.0",
+    "websockets>=15,<16", # Stream temporary AgentKit Sandbox conversations
+    "openviking-sdk>=0.1.3",
     "python-frontmatter==1.1.0",
-    "tos>=2.8.4",   # For TOS storage and Viking DB
+    "PyYAML>=6.0.2",
+    "tos>=2.8.4", # For TOS storage and Viking DB
+    "httpx>=0.27,<1", # Secure server-side webpage fetching for Studio knowledge imports
+    "PyJWT[crypto]>=2.8,<3", # Sign GitHub App JWTs for PR review automation
+    "jsonschema>=4.23,<5", # Validate Studio BFF dynamic-tool arguments
+    "trafilatura>=2.0,<2.1", # Extract webpage main content as Markdown for knowledge imports
+    "tomli>=2.0.1; python_version < '3.11'", # TOML parser for supported Python 3.10
 ]
 
 [project.scripts]
 veadk = "veadk.cli.cli:veadk"
 
 [project.optional-dependencies]
+github-cicd = [
+    "PyNaCl>=1.5.0", # Encrypt GitHub Actions secrets for Runtime delivery
+]
+codex = [
+    "openai-codex==0.157.0",
+    "openai-codex-cli-bin==0.157.0",
+    # The Responses->chat shim (veadk/runtime/codex/proxy.py) imports these at
+    # module level. They resolve transitively through google-adk today, but adk
+    # has already moved other web deps behind extras on 2.x, so declare them
+    # here rather than rely on that.
+    "fastapi",
+    "uvicorn",
+]
 extensions = [
     "redis>=5.0",                                           # For Redis database
     "cozeloop>=0.1.21",                                     # For Cozeloop Prompt manager
-    "llama-index==0.14.0",                                  # For KnowledgeBase and LongTermMemory
-    "llama-index-embeddings-openai-like==0.2.2",            # For Embeddings
-    "llama-index-llms-openai-like==0.5.1",                  # For KnowledgeBase and LongTermMemory
+    "llama-index>=0.14.0",                                  # For KnowledgeBase and LongTermMemory
+    "llama-index-embeddings-openai-like>=0.2.2",            # For Embeddings
+    "llama-index-llms-openai-like>=0.5.1",                  # For KnowledgeBase and LongTermMemory
     "llama-index-vector-stores-redis>=0.6.1",               # For Redis database
-    "llama-index-vector-stores-opensearch==0.6.1",          # For Opensearch database
-    "opensearch-py==2.8.0",
+    "llama-index-vector-stores-opensearch>=0.6.1",          # For Opensearch database
+    "llama-index-vector-stores-milvus>=0.4",                # For Milvus database
+    "pymilvus>=2.4",                                        # For Milvus database
+    "opensearch-py>=2.8.0",
+    "lark-channel-sdk",
     "lark-oapi",
 ]
 database = [
     "redis>=5.0",                   # For Redis database
     "pymysql>=1.1.1",               # For MySQL database
     "volcengine>=1.0.193",          # For Viking DB
-    "mem0ai==0.1.118",              # For mem0
+    "mem0ai>=1.0.0,<2",             # For mem0; >=1.0 lifts the openai<1.110 cap (coexist with litellm openai 2.x), <2 keeps the kwargs add()/search() API veadk uses (2.x switched to an options object)
 ]
 speech = []
 a2ui = [
     "a2ui-agent-sdk>=0.2.1",        # For A2UI agent-driven UI (https://a2ui.org)
 ]
-pdf = [
-    "pypdfium2>=4.30.0",            # For rendering PDF pages to images (Apache/BSD)
-    "pillow>=10.0.0",              # For encoding rendered pages as PNG
-]
+pdf = [] # Backward-compatible alias; PDF support is now installed by default
 eval = [
     "prometheus-client>=0.22.1",    # For exporting data to Prometheus pushgateway
     "deepeval>=3.2.6",              # For DeepEval-based evaluation
-    "google-adk[eval]",             # For Google ADK-based evaluation
+    "google-adk[eval]>=1.34.0",     # For Google ADK-based evaluation
+]
+harness = [
+    "headroom",
+]
+harness-sidecar = [
+    "agentkit-sdk-python>=0.8.1,<0.9.0",
 ]
 cli = []
+sandbox = [
+    "anthropic>=0.40.0",
+    "python-dotenv>=1.0.0",
+    "httpx[socks]>=0.27.0",
+]
 dev = [
     "pre-commit>=4.2.0",            # Format checking
     "pytest>=8.4.1",
     "pytest-asyncio>=1.0.0",
+    "pytest-cov>=7.0.0,<8.0.0",
     "pytest-xdist>=3.8.0",
 ]
 
@@ -91,19 +138,34 @@ dev = [
     "pre-commit>=4.2.0",            # Format checking
     "pytest>=8.4.1",
     "pytest-asyncio>=1.0.0",
+    "pytest-cov>=7.0.0,<8.0.0",
     "pytest-xdist>=3.8.0",
 ]
 
 
 [tool.setuptools.packages.find]
-include = ["veadk*"]
-exclude = ["assets*", "ide*", "tests*"]
+include = [
+    "veadk*",
+    "frontend*",
+]
+exclude = [
+    "assets*",
+    "ide*",
+    "tests*",
+]
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"veadk" = ["**/*"]
+"veadk" = [
+    "**/*",
+    # Globs omit dotfiles when building from an archive without Git metadata.
+    "cli/templates/**/.python-version",
+    "integrations/ve_faas/**/.dockerignore",
+    "integrations/ve_faas/**/.gitignore",
+]
+"frontend.server" = ["templates/**/*.tmpl", "templates/**/.*.tmpl", "skills/consts.json"]
 
 # Derive the package version from the latest git tag (e.g. tag "0.5.36"
 # publishes version 0.5.36). No version string is hardcoded anywhere; release

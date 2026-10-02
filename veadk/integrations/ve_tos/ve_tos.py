@@ -21,7 +21,6 @@ from urllib.parse import urlparse
 
 from veadk.consts import DEFAULT_TOS_BUCKET_NAME
 from veadk.utils.logger import get_logger
-from veadk.utils.misc import getenv
 
 if TYPE_CHECKING:
     pass
@@ -38,11 +37,11 @@ class VeTOS:
         sk: str = "",
         session_token: str = "",
         region: str = "",
-        bucket_name: str = DEFAULT_TOS_BUCKET_NAME,
+        bucket_name: str = "",
     ) -> None:
         self.ak = ak if ak else os.getenv("VOLCENGINE_ACCESS_KEY", "")
         self.sk = sk if sk else os.getenv("VOLCENGINE_SECRET_KEY", "")
-        self.session_token = session_token
+        self.session_token = session_token or os.getenv("VOLCENGINE_SESSION_TOKEN", "")
 
         # get provider from env
         provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
@@ -57,11 +56,18 @@ class VeTOS:
 
         self.region = region
         if not self.region:
-            self.region = (
-                os.getenv("REGION")
-                or os.getenv("DATABASE_TOS_REGION")
-                or default_region
-            )
+            if provider == "byteplus":
+                self.region = (
+                    os.getenv("REGION")
+                    or os.getenv("DATABASE_TOS_REGION")
+                    or default_region
+                )
+            else:
+                self.region = (
+                    os.getenv("DATABASE_TOS_REGION")
+                    or os.getenv("REGION")
+                    or default_region
+                )
 
         logger.info(
             f"TOS client ready: region={self.region}, endpoint=tos-{self.region}.{self.sld}.com"
@@ -75,7 +81,7 @@ class VeTOS:
             )
 
         self.bucket_name = (
-            bucket_name if bucket_name else getenv("", DEFAULT_TOS_BUCKET_NAME)
+            bucket_name or os.getenv("DATABASE_TOS_BUCKET") or DEFAULT_TOS_BUCKET_NAME
         )
         self._tos_module = None
 
@@ -454,7 +460,7 @@ class VeTOS:
         bucket_name: str = "",
         object_key: str = "",
         metadata: dict | None = None,
-    ) -> None:
+    ) -> bool:
         """Asynchronously upload byte data to TOS bucket
 
         Args:
@@ -462,13 +468,16 @@ class VeTOS:
             bucket_name: TOS bucket name
             object_key: Object key, auto-generated if None
             metadata: Metadata to associate with the object
+
+        Returns:
+            ``True`` when the object was uploaded, otherwise ``False``.
         """
         bucket_name = self._check_bucket_name(bucket_name)
         if not object_key:
             object_key = self._build_object_key_for_bytes()
         # Use common function to check client and bucket
         if not self._ensure_client_and_bucket(bucket_name):
-            return
+            return False
         try:
             # Use asyncio.to_thread to execute blocking TOS operations in thread
             await asyncio.to_thread(
@@ -479,10 +488,10 @@ class VeTOS:
                 meta=metadata,
             )
             logger.debug(f"Async upload success, object_key: {object_key}")
-            return
+            return True
         except Exception as e:
             logger.error(f"Async upload failed: {e}")
-            return
+            return False
 
     def upload_file(
         self,
@@ -702,7 +711,14 @@ class VeTOS:
             logger.error(f"Async upload directory failed: {str(e)}")
             raise
 
-    def download(self, bucket_name: str, object_key: str, save_path: str) -> bool:
+    def download(
+        self,
+        bucket_name: str,
+        object_key: str,
+        save_path: str,
+        *,
+        raise_on_error: bool = False,
+    ) -> bool:
         """download object from TOS"""
         bucket_name = self._check_bucket_name(bucket_name)
 
@@ -725,6 +741,8 @@ class VeTOS:
 
         except Exception as e:
             logger.error(f"Image download failed: {str(e)}")
+            if raise_on_error:
+                raise
             return False
 
     def download_directory(

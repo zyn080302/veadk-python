@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import Field
 from typing_extensions import override
-from vikingdb import IAM
+from vikingdb import IAM, APIKey
 from vikingdb.memory import VikingMem
 
 import veadk.config  # noqa E401
@@ -32,25 +32,66 @@ from veadk.integrations.ve_viking_db_memory.ve_viking_db_memory import (
 from veadk.memory.long_term_memory_backends.base_backend import (
     BaseLongTermMemoryBackend,
 )
+from veadk.utils.cloud_provider import (
+    DEFAULT_BYTEPLUS_VIKING_MEMORY_HOST,
+    DEFAULT_BYTEPLUS_VIKING_MEMORY_REGION,
+)
 from veadk.utils.logger import get_logger
+from veadk.utils.misc import getenv
 
 logger = get_logger(__name__)
 
 
+def _viking_cloud_provider() -> str:
+    return (
+        os.getenv("AGENTKIT_CLOUD_PROVIDER")
+        or os.getenv("CLOUD_PROVIDER")
+        or "volcengine"
+    ).lower()
+
+
+def _viking_access_key_from_env() -> str | None:
+    if _viking_cloud_provider() == "byteplus":
+        return os.getenv("BYTEPLUS_ACCESS_KEY")
+    return os.getenv("VOLCENGINE_ACCESS_KEY")
+
+
+def _viking_secret_key_from_env() -> str | None:
+    if _viking_cloud_provider() == "byteplus":
+        return os.getenv("BYTEPLUS_SECRET_KEY")
+    return os.getenv("VOLCENGINE_SECRET_KEY")
+
+
+def _viking_session_token_from_env() -> str:
+    if _viking_cloud_provider() == "byteplus":
+        return os.getenv("BYTEPLUS_SESSION_TOKEN", "")
+    return os.getenv("VOLCENGINE_SESSION_TOKEN", "")
+
+
+def _clean_api_key(value: str | None) -> str | None:
+    value = (value or "").strip()
+    if not value or value.lower() in {"none", "null"}:
+        return None
+    return value
+
+
+def _vikingmem_api_key_from_env() -> str | None:
+    return _clean_api_key(os.getenv("DATABASE_VIKINGMEM_API_KEY"))
+
+
 class VikingDBLTMBackend(BaseLongTermMemoryBackend):
     volcengine_access_key: str | None = Field(
-        default_factory=lambda: os.getenv("VOLCENGINE_ACCESS_KEY")
+        default_factory=_viking_access_key_from_env
     )
 
     volcengine_secret_key: str | None = Field(
-        default_factory=lambda: os.getenv("VOLCENGINE_SECRET_KEY")
+        default_factory=_viking_secret_key_from_env
     )
 
-    session_token: str = ""
+    session_token: str = Field(default_factory=_viking_session_token_from_env)
+    api_key: str | None = Field(default_factory=_vikingmem_api_key_from_env)
 
-    cloud_provider: str = Field(
-        default_factory=lambda: os.getenv("CLOUD_PROVIDER", "volces")
-    )
+    cloud_provider: str = Field(default_factory=_viking_cloud_provider)
 
     region: str = Field(default="")
     """VikingDB memory region"""
@@ -62,12 +103,16 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
 
     memory_type: list[str] = Field(default_factory=list)
 
-    def model_post_init(self, __context: Any) -> None:
-        if not self.region:
-            if self.cloud_provider.lower() == "byteplus":
-                self.region = os.getenv("DATABASE_VIKING_REGION", "cn-hongkong")
-            else:
-                self.region = os.getenv("DATABASE_VIKING_REGION", "cn-beijing")
+    def model_post_init(self, __context: Any, /) -> None:
+        self.api_key = _clean_api_key(self.api_key) or _vikingmem_api_key_from_env()
+        if self.cloud_provider.lower() == "byteplus":
+            self.region = DEFAULT_BYTEPLUS_VIKING_MEMORY_REGION
+        elif not self.region:
+            self.region = (
+                os.getenv("DATABASE_VIKING_REGION")
+                or os.getenv("REGION")
+                or "cn-beijing"
+            )
 
         # We get memory type from:
         # 1. user input
@@ -83,8 +128,22 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
                 self.memory_type = ["sys_event_v1", "sys_profile_v1"]
 
         logger.info(f"Using memory type: {self.memory_type}")
+        logger.info(
+            "VikingDBLTMBackend auth: "
+            + (
+                "API key for memory operations; AK/SK or IAM for collection management"
+                if self.api_key
+                else "AK/SK or IAM"
+            )
+        )
 
         # check whether collection exist, if not, create it
+        if self.api_key and not self._has_explicit_management_credentials():
+            logger.info(
+                "Skip VikingDB memory collection management precheck: "
+                "API key is configured, but AK/SK credentials are not configured."
+            )
+            return
         if not self._collection_exist():
             self._create_collection()
 
@@ -106,7 +165,8 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
             )
             logger.info(f"Collection {self.index} exist.")
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # The VikingDB SDK raises broad service/client errors for missing collections.
             logger.info(f"Collection {self.index} not exist.")
             return False
 
@@ -123,6 +183,9 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
         )
         logger.debug(f"Create collection with response {response}")
         return response
+
+    def _has_explicit_management_credentials(self) -> bool:
+        return bool(self.volcengine_access_key and self.volcengine_secret_key)
 
     def _get_ak_sk_sts(self) -> tuple[str, str, str]:
         ak = ""
@@ -148,14 +211,38 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
 
         return ak, sk, sts_token
 
+    def _get_viking_memory_host(self) -> str:
+        if self.cloud_provider.lower() == "byteplus":
+            return DEFAULT_BYTEPLUS_VIKING_MEMORY_HOST
+        return f"api-knowledgebase.mlp.{self.region}.volces.com"
+
+    def _get_viking_memory_endpoint(self) -> tuple[str, str]:
+        host = self._get_viking_memory_host()
+        scheme = "https"
+        env_host = getenv(
+            "DATABASE_VIKINGMEM_BASE_URL",
+            default_value=None,
+            allow_false_values=True,
+        )
+        if env_host:
+            if env_host.startswith("http://"):
+                host = env_host.replace("http://", "")
+                scheme = "http"
+            elif env_host.startswith("https://"):
+                host = env_host.replace("https://", "")
+                scheme = "https"
+            else:
+                raise ValueError(
+                    "DATABASE_VIKINGMEM_BASE_URL must start with http:// or https://"
+                )
+        return host, scheme
+
     def _get_client(self) -> VikingDBMemoryClient:
         ak, sk, sts_token = self._get_ak_sk_sts()
-        if self.cloud_provider.lower() == "byteplus":
-            host = f"api-knowledgebase.mlp.{self.region}.bytepluses.com"
-        else:
-            host = f"api-knowledgebase.mlp.{self.region}.volces.com"
+        host, scheme = self._get_viking_memory_endpoint()
         logger.info(f"Cloud provider: {self.cloud_provider.lower()}")
         logger.info(f"VikingDBLTMBackend: region={self.region}, host={host}")
+        logger.info("VikingDB memory collection management uses AK/SK or IAM auth")
 
         return VikingDBMemoryClient(
             host=host,
@@ -163,33 +250,28 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
             sk=sk,
             sts_token=sts_token,
             region=self.region,
+            scheme=scheme,
         )
 
     def _get_sdk_client(self) -> VikingMem:
-        ak, sk, sts_token = self._get_ak_sk_sts()
-        if self.cloud_provider.lower() == "byteplus":
-            host = f"api-knowledgebase.mlp.{self.region}.bytepluses.com"
-        else:
-            host = f"api-knowledgebase.mlp.{self.region}.volces.com"
+        host, scheme = self._get_viking_memory_endpoint()
         logger.info(f"Cloud provider: {self.cloud_provider.lower()}")
         logger.info(f"VikingDBLTMBackend: region={self.region}, host={host}")
 
-        client = VikingDBMemoryClient(
+        sts_token = ""
+        if self.api_key:
+            logger.info("VikingDB memory SDK uses API key auth")
+            auth = APIKey(api_key=self.api_key)
+        else:
+            ak, sk, sts_token = self._get_ak_sk_sts()
+            logger.info("VikingDB memory SDK uses AK/SK or IAM auth")
+            auth = IAM(ak=ak, sk=sk)
+        return VikingMem(
             host=host,
             region=self.region,
-            ak=ak,
-            sk=sk,
+            auth=auth,
             sts_token=sts_token,
-        )
-
-        return VikingMem(
-            host=client.get_host(),
-            region=self.region,
-            auth=IAM(
-                ak=ak,
-                sk=sk,
-            ),
-            sts_token=sts_token,
+            scheme=scheme,
         )
 
     @override
@@ -277,44 +359,34 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
         )
 
     def get_user_profile(self, user_id: str) -> str:
-        from veadk.utils.volcengine_sign import ve_request
-
-        response: dict = self._get_client().get_collection(
-            collection_name=self.index, project=self.volcengine_project
-        )
-
-        mem_id = response["Result"]["ResourceId"]
         logger.info(
-            f"Get user profile for user_id={user_id} from Viking Memory with mem_id={mem_id}"
+            f"Get user profile for user_id={user_id} from Viking Memory collection={self.index}"
         )
-
-        ak, sk, sts_token = self._get_ak_sk_sts()
-        response = ve_request(
-            request_body={
-                "filter": {
-                    "user_id": [user_id],
-                    "memory_category": 1,
-                },
-                "limit": 5000,
-                "resource_id": mem_id,
+        client = self._get_sdk_client()
+        collection = client.get_collection(
+            collection_name=self.index, project_name=self.volcengine_project
+        )
+        response = collection.search_memory(
+            filter={
+                "user_id": [user_id],
+                "memory_category": 1,
             },
-            action="MemorySearch",
-            ak=ak,
-            sk=sk,
-            header={"X-Security-Token": sts_token},
-            service="vikingdb",
-            version="2025-06-09",
-            region=self.region,
-            host="open.volcengineapi.com",
+            limit=5000,
         )
 
-        try:
+        code = response.get("code")
+        if code is not None and code != 0:
+            raise ValueError(f"Get VikingDB user profile error: {response}")
+
+        result_list = response.get("data", {}).get("result_list", [])
+        if not result_list:
             logger.debug(
-                f"Response from VikingDB: {response}, user_profile: {response['data']['result_list'][0]['memory_info']['user_profile']}"
-            )
-            return response["data"]["result_list"][0]["memory_info"]["user_profile"]
-        except (KeyError, IndexError):
-            logger.error(
-                f"Failed to get user profile for user_id={user_id} mem_id={mem_id}: {response}"
+                f"No VikingDB user profile found for user_id={user_id} collection={self.index}: {response}"
             )
             return ""
+
+        user_profile = result_list[0].get("memory_info", {}).get("user_profile", "")
+        logger.debug(
+            f"Response from VikingDB: {response}, user_profile: {user_profile}"
+        )
+        return user_profile

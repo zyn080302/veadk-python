@@ -1,15 +1,37 @@
-import { useMemo, useRef, useState } from "react";
 import {
+  lazy,
+  Suspense,
+  type ReactNode,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+import { createPortal } from "react-dom";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Check,
+  ChevronDown,
   ChevronRight,
   Download,
+  ExternalLink,
   File,
+  FileDown,
   FilePlus,
   Folder,
   Loader2,
+  Maximize2,
+  MessageSquare,
   Pencil,
-  Play,
-  Rocket,
+  Plus,
   Trash2,
+  X,
 } from "lucide-react";
 // Use the core build + register only the languages we map, so we don't ship
 // all ~190 highlight.js grammars (keeps the bundle small).
@@ -35,9 +57,362 @@ hljs.registerLanguage("ini", ini);
 hljs.registerLanguage("dockerfile", dockerfile);
 hljs.registerLanguage("makefile", makefile);
 import type { AgentProject, ProjectFile } from "../create/project";
+import type { AgentDraft, NetworkConfig } from "../create/types";
+import { resolvedModelSource } from "../create/modelSource";
+import { generateRuntimeName, runtimeNameProblem } from "../create/runtimeName";
+import { AgentBuildCanvas } from "../create/AgentBuildCanvas";
+import {
+  FEISHU_ENV,
+} from "../create/veadkCatalog";
+import {
+  firstInvalidRuntimeEnv,
+  missingRuntimeEnvs,
+  runtimeEnvDisplayRows,
+  runtimeEnvJsonError,
+  runtimeEnvMissingError,
+  runtimeEnvRequirementHint,
+  runtimeEnvVars,
+  type RuntimeEnvSpec,
+} from "../create/deploymentEnv";
+import {
+  checkRuntimeNameAvailability,
+  listIdentityUserPools,
+  revealModelApiKey,
+  bindGithubCicdRuntime,
+  initializeGithubDeliveryMain,
+  syncGithubCicdRuntime,
+  RuntimeProbeError,
+  type DeployAuthentication,
+  type DeployBuildLogSnapshot,
+  type DeployResources,
+  type DeployStage,
+  type IdentityUserPool,
+  type GithubCicdPipelineResult,
+} from "../adk/client";
+import { localizeDeployStageMessage } from "../adk/deploymentI18n";
+import { isDeploymentStatusUnconfirmedError } from "../adk/deploymentStatus";
+import {
+  beginAgentDeploy,
+  beginAgentSourceDownload,
+  classifyTelemetryError,
+  safeTelemetryErrorMessage,
+  type AgentDeployFailedProps,
+  type AgentDeployStartedProps,
+} from "../telemetry";
+import {
+  cloudRegionOptions,
+  defaultCloudRegion,
+  formatCloudRegion,
+  type CloudProvider,
+} from "../adk/cloudProvider";
 import { buildZip } from "./zip";
-import { AgentTest } from "./AgentTest";
+import { ProjectCodeBrowser } from "./CodeBrowserDialog";
+import { DeploymentErrorMessage } from "./DeploymentErrorMessage";
+import { FeishuDeploymentCard } from "./FeishuDeploymentCard";
+import {
+  DEFAULT_DEPLOY_RESOURCES,
+  DeploymentResources,
+  deploymentResourcesError,
+} from "./DeploymentResources";
+
+import {
+  DeploymentSelect,
+  type DeploymentSelectOption,
+} from "./DeploymentSelect";
+import { mergeDeployBuildLog } from "./deployBuildLog";
+import {
+  GithubCicdPanel,
+  type PendingGithubCicdConfig,
+} from "./GithubCicdPanel";
 import "./ProjectPreview.css";
+
+interface DeploymentTelemetryOrigin {
+  source: AgentDeployStartedProps["deploySource"];
+  createMode: AgentDeployStartedProps["createMode"];
+  aiAssisted: boolean;
+}
+
+function telemetryDeployPhase(
+  phase: string | undefined,
+): AgentDeployFailedProps["failedPhase"] {
+  switch (phase) {
+    case "prepare":
+    case "upload":
+    case "build":
+    case "deploy":
+    case "publish":
+    case "update":
+    case "evaluation":
+      return phase;
+    default:
+      return "unknown";
+  }
+}
+
+const DEPLOY_PHASE_ORDER: Record<string, number> = {
+  prepare: 0,
+  upload: 1,
+  build: 2,
+  deploy: 3,
+  publish: 4,
+  update: 5,
+  evaluation: 6,
+  complete: 7,
+  github: 8,
+};
+
+function advanceDeploymentPhase(
+  current: string | undefined,
+  next: string | undefined,
+): string {
+  if (!next) return current ?? "prepare";
+  if (!current) return next;
+  const currentOrder = DEPLOY_PHASE_ORDER[current];
+  const nextOrder = DEPLOY_PHASE_ORDER[next];
+  if (currentOrder === undefined || nextOrder === undefined) return next;
+  return nextOrder >= currentOrder ? next : current;
+}
+
+const CodeEditor = lazy(() => import("./CodeEditor"));
+const ignoreCanvasAction = () => undefined;
+
+function ModelApiKeyEyeIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2.75 12s3.35-5.25 9.25-5.25S21.25 12 21.25 12 17.9 17.25 12 17.25 2.75 12 2.75 12Z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </svg>
+  );
+}
+
+function ModelApiKeyEyeOffIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 3l18 18" />
+      <path d="M9.7 6.95A9.7 9.7 0 0 1 12 6.68c5.9 0 9.25 5.32 9.25 5.32a16 16 0 0 1-2.28 2.85" />
+      <path d="M14.35 14.55A3.25 3.25 0 0 1 9.5 10.2" />
+      <path d="M6.25 8.12A16.4 16.4 0 0 0 2.75 12S6.1 17.32 12 17.32c.8 0 1.55-.1 2.25-.27" />
+    </svg>
+  );
+}
+
+interface ModelApiKeyRevealState {
+  status: "hidden" | "loading" | "visible" | "error";
+  apiKeyId: string;
+  value: string;
+  error: string;
+}
+
+const HIDDEN_MODEL_API_KEY_REVEAL: ModelApiKeyRevealState = {
+  status: "hidden",
+  apiKeyId: "",
+  value: "",
+  error: "",
+};
+
+interface DeploymentConfirmDialogProps {
+  open: boolean;
+  isUpdate: boolean;
+  title?: string;
+  description?: string;
+  confirmLabel?: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function DeploymentConfirmDialog({
+  open,
+  isUpdate,
+  title,
+  description,
+  confirmLabel,
+  onCancel,
+  onConfirm,
+}: DeploymentConfirmDialogProps) {
+  const { t } = useTranslation("ui");
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    cancelButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onCancel, open]);
+
+  if (!open) return null;
+
+  return createPortal(
+    <div
+      className="code-browser-backdrop pp-confirm-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <section
+        className="code-browser-dialog pp-confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pp-confirm-title"
+        aria-describedby="pp-confirm-description"
+      >
+        <header className="code-browser-head pp-confirm-head">
+          <div className="code-browser-title-wrap">
+            <span className="code-browser-title-icon pp-confirm-icon" aria-hidden="true">
+              <AlertTriangle />
+            </span>
+            <h2 id="pp-confirm-title">{title ?? (isUpdate ? t("projectPreview.confirm.updateTitle") : t("projectPreview.confirm.deployTitle"))}</h2>
+          </div>
+          <button
+            type="button"
+            className="code-browser-close"
+            onClick={onCancel}
+            aria-label={t("projectPreview.confirm.closeLabel")}
+          >
+            <X aria-hidden="true" />
+          </button>
+        </header>
+        <div className="pp-confirm-body">
+          <p id="pp-confirm-description">
+            {description ?? (isUpdate
+              ? t("projectPreview.confirm.updateDescription")
+              : t("projectPreview.confirm.deployDescription"))}
+          </p>
+        </div>
+        <footer className="pp-confirm-actions">
+          <button ref={cancelButtonRef} type="button" onClick={onCancel}>
+            {t("common.cancel")}
+          </button>
+          <button type="button" className="is-primary" onClick={onConfirm}>
+            {confirmLabel ?? (isUpdate ? t("projectPreview.confirm.update") : t("projectPreview.confirm.deploy"))}
+          </button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+function IdentityUserPoolSelect({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  disabled: boolean;
+  onChange: (uid: string) => void;
+}) {
+  const { t } = useTranslation("ui");
+  const [pools, setPools] = useState<IdentityUserPool[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    listIdentityUserPools(controller.signal)
+      .then((items) => setPools(items))
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setPools([]);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
+
+  const options = useMemo(
+    () =>
+      [...pools]
+        .sort((left, right) => Number(right.isCurrent) - Number(left.isCurrent))
+        .map((pool) => ({
+          value: pool.uid,
+          label: pool.name.trim() || t("projectPreview.userPool.unnamed"),
+          description: pool.domain || pool.uid,
+          badge: pool.isCurrent ? t("projectPreview.userPool.current") : undefined,
+        })),
+    [pools, t],
+  );
+  const selectedPool = pools.find((pool) => pool.uid === value);
+
+  return (
+    <div className="pp-user-pool-picker">
+      <DeploymentSelect
+        ariaLabel={t("projectPreview.userPool.ariaLabel")}
+        value={value}
+        placeholder={loading ? t("projectPreview.userPool.loading") : t("projectPreview.userPool.placeholder")}
+        options={options}
+        disabled={disabled || loading || Boolean(error)}
+        onChange={onChange}
+      />
+      {error ? (
+        <div className="pp-user-pool-error" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={() => setReloadKey((key) => key + 1)}>
+            {t("common.retry")}
+          </button>
+        </div>
+      ) : loading ? (
+        <span className="pp-user-pool-status" aria-live="polite">
+          <Loader2 aria-hidden="true" className="pp-user-pool-spinner" />
+          {t("projectPreview.userPool.loadingIdentity")}
+        </span>
+      ) : pools.length === 0 ? (
+        <span className="pp-user-pool-status">{t("projectPreview.userPool.empty")}</span>
+      ) : selectedPool?.isCurrent ? (
+        <span className="pp-user-pool-status">
+          {t("projectPreview.userPool.currentHint")}
+        </span>
+      ) : selectedPool ? (
+        <div className="pp-user-pool-error" role="alert">
+          <span>
+            {t("projectPreview.userPool.mismatchHint")}
+          </span>
+        </div>
+      ) : (
+        <span className="pp-user-pool-status">
+          {t("projectPreview.userPool.markedHint")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function deploymentAuthenticationOptions(t: TFunction): DeploymentSelectOption[] {
+  return [
+    { value: "api_key", label: "API Key", description: t("projectPreview.authentication.apiKeyDescription") },
+    { value: "user_pool", label: t("projectPreview.authentication.userPool"), description: t("projectPreview.authentication.userPoolDescription") },
+  ];
+}
 
 // --- syntax highlighting ----------------------------------------------------
 
@@ -123,16 +498,227 @@ export interface DeployResult {
   apikey: string;
   url: string;
   agentName: string;
+  runtimeName: string;
+  runtimeId?: string;
+  consoleUrl?: string;
+  region?: string;
+  version?: number | null;
+  warnings?: string[];
+  feishuChannel?: {
+    enabled: boolean;
+    transport: string;
+    runtimeId?: string;
+  };
+}
+
+/** The ordered deploy phases shown in the stepper (keys match DeployStage.phase). */
+function deploySteps(t: TFunction): { phase: string; label: string }[] {
+  return [
+    { phase: "build", label: t("projectPreview.steps.buildImage") },
+    { phase: "deploy", label: t("projectPreview.steps.deploy") },
+    { phase: "publish", label: t("projectPreview.steps.publish") },
+  ];
+}
+
+function codePackageDeploySteps(t: TFunction): { phase: string; label: string }[] {
+  return [
+    { phase: "upload", label: t("projectPreview.steps.uploadPackage") },
+    { phase: "build", label: t("projectPreview.steps.packageImage") },
+    { phase: "deploy", label: t("projectPreview.steps.createRuntime") },
+    { phase: "publish", label: t("projectPreview.steps.publishService") },
+  ];
+}
+
+function usesInMemorySession(agentDraft?: AgentDraft): boolean {
+  if (!agentDraft) return false;
+  return (
+    !agentDraft.memory.shortTerm ||
+    (agentDraft.shortTermBackend || "local") === "local"
+  );
+}
+
+type RuntimeInstanceRangeValidation =
+  | { valid: true; min: number; max: number }
+  | { valid: false; error: string };
+
+function validateRuntimeInstanceRange(
+  minValue: string,
+  maxValue: string,
+  t: TFunction,
+): RuntimeInstanceRangeValidation {
+  const min = Number(minValue);
+  const max = Number(maxValue);
+  if (
+    !minValue.trim() ||
+    !maxValue.trim() ||
+    !Number.isSafeInteger(min) ||
+    !Number.isSafeInteger(max) ||
+    min < 0 ||
+    max < 1
+  ) {
+    return {
+      valid: false,
+      error: t("projectPreview.errors.instanceRangeInteger"),
+    };
+  }
+  if (min > max) {
+    return { valid: false, error: t("projectPreview.errors.instanceRangeOrder") };
+  }
+  return { valid: true, min, max };
+}
+
+export interface DeployOptions {
+  taskId?: string;
+  runtimeName?: string;
+  sessionStorage?: "in-memory" | "persistent";
+  minInstance?: number;
+  maxInstance?: number;
+  authentication?: DeployAuthentication;
+  createEvaluationSets?: boolean;
+  im?: {
+    feishu?: {
+      enabled: boolean;
+    };
+  };
+  envs?: DeployEnvVar[];
+  resources?: DeployResources;
+}
+
+export interface DeployEnvVar {
+  key: string;
+  value: string;
+}
+
+export interface DeploymentTaskUpdate {
+  id: string;
+  /** Workspace draft that can be reopened when deployment does not complete. */
+  draftId?: string;
+  /** Stable ADK Agent name. Never use the platform Runtime name as identity. */
+  agentName: string;
+  runtimeName: string;
+  runtimeId?: string;
+  region: string;
+  startedAt: number;
+  status: "running" | "success" | "error" | "cancelled";
+  /** The request may still be running, but this browser cannot confirm it. */
+  statusUnconfirmed?: boolean;
+  phase?: string;
+  label: string;
+  message?: string;
+  messageCode?: string;
+  pct?: number;
+  buildLog?: DeployBuildLogSnapshot;
+  /** Whether the detail progress card should include the GitHub delivery step. */
+  githubDelivery?: boolean;
+  /** Logs for GitHub source / workflow initialization shown on the delivery step. */
+  githubLog?: DeployBuildLogSnapshot;
+  /** Instance range applied through UpdateRuntime after creation. */
+  instanceRange?: { min: number; max: number };
+  /** Whether this deployment initializes the Studio feedback evaluation sets. */
+  createEvaluationSets?: boolean;
+  /** Draft used to render the Agent detail while its Runtime is still publishing. */
+  agentDraft?: AgentDraft;
+  /** Re-runs the same project/config as a new deployment task. */
+  retry?: () => Promise<void>;
 }
 
 export interface ProjectPreviewProps {
   project: AgentProject;
+  /** Render inside the Agent workspace without taking over the app toolbar. */
+  embedded?: boolean;
+  /** Keep the deployment layout visible while the final action is unavailable. */
+  deployDisabledReason?: string;
+  /** Draft metadata summarized on the deployment page. */
+  agentDraft?: AgentDraft;
+  /** Main Agent display name. Generated project names may be normalized. */
+  agentName?: string;
+  /** Root Agent plus all recursively nested sub-Agents. */
+  agentCount?: number;
+  /** Debug configuration selected as the release candidate. */
+  releaseConfiguration?: {
+    modelName: string;
+    description: string;
+    instruction: string;
+    optimizations: string[];
+    effectiveOptimizations?: string[];
+    autoAddedOptimizations?: string[];
+    planHash?: string;
+  };
   /** When provided, files are editable and changes call onChange with the new project. Omit for read-only. */
   onChange?: (project: AgentProject) => void;
-  /** One-click deploy handler. Should return deploy result (URL + API Key). Omit to hide the deploy button. */
-  onDeploy?: (project: AgentProject) => Promise<DeployResult>;
+  /** One-click deploy handler. Should return deploy result (URL + API Key). Omit to hide the deploy button.
+   *  `onStage` receives each live build/deploy/publish progress frame. */
+  onDeploy?: (
+    project: AgentProject,
+    onStage?: (s: DeployStage) => void,
+    options?: DeployOptions,
+  ) => Promise<DeployResult>;
   /** Called after successfully adding the agent to the connection list. */
-  onAgentAdded?: (agentId: string, agentName: string) => void;
+  onAgentAdded?: (agentId: string, agentName: string) => void | Promise<void>;
+  /** Called as soon as the Runtime has been deployed or updated successfully. */
+  onDeploymentComplete?: (result: DeployResult) => void | Promise<void>;
+  /** Label for the floating deployment action. */
+  deploymentActionLabel?: string;
+  /** Overrides the final confirmation copy for deployments with extra risk. */
+  deploymentConfirmation?: {
+    title: string;
+    description: string;
+    confirmLabel: string;
+  };
+  /** Optional external footer slot for the deployment action. */
+  deploymentActionTargetId?: string;
+  /** Existing Runtime id when this deployment updates an Agent in place. */
+  deploymentRuntimeId?: string;
+  /** Existing platform Runtime resource name when publishing an update. */
+  deploymentRuntimeName?: string;
+  /** Whether a new Runtime name was explicitly edited instead of generated. */
+  deploymentRuntimeNameCustomized?: boolean;
+  /** Updates the explicit Runtime name for a new deployment. */
+  onDeploymentRuntimeNameChange?: (runtimeName: string) => void;
+  /** Persists the deployment task without forcing the active editor to navigate. */
+  onDeploymentStarted?: (task: DeploymentTaskUpdate) => void;
+  /** Mirrors deployment progress into the app shell so it survives page switches. */
+  onDeploymentTaskChange?: (task: DeploymentTaskUpdate) => void;
+  showGitSync?: boolean;
+  showMessageChannels?: boolean;
+  showEvaluationSets?: boolean;
+  /** Whether Feishu Channel was enabled in the configuration step. */
+  feishuEnabled?: boolean;
+  /** Update the Feishu channel selection from the deploy page. */
+  onFeishuEnabledChange?: (enabled: boolean) => void | Promise<void>;
+  /** Runtime keys whose values remain configured but are not returned to the browser. */
+  configuredRuntimeEnvKeys?: readonly string[];
+  /** Environment variables required by the selected memory/knowledge backends. */
+  deploymentEnv?: RuntimeEnvSpec[];
+  /** Required deployment secrets kept only in this mounted publish page. */
+  requiredSecretEnv?: Array<{ key: string; label: string }>;
+  /** Optional controlled secret values entered earlier in the configuration flow. */
+  requiredSecretEnvValues?: Record<string, string>;
+  onRequiredSecretEnvChange?: (key: string, value: string) => void;
+  /** Deployment-only values entered in each feature's configuration area. */
+  deploymentEnvValues?: Record<string, string>;
+  onDeploymentEnvChange?: (key: string, value: string) => void;
+  /** Atomically updates the Feishu app credentials returned by automatic setup. */
+  onFeishuCredentialsChange?: (appId: string, appSecret: string) => void;
+  /** Runtime network settings edited on the deploy page. */
+  network?: NetworkConfig;
+  onNetworkChange?: (network: NetworkConfig | undefined) => void;
+  /** Selected deploy region for the active cloud provider. */
+  deployRegion?: string;
+  /** Active cloud provider; controls deploy-region choices. */
+  cloudProvider?: CloudProvider;
+  /** Called when the user changes the deploy region. */
+  onDeployRegionChange?: (region: string) => void;
+  /** Creation entry and method used to group Studio deployment telemetry. */
+  deploymentTelemetry?: DeploymentTelemetryOrigin;
+  /** Deploy-page toolbar actions. */
+  onBack?: () => void;
+  backLabel?: string;
+  onExportYaml?: () => void;
+  /** Replaces the Agent preview pane for deployment flows with their own source area. */
+  deploymentPrimaryPane?: ReactNode;
+  /** Keeps deployment configuration visible while its primary input is incomplete. */
+  deployDisabled?: boolean;
 }
 
 // --- tree model -------------------------------------------------------------
@@ -162,33 +748,489 @@ function buildTree(files: ProjectFile[]): TreeNode {
   return root;
 }
 
-function sortedChildren(node: TreeNode): TreeNode[] {
+function sortedChildren(node: TreeNode, filesFirst = false): TreeNode[] {
   return [...node.children.values()].sort((a, b) => {
     const aFolder = a.children.size > 0 && a.path === undefined;
     const bFolder = b.children.size > 0 && b.path === undefined;
-    if (aFolder !== bFolder) return aFolder ? -1 : 1;
+    if (aFolder !== bFolder) {
+      return filesFirst ? (aFolder ? 1 : -1) : aFolder ? -1 : 1;
+    }
     return a.name.localeCompare(b.name);
   });
 }
 
 // --- component --------------------------------------------------------------
 
-export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: ProjectPreviewProps) {
+interface EnvRow {
+  id: string;
+  key: string;
+  value: string;
+}
+
+function newEnvRow(key = "", value = ""): EnvRow {
+  return {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    key,
+    value,
+  };
+}
+
+function ProjectHeaderPortal({
+  left,
+  right,
+}: {
+  left: ReactNode;
+  right: ReactNode;
+}) {
+  const [targets, setTargets] = useState<{
+    left: HTMLElement;
+    right: HTMLElement;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const leftTarget = document.getElementById("veadk-page-header-left");
+    const rightTarget = document.getElementById("veadk-page-header-actions");
+    if (leftTarget && rightTarget) {
+      setTargets({ left: leftTarget, right: rightTarget });
+    }
+  }, []);
+
+  if (!targets) {
+    return (
+      <header className="pp-toolbar">
+        {left}
+        {right}
+      </header>
+    );
+  }
+
+  return (
+    <>
+      {createPortal(left, targets.left)}
+      {createPortal(right, targets.right)}
+    </>
+  );
+}
+
+export function ProjectPreview({
+  project,
+  embedded = false,
+  deployDisabledReason,
+  agentDraft,
+  agentName,
+  agentCount,
+  releaseConfiguration,
+  onChange,
+  onDeploy,
+  onAgentAdded,
+  onDeploymentComplete,
+  deploymentActionLabel: deploymentActionLabelProp,
+  deploymentConfirmation,
+  deploymentActionTargetId,
+  deploymentRuntimeId,
+  deploymentRuntimeName,
+  deploymentRuntimeNameCustomized = false,
+  onDeploymentRuntimeNameChange,
+  onDeploymentStarted,
+  onDeploymentTaskChange,
+  showGitSync = true,
+  showMessageChannels = true,
+  showEvaluationSets = true,
+  feishuEnabled = false,
+  onFeishuEnabledChange,
+  configuredRuntimeEnvKeys = [],
+  deploymentEnv = [],
+  requiredSecretEnv = [],
+  requiredSecretEnvValues,
+  onRequiredSecretEnvChange,
+  deploymentEnvValues = {},
+  onDeploymentEnvChange,
+  onFeishuCredentialsChange,
+  network,
+  onNetworkChange,
+  cloudProvider = "volcengine",
+  deployRegion = defaultCloudRegion(cloudProvider),
+  onDeployRegionChange,
+  deploymentTelemetry = {
+    source: "unknown",
+    createMode: "unknown",
+    aiAssisted: false,
+  },
+  onBack,
+  backLabel: backLabelProp,
+  onExportYaml,
+  deploymentPrimaryPane,
+  deployDisabled = false,
+}: ProjectPreviewProps) {
+  const { t } = useTranslation("ui");
+  const deploymentActionLabel = deploymentActionLabelProp ?? t("projectPreview.deploy");
+  const backLabel = backLabelProp ?? t("projectPreview.backToConfiguration");
   const editable = typeof onChange === "function";
+  const isRuntimeUpdate = Boolean(deploymentRuntimeId);
+  const configuredRuntimeEnvKeySet = useMemo(
+    () => new Set(configuredRuntimeEnvKeys),
+    [configuredRuntimeEnvKeys],
+  );
+  const inMemorySession = usesInMemorySession(agentDraft);
+  const runtimeNameSource =
+    agentName?.trim() || agentDraft?.name || project.name;
+  const generatedRuntimeName = useMemo(
+    () => generateRuntimeName(runtimeNameSource),
+    [runtimeNameSource],
+  );
+  const [uncontrolledRuntimeName, setUncontrolledRuntimeName] = useState<
+    string | null
+  >(null);
+  const effectiveRuntimeName =
+    isRuntimeUpdate
+      ? (deploymentRuntimeName ?? runtimeNameSource)
+      : deploymentRuntimeNameCustomized
+        ? (deploymentRuntimeName ?? "")
+        : (uncontrolledRuntimeName ?? generatedRuntimeName);
+  const runtimeNameSyntaxError = isRuntimeUpdate
+    ? null
+    : runtimeNameProblem(effectiveRuntimeName);
+  const [runtimeNameConflict, setRuntimeNameConflict] = useState<{
+    key: string;
+    message: string;
+  } | null>(null);
+  const [runtimeNameChecking, setRuntimeNameChecking] = useState(false);
+  const runtimeNameCheckKey = `${deployRegion}\0${effectiveRuntimeName.trim()}`;
+  const runtimeNameCheckKeyRef = useRef(runtimeNameCheckKey);
+  runtimeNameCheckKeyRef.current = runtimeNameCheckKey;
+  const runtimeNameConflictError =
+    runtimeNameConflict?.key === runtimeNameCheckKey
+      ? runtimeNameConflict.message
+      : null;
+  const runtimeNameError = runtimeNameSyntaxError ?? runtimeNameConflictError;
+  const selectedModelApiKeyId =
+    agentDraft?.deployment?.modelApiKeyId?.trim() ?? "";
+  const sidecarEnabled = agentDraft?.harnessSidecar?.enabled === true;
 
   // Initialize all hooks BEFORE any conditional returns (React hooks rule)
   const [selected, setSelected] = useState<string | null>(
     project?.files?.[0]?.path ?? null,
   );
+
+  useEffect(() => {
+    setUncontrolledRuntimeName(null);
+    setRuntimeNameConflict(null);
+  }, [runtimeNameSource]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [deploying, setDeploying] = useState(false);
+  const [deploymentStatusUnconfirmed, setDeploymentStatusUnconfirmed] =
+    useState(false);
+  const [deployConfirmOpen, setDeployConfirmOpen] = useState(false);
+  const [flowPreviewOpen, setFlowPreviewOpen] = useState(false);
+  const [feishuUpdating, setFeishuUpdating] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [deployResult, setDeployResult] = useState<DeployResult | null>(null);
+  const [githubCicdBinding, setGithubCicdBinding] =
+    useState<GithubCicdPipelineResult | null>(null);
+  const [pendingGithubCicd, setPendingGithubCicd] =
+    useState<PendingGithubCicdConfig | null>(null);
+  // Latest progress frame per deploy phase + the phase currently in flight,
+  // driving the build/deploy/publish stepper.
+  const [stageMap, setStageMap] = useState<Record<string, DeployStage>>({});
+  const [activePhase, setActivePhase] = useState<string | null>(null);
   const [addingAgent, setAddingAgent] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const underlayRef = useRef<HTMLPreElement>(null);
+  const [envRows, setEnvRows] = useState<EnvRow[]>([]);
+  const [modelApiKeyRevealState, setModelApiKeyRevealState] =
+    useState<ModelApiKeyRevealState>(HIDDEN_MODEL_API_KEY_REVEAL);
+  const modelApiKeyRevealAbortRef = useRef<AbortController | null>(null);
+  const selectedModelApiKeyIdRef = useRef(selectedModelApiKeyId);
+  selectedModelApiKeyIdRef.current = selectedModelApiKeyId;
+  const [secretEnvValues, setSecretEnvValues] = useState<Record<string, string>>(
+    {},
+  );
+  const effectiveSecretEnvValues = requiredSecretEnvValues ?? secretEnvValues;
+  const [secretEnvErrorKey, setSecretEnvErrorKey] = useState<string | null>(null);
+  const [deploymentEnvErrors, setDeploymentEnvErrors] = useState<
+    Record<string, string>
+  >({});
+  const deploymentEnvInputRefs = useRef(
+    new Map<string, HTMLInputElement | HTMLTextAreaElement>(),
+  );
+  const [deployResources, setDeployResources] = useState<DeployResources>(
+    DEFAULT_DEPLOY_RESOURCES,
+  );
+  const [deployResourcesValidationError, setDeployResourcesValidationError] =
+    useState<string | null>(null);
+  const [regionMenuOpen, setRegionMenuOpen] = useState(false);
+  const deploymentRegionHelpId = useId();
+  const runtimeNameInputId = useId();
+  const runtimeNameHelpId = useId();
+  const runtimeNameErrorId = useId();
+  const [authenticationType, setAuthenticationType] =
+    useState<DeployAuthentication["type"]>("api_key");
+  const [userPoolUid, setUserPoolUid] = useState("");
+  const deployRegionOptions = cloudRegionOptions(cloudProvider);
+  const deployRegionLabel = formatCloudRegion(deployRegion, cloudProvider);
+  const [minInstance, setMinInstance] = useState("1");
+  const [maxInstance, setMaxInstance] = useState(
+    inMemorySession || sidecarEnabled ? "1" : "5",
+  );
+  const [createEvaluationSets, setCreateEvaluationSets] = useState(false);
+  const supportsEvaluationSets = showEvaluationSets && cloudProvider !== "byteplus";
+  const effectiveCreateEvaluationSets =
+    supportsEvaluationSets && createEvaluationSets;
+  const [deploymentActionTarget, setDeploymentActionTarget] =
+    useState<HTMLElement | null>(null);
+  const mountedRef = useRef(true);
+  const requiredSecretEnvSignature = requiredSecretEnv
+    .map((env) => `${env.key}:${env.label}`)
+    .join("|");
+  const deploymentEnvRequirementSignature = deploymentEnv
+    .map(
+      (env) =>
+        `${env.key}:${env.required}:${env.serverManaged ?? false}:${(env.requiredBy ?? []).join(",")}`,
+    )
+    .join("|");
+  const previousDeployRegionRef = useRef(deployRegion);
+  const instanceRange = validateRuntimeInstanceRange(minInstance, maxInstance, t);
+  const needsInstanceUpdate =
+    !isRuntimeUpdate &&
+    instanceRange.valid &&
+    (instanceRange.min !== 1 || instanceRange.max !== 5);
+  const baseDeploymentSteps = deploymentPrimaryPane
+    ? codePackageDeploySteps(t)
+    : deploySteps(t);
+  const deploymentStepsWithInstanceUpdate = needsInstanceUpdate
+    ? [...baseDeploymentSteps, { phase: "update", label: t("projectPreview.steps.updateInstances") }]
+    : baseDeploymentSteps;
+  const deploymentStepsBeforeGithub = effectiveCreateEvaluationSets
+    ? [...deploymentStepsWithInstanceUpdate, { phase: "evaluation", label: t("projectPreview.steps.createEvaluationSets") }]
+    : deploymentStepsWithInstanceUpdate;
+  const deploymentSteps =
+    (deploymentRuntimeId && githubCicdBinding?.pipelineId) || pendingGithubCicd
+      ? [...deploymentStepsBeforeGithub, { phase: "github", label: t("projectPreview.steps.syncCode") }]
+      : deploymentStepsBeforeGithub;
+
+  function clearModelApiKeyReveal() {
+    modelApiKeyRevealAbortRef.current?.abort();
+    modelApiKeyRevealAbortRef.current = null;
+    setModelApiKeyRevealState(HIDDEN_MODEL_API_KEY_REVEAL);
+  }
+
+  async function revealSelectedModelApiKey() {
+    const requestApiKeyId = selectedModelApiKeyIdRef.current;
+    if (!requestApiKeyId) {
+      setModelApiKeyRevealState({
+        status: "error",
+        apiKeyId: "",
+        value: "",
+        error: t("projectPreview.errors.selectApiKey"),
+      });
+      return;
+    }
+    modelApiKeyRevealAbortRef.current?.abort();
+    const controller = new AbortController();
+    modelApiKeyRevealAbortRef.current = controller;
+    setModelApiKeyRevealState({
+      status: "loading",
+      apiKeyId: requestApiKeyId,
+      value: "",
+      error: "",
+    });
+    try {
+      const response = await revealModelApiKey(
+        requestApiKeyId,
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted ||
+        selectedModelApiKeyIdRef.current !== requestApiKeyId
+      ) {
+        return;
+      }
+      setModelApiKeyRevealState({
+        status: "visible",
+        apiKeyId: requestApiKeyId,
+        value: response.value,
+        error: "",
+      });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setModelApiKeyRevealState({
+        status: "error",
+        apiKeyId: requestApiKeyId,
+        value: "",
+        error:
+          error instanceof Error
+            ? error.message
+            : t("projectPreview.errors.loadApiKey"),
+      });
+    } finally {
+      if (modelApiKeyRevealAbortRef.current === controller) {
+        modelApiKeyRevealAbortRef.current = null;
+      }
+    }
+  }
+
+  useEffect(() => {
+    clearModelApiKeyReveal();
+    if (selectedModelApiKeyId) {
+      setDeploymentEnvErrors((current) => {
+        if (!("MODEL_AGENT_API_KEY" in current)) return current;
+        const next = { ...current };
+        delete next.MODEL_AGENT_API_KEY;
+        return next;
+      });
+    }
+  }, [selectedModelApiKeyId]);
+
+  useEffect(() => {
+    window.addEventListener("pagehide", clearModelApiKeyReveal);
+    return () => {
+      window.removeEventListener("pagehide", clearModelApiKeyReveal);
+      clearModelApiKeyReveal();
+    };
+  }, []);
+
+  useEffect(() => {
+    const allowed = new Set(requiredSecretEnv.map((env) => env.key));
+    if (requiredSecretEnvValues === undefined) {
+      setSecretEnvValues((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([key]) => allowed.has(key)),
+        ),
+      );
+    }
+    setSecretEnvErrorKey((current) =>
+      current && allowed.has(current) ? current : null,
+    );
+  }, [requiredSecretEnvSignature, requiredSecretEnvValues]);
+
+  useEffect(() => {
+    const activeKeys = new Set(deploymentEnv.map((env) => env.key));
+    setDeploymentEnvErrors((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => activeKeys.has(key)),
+      );
+      return Object.keys(next).length === Object.keys(current).length
+        ? current
+        : next;
+    });
+  }, [deploymentEnvRequirementSignature]);
+
+  useEffect(() => {
+    if (!onDeployRegionChange || isRuntimeUpdate) return;
+    if (deployRegionOptions.some((region) => region.value === deployRegion)) return;
+    onDeployRegionChange(defaultCloudRegion(cloudProvider));
+  }, [
+    cloudProvider,
+    deployRegion,
+    deployRegionOptions,
+    isRuntimeUpdate,
+    onDeployRegionChange,
+  ]);
+
+  useEffect(() => {
+    if (!deploymentActionTargetId) {
+      setDeploymentActionTarget(null);
+      return;
+    }
+    setDeploymentActionTarget(document.getElementById(deploymentActionTargetId));
+  }, [deploymentActionTargetId]);
+
+  const deploymentRegionPicker = (showLabel: boolean) => (
+    <div
+      className={`pp-network-region${regionMenuOpen ? " is-open" : ""}`}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setRegionMenuOpen(false);
+      }}
+    >
+      {showLabel && <span>{t("projectPreview.releaseRegion")}</span>}
+      <button
+        type="button"
+        className="pp-region-trigger"
+        aria-label={t("projectPreview.deployRegion")}
+        aria-haspopup="listbox"
+        aria-expanded={regionMenuOpen}
+        aria-describedby={isRuntimeUpdate ? deploymentRegionHelpId : undefined}
+        disabled={deploying || isRuntimeUpdate || !onDeployRegionChange}
+        onClick={() => setRegionMenuOpen((open) => !open)}
+      >
+        <span>{deployRegionLabel}</span>
+        <ChevronDown
+          className={`pp-region-chevron${regionMenuOpen ? " is-open" : ""}`}
+        />
+      </button>
+      {regionMenuOpen && (
+        <>
+          <div className="menu-scrim" onClick={() => setRegionMenuOpen(false)} />
+          <div className="pp-region-menu" role="listbox" aria-label={t("projectPreview.deployRegion")}>
+            {deployRegionOptions.map((region) => {
+              const selected = region.value === deployRegion;
+              return (
+                <button
+                  key={region.value}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  className={`pp-region-option${selected ? " is-selected" : ""}`}
+                  onClick={() => {
+                    onDeployRegionChange?.(region.value);
+                    setRegionMenuOpen(false);
+                  }}
+                >
+                  <span>{region.label}</span>
+                  {selected && <Check aria-hidden="true" />}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+      {isRuntimeUpdate && (
+        <span id={deploymentRegionHelpId} className="pp-region-help">
+          {t("projectPreview.regionPreserved")}
+        </span>
+      )}
+    </div>
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setMinInstance("1");
+    setMaxInstance(inMemorySession || sidecarEnabled ? "1" : "5");
+  }, [inMemorySession, sidecarEnabled]);
+
+  useEffect(() => {
+    if (previousDeployRegionRef.current === deployRegion) return;
+    previousDeployRegionRef.current = deployRegion;
+    setDeployResources((resources) => ({
+      tos: resources.tos.mode === "existing" ? { mode: "existing" } : resources.tos,
+      cr: resources.cr.mode === "existing" ? { mode: "existing" } : resources.cr,
+      codePipeline:
+        resources.codePipeline.mode === "existing"
+          ? { mode: "existing" }
+          : resources.codePipeline,
+    }));
+    setDeployResourcesValidationError(null);
+  }, [deployRegion]);
+
+  useEffect(() => {
+    if (!flowPreviewOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFlowPreviewOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [flowPreviewOpen]);
 
   const tree = useMemo(() => {
     if (!project?.files || !Array.isArray(project.files)) {
@@ -199,11 +1241,44 @@ export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: Pr
 
   // Validate project structure AFTER all hooks
   if (!project || !Array.isArray(project.files)) {
-    return <div className="pp-error">项目数据无效</div>;
+    return <div className="pp-error">{t("projectPreview.errors.invalidProject")}</div>;
   }
 
   const selectedFile =
     project.files.find((f) => f.path === selected) ?? null;
+  const networkMode = network?.mode ?? "public";
+  const deploymentTelemetryBase = () => ({
+    agentId: String(agentName?.trim() || project.name || "unknown"),
+    deployAction: deploymentRuntimeId ? "update" as const : "create" as const,
+    deploySource: deploymentTelemetry.source,
+    createMode: deploymentTelemetry.createMode,
+    aiAssisted: deploymentTelemetry.aiAssisted ? 1 as const : 0 as const,
+    deployRegion: String(deployRegion),
+    runtimeNetworkType: networkMode,
+    feishuEnabled: feishuEnabled ? 1 as const : 0 as const,
+  });
+  const requiredSecretKeys = new Set(requiredSecretEnv.map((env) => env.key));
+  const automaticEnvRows = runtimeEnvDisplayRows(
+    feishuEnabled ? [...deploymentEnv, ...FEISHU_ENV] : deploymentEnv,
+    deploymentEnvValues,
+  ).filter((env) => !requiredSecretKeys.has(env.key));
+  const environmentVariableCount =
+    automaticEnvRows.length + requiredSecretEnv.length + envRows.length;
+  const currentModelApiKeyRevealState =
+    modelApiKeyRevealState.apiKeyId === selectedModelApiKeyId
+      ? modelApiKeyRevealState
+      : HIDDEN_MODEL_API_KEY_REVEAL;
+  const modelApiKeyRevealVisible =
+    currentModelApiKeyRevealState.status === "visible";
+  const modelApiKeyRevealLabel = !selectedModelApiKeyId
+    ? t("projectPreview.apiKey.selectFirst")
+    : currentModelApiKeyRevealState.status === "loading"
+      ? t("projectPreview.apiKey.revealing")
+      : modelApiKeyRevealVisible
+        ? t("projectPreview.apiKey.hide")
+        : currentModelApiKeyRevealState.status === "error"
+          ? t("projectPreview.apiKey.retryReveal")
+          : t("projectPreview.apiKey.reveal");
 
   function toggleFolder(key: string) {
     setCollapsed((prev) => {
@@ -243,7 +1318,7 @@ export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: Pr
 
   function handleRename() {
     if (!selectedFile) return;
-    const next = window.prompt("重命名文件", selectedFile.path);
+    const next = window.prompt(t("projectPreview.files.renamePrompt"), selectedFile.path);
     const path = next?.trim();
     if (!path || path === selectedFile.path) return;
     if (project.files.some((f) => f.path === path)) return;
@@ -261,19 +1336,739 @@ export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: Pr
     commitFiles(remaining, remaining[0]?.path ?? null);
   }
 
-  async function handleDeploy() {
-    if (!onDeploy || deploying) return;
-    setDeployError(null);
-    setDeployResult(null);
-    setDeploying(true);
-    try {
-      const result = await onDeploy(project);
-      setDeployResult(result);
-    } catch (err) {
-      setDeployError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDeploying(false);
+  function updateEnvRow(id: string, patch: Partial<EnvRow>) {
+    setEnvRows((rows) =>
+      rows.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+    );
+  }
+
+  function removeEnvRow(id: string) {
+    setEnvRows((rows) => rows.filter((row) => row.id !== id));
+  }
+
+  function addEnvRow() {
+    setEnvRows((rows) => [...rows, newEnvRow()]);
+  }
+
+  function clearDeploymentEnvError(key: string) {
+    setDeploymentEnvErrors((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function focusDeploymentEnv(key: string) {
+    window.requestAnimationFrame(() => {
+      const field = deploymentEnvInputRefs.current.get(key);
+      if (!field) return;
+      field.focus({ preventScroll: true });
+      field.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
+
+  function setNetworkMode(mode: NetworkConfig["mode"]) {
+    if (!onNetworkChange) return;
+    onNetworkChange(
+      mode === "public" ? undefined : { ...(network ?? { mode }), mode },
+    );
+  }
+
+  function patchNetwork(patch: Partial<NetworkConfig>) {
+    onNetworkChange?.({ ...(network ?? { mode: "private" }), ...patch });
+  }
+
+  function deployEnvVars(): DeployEnvVar[] {
+    const byKey = new Map(
+      envRows
+        .map((row) => ({ key: row.key.trim(), value: row.value }))
+        .filter((row) => row.key.length > 0)
+        .map((row) => [row.key, row.value]),
+    );
+    const featureEnv = feishuEnabled
+      ? [...deploymentEnv, ...FEISHU_ENV]
+      : deploymentEnv;
+    for (const env of runtimeEnvVars(featureEnv, deploymentEnvValues)) {
+      byKey.set(env.key, env.value);
     }
+    for (const env of requiredSecretEnv) {
+      const value = effectiveSecretEnvValues[env.key] ?? "";
+      if (value.trim()) byKey.set(env.key, value);
+    }
+    const usesArkModel = (draft: AgentDraft): boolean =>
+      (draft.agentType === "llm" &&
+        resolvedModelSource(draft, cloudProvider) === "ark") ||
+      draft.subAgents.some(usesArkModel);
+    if (agentDraft && usesArkModel(agentDraft)) {
+      const apiKeyId = agentDraft.deployment?.modelApiKeyId?.trim();
+      const apiKeyName = agentDraft.deployment?.modelApiKeyName?.trim();
+      if (apiKeyId) byKey.set("MODEL_AGENT_API_KEY_ID", apiKeyId);
+      if (apiKeyName) byKey.set("MODEL_AGENT_API_KEY_NAME", apiKeyName);
+    }
+    return [...byKey].map(([key, value]) => ({ key, value }));
+  }
+
+  async function handleFeishuToggle() {
+    if (!onFeishuEnabledChange || deploying || feishuUpdating) return;
+    setDeployError(null);
+    setFeishuUpdating(true);
+    try {
+      await onFeishuEnabledChange(!feishuEnabled);
+    } catch (error) {
+      if (mountedRef.current) {
+        setDeployError(
+          t("projectPreview.errors.updateFeishu", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    } finally {
+      if (mountedRef.current) setFeishuUpdating(false);
+    }
+  }
+
+  const handleGithubCicdBindingChange = useCallback(
+    (binding: GithubCicdPipelineResult | null) => {
+      setGithubCicdBinding(binding);
+    },
+    [],
+  );
+
+  async function requestDeploymentConfirmation() {
+    if (
+      !onDeploy ||
+      deploying ||
+      deploymentStatusUnconfirmed ||
+      runtimeNameChecking ||
+      deployDisabled
+    ) return;
+    if (runtimeNameError) {
+      setDeployError(runtimeNameError);
+      return;
+    }
+    if (!isRuntimeUpdate) {
+      const resourceError = deploymentResourcesError(deployResources);
+      if (resourceError) {
+        setDeployResourcesValidationError(resourceError);
+        setDeployError(resourceError);
+        return;
+      }
+    }
+    setDeployResourcesValidationError(null);
+    if (!instanceRange.valid) {
+      setDeployError(instanceRange.error);
+      return;
+    }
+    if (
+      !isRuntimeUpdate &&
+      authenticationType === "user_pool" &&
+      !userPoolUid
+    ) {
+      setDeployError(t("projectPreview.errors.userPoolRequired"));
+      return;
+    }
+    if (networkMode !== "public" && !network?.vpcId?.trim()) {
+      setDeployError(t("projectPreview.errors.vpcRequired"));
+      return;
+    }
+    const missingSecret = requiredSecretEnv.find(
+      (env) =>
+        !(effectiveSecretEnvValues[env.key] ?? "").trim() &&
+        !configuredRuntimeEnvKeySet.has(env.key),
+    );
+    if (missingSecret) {
+      setSecretEnvErrorKey(missingSecret.key);
+      setDeployError(t("projectPreview.errors.modelSecretRequired", { label: missingSecret.label }));
+      return;
+    }
+    setSecretEnvErrorKey(null);
+    const missingFeatureEnvs = missingRuntimeEnvs(
+      deploymentEnv,
+      deploymentEnvValues,
+      configuredRuntimeEnvKeys,
+    );
+    const missingManagedModelEnv = deploymentEnv.find(
+      (env) =>
+        env.key === "MODEL_AGENT_API_KEY" &&
+        env.required &&
+        env.serverManaged &&
+        !selectedModelApiKeyId,
+    );
+    const missingEnvs = [
+      ...(missingManagedModelEnv ? [missingManagedModelEnv] : []),
+      ...missingFeatureEnvs,
+    ];
+    if (missingEnvs.length) {
+      const errors = Object.fromEntries(
+        missingEnvs.map((env) => [
+          env.key,
+          env.serverManaged
+            ? t("projectPreview.errors.managedApiKeyRequired", {
+                requirement: runtimeEnvRequirementHint(env)?.replace(/。$/, "") || env.comment || env.key,
+              })
+            : runtimeEnvMissingError(env),
+        ]),
+      );
+      setDeploymentEnvErrors(errors);
+      setDeployError(errors[missingEnvs[0].key]);
+      focusDeploymentEnv(missingEnvs[0].key);
+      return;
+    }
+    setDeploymentEnvErrors({});
+    const invalidFeatureEnv = firstInvalidRuntimeEnv(
+      deploymentEnv,
+      deploymentEnvValues,
+    );
+    if (invalidFeatureEnv) {
+      setDeployError(
+        `${invalidFeatureEnv.spec.comment || invalidFeatureEnv.spec.key}：${invalidFeatureEnv.error}`,
+      );
+      return;
+    }
+    if (feishuEnabled) {
+      const missingFeishuEnv = FEISHU_ENV.find(
+        (env) =>
+          !String(deploymentEnvValues[env.key] ?? "").trim() &&
+          !configuredRuntimeEnvKeySet.has(env.key),
+      );
+      if (missingFeishuEnv) {
+        const env = FEISHU_ENV.find((item) => item.key === missingFeishuEnv.key);
+        setDeployError(t("projectPreview.errors.feishuEnvRequired", { field: env?.comment || env?.key }));
+        return;
+      }
+    }
+    if (!isRuntimeUpdate) {
+      const checkedName = effectiveRuntimeName.trim();
+      const checkedKey = `${deployRegion}\0${checkedName}`;
+      setRuntimeNameChecking(true);
+      setDeployError(null);
+      try {
+        const result = await checkRuntimeNameAvailability(
+          checkedName,
+          deployRegion,
+        );
+        if (!mountedRef.current) return;
+        if (runtimeNameCheckKeyRef.current !== checkedKey) return;
+        if (!result.available) {
+          const message = t("projectPreview.errors.runtimeNameExists");
+          setRuntimeNameConflict({ key: checkedKey, message });
+          setDeployError(message);
+          return;
+        }
+        setRuntimeNameConflict(null);
+      } catch (error) {
+        if (!mountedRef.current) return;
+        setDeployError(error instanceof Error ? error.message : String(error));
+        return;
+      } finally {
+        if (mountedRef.current) setRuntimeNameChecking(false);
+      }
+    }
+    setDeployConfirmOpen(true);
+  }
+
+  async function performDeployment() {
+    if (!onDeploy || deploying || deploymentStatusUnconfirmed) return;
+    if (runtimeNameError) {
+      setDeployConfirmOpen(false);
+      setDeployError(runtimeNameError);
+      return;
+    }
+    if (!instanceRange.valid) {
+      setDeployConfirmOpen(false);
+      setDeployError(instanceRange.error);
+      return;
+    }
+    setDeployConfirmOpen(false);
+    const envs = deployEnvVars();
+    if (mountedRef.current) {
+      setDeployError(null);
+      setDeploymentStatusUnconfirmed(false);
+      setDeployResult(null);
+      setStageMap({});
+      setActivePhase(null);
+      setDeploying(true);
+    }
+    const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const taskAgentName = agentName?.trim() || agentDraft?.name || project.name;
+    const requestedRuntimeName = effectiveRuntimeName.trim();
+    let taskRuntimeName = requestedRuntimeName;
+    const taskStartedAt = Date.now();
+    const operation = beginAgentDeploy(deploymentTelemetryBase());
+    const initialTask: DeploymentTaskUpdate = {
+      id: taskId,
+      agentName: taskAgentName,
+      runtimeName: taskRuntimeName,
+      runtimeId: deploymentRuntimeId,
+      region: deployRegion,
+      startedAt: taskStartedAt,
+      status: "running",
+      phase: "prepare",
+      label: t("projectPreview.task.preparing"),
+      agentDraft,
+      githubDelivery: Boolean(pendingGithubCicd),
+      instanceRange: needsInstanceUpdate
+        ? { min: instanceRange.min, max: instanceRange.max }
+        : undefined,
+      createEvaluationSets: effectiveCreateEvaluationSets,
+    };
+    onDeploymentTaskChange?.(initialTask);
+    onDeploymentStarted?.(initialTask);
+    let latestBuildLog: DeployBuildLogSnapshot | undefined;
+    let latestGithubLog: DeployBuildLogSnapshot | undefined;
+    let latestPhase = initialTask.phase ?? "prepare";
+    let latestMessage = initialTask.message;
+    let latestMessageCode = initialTask.messageCode;
+    const terminalBuildLog = (
+      status: DeployBuildLogSnapshot["status"],
+    ): DeployBuildLogSnapshot | undefined => (
+      latestBuildLog
+        ? { ...latestBuildLog, status, updatedAt: Date.now() }
+        : undefined
+    );
+    const terminalBuildLogUpdate = (
+      status: DeployBuildLogSnapshot["status"],
+    ): { buildLog?: DeployBuildLogSnapshot } => {
+      const buildLog = terminalBuildLog(status);
+      return buildLog ? { buildLog } : {};
+    };
+    const pendingBuildLog = (): DeployBuildLogSnapshot => ({
+      source: "code-pipeline",
+      status: "running",
+      text: "",
+      lineCount: 0,
+      truncated: false,
+      updatedAt: Date.now(),
+      pendingMessage: t("projectPreview.task.waitingBuildLog"),
+    });
+    const githubDeliveryLog = (
+      line: string,
+      status: DeployBuildLogSnapshot["status"] = "running",
+    ): DeployBuildLogSnapshot => {
+      const previousText = latestGithubLog?.text ?? "";
+      const text = [previousText, line].filter(Boolean).join("\n");
+      latestGithubLog = {
+        source: "github-delivery",
+        status,
+        text,
+        lineCount: text ? text.split("\n").length : 0,
+        truncated: false,
+        updatedAt: Date.now(),
+        pendingMessage: status === "running" ? t("projectPreview.task.waitingGithubLog") : undefined,
+      };
+      return latestGithubLog;
+    };
+    const finalizeBuildFailureLog = (): DeployBuildLogSnapshot | undefined => {
+      if (latestPhase !== "build" || !latestBuildLog?.text) return undefined;
+      latestBuildLog = {
+        ...latestBuildLog,
+        status: "error",
+        updatedAt: Date.now(),
+      };
+      return latestBuildLog;
+    };
+    const telemetryErrorMessage = (error: unknown): string | undefined => {
+      if (latestPhase === "build" && latestBuildLog?.text) {
+        return safeTelemetryErrorMessage(latestBuildLog.text, { preserveEnd: true });
+      }
+      return safeTelemetryErrorMessage(error);
+    };
+    try {
+      let activeGithubBinding = githubCicdBinding;
+      if (deploymentRuntimeId && githubCicdBinding?.pipelineId) {
+        latestPhase = "github";
+        const githubLog = githubDeliveryLog(t("projectPreview.task.syncingGithub"));
+        const githubSyncStage: DeployStage = {
+          level: "info",
+          phase: "github",
+          message: t("projectPreview.task.syncingGithub"),
+          pct: 0,
+        };
+        if (mountedRef.current) {
+          setStageMap((prev) => ({ ...prev, github: githubSyncStage }));
+          setActivePhase("github");
+        }
+        onDeploymentTaskChange?.({
+          id: taskId,
+          agentName: taskAgentName,
+          runtimeName: taskRuntimeName,
+          runtimeId: deploymentRuntimeId,
+          region: deployRegion,
+          startedAt: taskStartedAt,
+          status: "running",
+          phase: "github",
+          label: t("projectPreview.task.syncGithubCode"),
+          message: githubSyncStage.message,
+          pct: 0,
+          githubDelivery: true,
+          githubLog,
+        });
+        const synced = await syncGithubCicdRuntime({
+          runtimeId: deploymentRuntimeId,
+          project,
+        });
+        activeGithubBinding = synced;
+        if (mountedRef.current) {
+          setGithubCicdBinding(synced);
+          setStageMap((prev) => ({
+            ...prev,
+            github: {
+              level: "success",
+              phase: "github",
+              message: t("projectPreview.task.githubSynced"),
+              pct: 100,
+            },
+          }));
+          setActivePhase(null);
+        }
+        if (synced.cicd?.enabled) {
+          onDeploymentTaskChange?.({
+            id: taskId,
+            agentName: taskAgentName,
+            runtimeName: taskRuntimeName,
+            runtimeId: deploymentRuntimeId,
+            region: deployRegion,
+            startedAt: taskStartedAt,
+            status: "success",
+            phase: "github",
+            label: t("projectPreview.task.githubSubmitted"),
+            message: t("projectPreview.task.githubUpdatingRuntime"),
+            pct: 100,
+            githubDelivery: true,
+            githubLog: githubDeliveryLog(
+              t("projectPreview.task.githubUpdatingRuntime"),
+              "complete",
+            ),
+          });
+          return;
+        }
+      }
+      const result = await onDeploy(
+        project,
+        (s) => {
+          if (s.runtimeName) taskRuntimeName = s.runtimeName;
+          const nextPhase = advanceDeploymentPhase(latestPhase, s.phase);
+          if (s.buildLog) {
+            latestBuildLog = mergeDeployBuildLog(latestBuildLog, s.buildLog);
+          } else if (s.phase === "build" && !latestBuildLog) {
+            latestBuildLog = pendingBuildLog();
+          }
+          if (s.phase === nextPhase) {
+            latestMessage = s.message;
+            latestMessageCode = s.messageCode;
+          }
+          latestPhase = nextPhase;
+          if (mountedRef.current) {
+            setStageMap((prev) => ({ ...prev, [s.phase]: s }));
+            setActivePhase(latestPhase);
+          }
+          onDeploymentTaskChange?.({
+            id: taskId,
+            agentName: taskAgentName,
+            runtimeName: taskRuntimeName,
+            runtimeId: deploymentRuntimeId,
+            region: deployRegion,
+            startedAt: taskStartedAt,
+            status: "running",
+            phase: latestPhase,
+            label:
+              deploymentSteps.find((step) => step.phase === latestPhase)?.label ??
+              latestPhase,
+            message: latestMessage,
+            messageCode: latestMessageCode,
+            pct: s.pct,
+            ...(latestBuildLog ? { buildLog: latestBuildLog } : {}),
+          });
+        },
+        {
+          taskId,
+          runtimeName: requestedRuntimeName,
+          sessionStorage: inMemorySession ? "in-memory" : "persistent",
+          minInstance: instanceRange.min,
+          maxInstance: instanceRange.max,
+          ...(!isRuntimeUpdate
+            ? {
+                authentication:
+                  authenticationType === "user_pool"
+                    ? {
+                        type: "user_pool" as const,
+                        userPoolUid,
+                      }
+                    : { type: "api_key" as const },
+              }
+            : {}),
+          createEvaluationSets: effectiveCreateEvaluationSets,
+          ...(feishuEnabled
+            ? {
+                im: {
+                  feishu: {
+                    enabled: true,
+                  },
+                },
+              }
+            : {}),
+          envs,
+          ...(!isRuntimeUpdate ? { resources: deployResources } : {}),
+        },
+      );
+      if (
+        !deploymentRuntimeId &&
+        pendingGithubCicd &&
+        result.runtimeId
+      ) {
+        latestPhase = "github";
+        const githubLog = githubDeliveryLog(t("projectPreview.task.initializingGithub"));
+        const githubAttachStage: DeployStage = {
+          level: "info",
+          phase: "github",
+          message: t("projectPreview.task.initializingGithubBranch"),
+          pct: 0,
+        };
+        if (mountedRef.current) {
+          setStageMap((prev) => ({ ...prev, github: githubAttachStage }));
+          setActivePhase("github");
+        }
+        onDeploymentTaskChange?.({
+          id: taskId,
+          agentName: result.agentName || taskAgentName,
+          runtimeName: result.runtimeName || taskRuntimeName,
+          runtimeId: result.runtimeId,
+          region: result.region || deployRegion,
+          startedAt: taskStartedAt,
+          status: "running",
+          phase: "github",
+          label: t("projectPreview.task.mountGithubDelivery"),
+          message: githubAttachStage.message,
+          pct: 0,
+          githubDelivery: true,
+          githubLog,
+        });
+        try {
+          const attached = await initializeGithubDeliveryMain({
+            project,
+            githubUrl: pendingGithubCicd.githubUrl,
+            githubToken: pendingGithubCicd.githubToken,
+            baseBranch: pendingGithubCicd.baseBranch,
+            runtimeName: result.agentName || taskRuntimeName,
+            runtimeId: result.runtimeId,
+            region: result.region || deployRegion,
+            cloudProvider: pendingGithubCicd.cloudProvider,
+            projectPath: ".",
+            volcengineAccessKey: pendingGithubCicd.volcengineAccessKey,
+            volcengineSecretKey: pendingGithubCicd.volcengineSecretKey,
+            volcengineSessionToken: pendingGithubCicd.volcengineSessionToken,
+          });
+          activeGithubBinding = attached;
+          if (mountedRef.current) {
+            setGithubCicdBinding(attached);
+            setPendingGithubCicd(null);
+            setStageMap((prev) => ({
+              ...prev,
+              github: {
+                level: "success",
+                phase: "github",
+                message: t("projectPreview.task.githubBranchInitialized"),
+                pct: 100,
+              },
+            }));
+            setActivePhase(null);
+          }
+          onDeploymentTaskChange?.({
+            id: taskId,
+            agentName: result.agentName || taskAgentName,
+            runtimeName: result.runtimeName || taskRuntimeName,
+            runtimeId: result.runtimeId,
+            region: result.region || deployRegion,
+            startedAt: taskStartedAt,
+            status: "running",
+            phase: "github",
+            label: t("projectPreview.task.githubDeliveryMounted"),
+            message: t("projectPreview.task.githubBranchInitialized"),
+            pct: 100,
+            githubDelivery: true,
+            githubLog: githubDeliveryLog(t("projectPreview.task.githubBranchInitialized"), "complete"),
+          });
+        } catch (error) {
+          const githubLog = githubDeliveryLog(
+            t("projectPreview.task.githubMountFailedDetail", {
+              message: error instanceof Error ? error.message : String(error),
+            }),
+            "error",
+          );
+          onDeploymentTaskChange?.({
+            id: taskId,
+            agentName: result.agentName || taskAgentName,
+            runtimeName: result.runtimeName || taskRuntimeName,
+            runtimeId: result.runtimeId,
+            region: result.region || deployRegion,
+            startedAt: taskStartedAt,
+            status: "error",
+            phase: "github",
+            label: t("projectPreview.task.githubMountFailed"),
+            message: t("projectPreview.task.githubMountFailedHint"),
+            pct: 100,
+            githubDelivery: true,
+            githubLog,
+          });
+          throw new Error(
+            t("projectPreview.errors.deployedButGithubMountFailed", {
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        }
+      } else if (!deploymentRuntimeId && activeGithubBinding?.pipelineId && result.runtimeId) {
+        try {
+          const bound = await bindGithubCicdRuntime({
+            pipelineId: activeGithubBinding.pipelineId,
+            runtimeId: result.runtimeId,
+            region: result.region || deployRegion,
+            cloudProvider: activeGithubBinding.cloudProvider ?? cloudProvider,
+          });
+          activeGithubBinding = bound;
+          if (mountedRef.current) setGithubCicdBinding(bound);
+        } catch (error) {
+          if (mountedRef.current) {
+            setDeployError(
+              t("projectPreview.errors.deployedButGithubBindFailed", {
+                message: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          }
+        }
+      }
+      if (mountedRef.current) {
+        setDeployResult(result);
+        setActivePhase(null);
+      }
+      operation.succeed({
+        runtimeId: String(result.runtimeId || deploymentRuntimeId || ""),
+      });
+      onDeploymentTaskChange?.({
+        id: taskId,
+        agentName: result.agentName || taskAgentName,
+        runtimeName: result.runtimeName || taskRuntimeName,
+        runtimeId: result.runtimeId || deploymentRuntimeId,
+        region: result.region || deployRegion,
+        startedAt: taskStartedAt,
+        status: "success",
+        phase: "complete",
+        label: t("projectPreview.task.deploymentComplete"),
+        message: result.warnings?.join(t("environmentCenter.listSeparator")),
+        githubDelivery: Boolean(pendingGithubCicd || latestGithubLog),
+        ...(latestGithubLog ? { githubLog: latestGithubLog } : {}),
+        ...terminalBuildLogUpdate("complete"),
+      });
+      try {
+        await onDeploymentComplete?.(result);
+      } catch (error) {
+        if (!(error instanceof RuntimeProbeError)) throw error;
+        onDeploymentTaskChange?.({
+          id: taskId,
+          agentName: result.agentName || taskAgentName,
+          runtimeName: result.runtimeName || taskRuntimeName,
+          runtimeId: result.runtimeId || deploymentRuntimeId,
+          region: result.region || deployRegion,
+          startedAt: taskStartedAt,
+          status: "success",
+          phase: "complete",
+          label: t("projectPreview.task.deployedNotConnected"),
+          message: error.message,
+          ...terminalBuildLogUpdate("complete"),
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        operation.fail({
+          failedPhase: telemetryDeployPhase(latestPhase),
+          ...classifyTelemetryError(err, { phase: latestPhase }),
+          errorMessage: safeTelemetryErrorMessage(err),
+        });
+        if (mountedRef.current) {
+          setDeployError(null);
+          setActivePhase(null);
+        }
+        onDeploymentTaskChange?.({
+          id: taskId,
+          agentName: taskAgentName,
+          runtimeName: taskRuntimeName,
+          runtimeId: deploymentRuntimeId,
+          region: deployRegion,
+          startedAt: taskStartedAt,
+          status: "cancelled",
+          label: t("projectPreview.task.cancelled"),
+          message: t("projectPreview.task.cancelledHint"),
+          ...terminalBuildLogUpdate("complete"),
+        });
+        return;
+      }
+      const statusUnconfirmed = isDeploymentStatusUnconfirmedError(err);
+      if (statusUnconfirmed) {
+        if (mountedRef.current) {
+          setDeployError(null);
+          setDeployResult(null);
+          setDeploymentStatusUnconfirmed(true);
+        }
+        operation.fail({
+          failedPhase: telemetryDeployPhase(latestPhase),
+          ...classifyTelemetryError(err, { phase: latestPhase }),
+          errorMessage: safeTelemetryErrorMessage(err),
+        });
+        onDeploymentTaskChange?.({
+          id: taskId,
+          agentName: taskAgentName,
+          runtimeName: taskRuntimeName,
+          runtimeId: deploymentRuntimeId,
+          region: deployRegion,
+          startedAt: taskStartedAt,
+          status: "running",
+          statusUnconfirmed: true,
+          phase: latestPhase,
+          label: t("projectPreview.task.deploymentStatusUnconfirmed"),
+          message: t("projectPreview.errors.deploymentStatusUnconfirmed"),
+          ...(latestBuildLog ? { buildLog: latestBuildLog } : {}),
+        });
+        return;
+      }
+      if (mountedRef.current) setDeployError(message);
+      if (mountedRef.current) setDeployResult(null);
+      const buildLog = finalizeBuildFailureLog();
+      operation.fail({
+        failedPhase: telemetryDeployPhase(latestPhase),
+        ...classifyTelemetryError(err, { phase: latestPhase }),
+        errorMessage: telemetryErrorMessage(err),
+      });
+      const failedInBuild = Boolean(buildLog);
+      const failedInGithub = latestPhase === "github" && Boolean(latestGithubLog);
+      onDeploymentTaskChange?.({
+        id: taskId,
+        agentName: taskAgentName,
+        runtimeName: taskRuntimeName,
+        runtimeId: deploymentRuntimeId,
+        region: deployRegion,
+        startedAt: taskStartedAt,
+        status: "error",
+        phase: latestPhase,
+        label: t("projectPreview.task.deploymentFailed"),
+        message: failedInBuild
+          ? t("projectPreview.task.buildFailedHint")
+          : failedInGithub
+            ? t("projectPreview.task.githubMountFailedHint")
+            : message,
+        ...(buildLog ? { buildLog } : terminalBuildLogUpdate("complete")),
+        ...(failedInGithub
+          ? { githubDelivery: true, githubLog: latestGithubLog }
+          : {}),
+        retry: requestDeploymentConfirmation,
+      });
+    } finally {
+      if (mountedRef.current) setDeploying(false);
+    }
+  }
+
+  function cancelDeploymentConfirmation() {
+    setDeployConfirmOpen(false);
   }
 
   async function handleAddAgent() {
@@ -281,28 +2076,76 @@ export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: Pr
     setAddingAgent(true);
     setDeployError(null);
     try {
-      const { addConnection, remoteAppId } = await import("../adk/connections");
+      const {
+        addConnection,
+        addRuntimeConnection,
+        remoteAppId,
+        loadConnections,
+      } = await import("../adk/connections");
+      const { probeRuntimeApps } = await import("../adk/client");
 
-      const conn = await addConnection(
-        deployResult.agentName,
-        deployResult.url,
-        deployResult.apikey
-      );
+      let conn;
+      if (deployResult.runtimeId) {
+        // Preferred: server-side proxy — data-plane apikey never reaches
+        // the browser; /web/runtime-proxy injects it.
+        const region = deployResult.region ?? deployRegion;
+        const apps =
+          (await probeRuntimeApps(deployResult.runtimeId, region, {
+            retryProbe: true,
+          })) ?? [];
+        conn = addRuntimeConnection(
+          deployResult.runtimeId,
+          deployResult.runtimeName,
+          region,
+          apps,
+          apps.length > 0
+            ? { [apps[0]]: deployResult.agentName }
+            : undefined,
+          deployResult.version,
+        );
+      } else {
+        // Legacy: direct URL + apikey (older backends / manual deploys).
+        conn = await addConnection(
+          deployResult.agentName,
+          deployResult.url,
+          deployResult.apikey,
+          "",
+        );
+      }
 
       if (conn.apps.length === 0) {
-        setDeployError("连接成功，但该地址未发现任何 Agent（/list-apps 为空）。");
+        setDeployError(t("projectPreview.errors.noAgentAtEndpoint"));
       } else {
-        // 如果提供了 onAgentAdded 回调，调用它进行导航；否则显示 alert
+        const label = { [conn.apps[0]]: deployResult.agentName };
+        const updatedConn = {
+          ...conn,
+          appLabels: { ...(conn.appLabels ?? {}), ...label },
+        };
+
+        const allConns = loadConnections();
+        const updatedList = allConns.map((c) =>
+          c.id === conn.id ? updatedConn : c,
+        );
+        localStorage.setItem(
+          "veadk_agentkit_connections",
+          JSON.stringify(updatedList),
+        );
+
+        const { registerConnections } = await import("../adk/connections");
+        registerConnections(updatedList);
+
         if (onAgentAdded) {
           const agentId = remoteAppId(conn.id, conn.apps[0]);
-          onAgentAdded(agentId, deployResult.agentName);
+          await onAgentAdded(agentId, deployResult.agentName);
         } else {
-          alert(`🎉 Agent "${deployResult.agentName}" 已添加到左上角下拉列表！`);
+          alert(t("projectPreview.agentAdded", { name: deployResult.agentName }));
         }
       }
     } catch (err) {
       setDeployError(
-        `添加 Agent 失败：${err instanceof Error ? err.message : String(err)}`
+        t("projectPreview.errors.addAgent", {
+          message: err instanceof Error ? err.message : String(err),
+        }),
       );
     } finally {
       setAddingAgent(false);
@@ -310,19 +2153,71 @@ export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: Pr
   }
 
   function handleDownloadZip() {
-    const blob = buildZip(project.files);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${project.name || "project"}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const base = deploymentTelemetryBase();
+    const operation = beginAgentSourceDownload({
+      agentId: base.agentId,
+      deployAction: base.deployAction,
+      deploySource: base.deploySource,
+      createMode: base.createMode,
+      aiAssisted: base.aiAssisted,
+    });
+    try {
+      const blob = buildZip(project.files);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${project.name || "project"}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      operation.succeed({
+        fileCount: project.files.length,
+        zipSizeBytes: blob.size,
+      });
+    } catch (error) {
+      operation.fail({
+        fileCount: project.files.length,
+        ...classifyTelemetryError(error),
+      });
+      throw error;
+    }
   }
 
+  const artifactActions = (
+    <div
+      className={`pp-artifact-actions${embedded ? " is-rail" : ""}`}
+      aria-label={t("projectPreview.artifactActions")}
+    >
+      {onExportYaml && (
+        <button type="button" className="pp-secondary" onClick={onExportYaml}>
+          <FileDown className="pp-ic" />
+          {t("projectPreview.exportYaml")}
+        </button>
+      )}
+      {editable && onChange && (
+        <ProjectCodeBrowser
+          project={project}
+          onChange={onChange}
+          className="pp-artifact-source"
+          label={t("projectPreview.viewSource")}
+        />
+      )}
+      {project.files.length > 0 && (
+        <button
+          type="button"
+          className="pp-secondary"
+          onClick={handleDownloadZip}
+        >
+          <Download className="pp-ic" />
+          {t("projectPreview.downloadSource")}
+        </button>
+      )}
+    </div>
+  );
+
   function renderNode(node: TreeNode, depth: number, prefix: string) {
-    return sortedChildren(node).map((child) => {
+    return sortedChildren(node, depth === 0).map((child) => {
       const key = prefix ? `${prefix}/${child.name}` : child.name;
       const isFile = child.path !== undefined;
       const pad = { paddingLeft: 8 + depth * 14 };
@@ -364,196 +2259,1176 @@ export function ProjectPreview({ project, onChange, onDeploy, onAgentAdded }: Pr
   }
 
   return (
-    <div className="pp-root">
-      <div className="pp-sidebar">
-        <div className="pp-sidebar-head">
-          <span className="pp-project-name" title={project.name}>
-            {project.name || "Project"}
-          </span>
-          {editable && (
-            <button
-              type="button"
-              className="pp-icon-btn"
-              title="新建文件"
-              onClick={() => {
-                setAdding(true);
-                setNewPath("");
-              }}
-            >
-              <FilePlus className="pp-ic" />
-            </button>
-          )}
-        </div>
+    <div className={`pp-root${onDeploy ? " is-deploy" : ""}${embedded ? " is-embedded" : ""}${deploymentPrimaryPane ? " has-primary-pane" : ""}`}>
+      {onDeploy && !embedded && (
+        <ProjectHeaderPortal
+          left={
+            <div className="pp-toolbar-left">
+              {onBack && (
+                <button type="button" className="pp-toolbar-back" onClick={onBack}>
+                  <ArrowLeft className="pp-ic" />
+                  {backLabel}
+                </button>
+              )}
+              <span className="pp-toolbar-title">
+                {t("projectPreview.deployTitle", {
+                  name: agentName || project.name || t("projectPreview.unnamedAgent"),
+                })}
+                {agentCount && agentCount > 1
+                  ? t("projectPreview.additionalAgentCount", { count: agentCount })
+                  : ""}
+              </span>
+            </div>
+          }
+          right={null}
+        />
+      )}
 
-        <div className="pp-tree">
-          {adding && (
-            <input
-              className="pp-new-input"
-              autoFocus
-              placeholder="path/to/file.py"
-              value={newPath}
-              onChange={(e) => setNewPath(e.target.value)}
-              onBlur={handleAddSubmit}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleAddSubmit();
-                if (e.key === "Escape") {
-                  setAdding(false);
-                  setNewPath("");
-                }
-              }}
-            />
-          )}
-          {project.files.length === 0 && !adding ? (
-            <div className="pp-empty">暂无文件</div>
-          ) : (
-            renderNode(tree, 0, "")
-          )}
-        </div>
-      </div>
-
-      <div className="pp-main">
-        <div className="pp-main-head">
-          <span className="pp-path" title={selectedFile?.path}>
-            {selectedFile?.path ?? "未选择文件"}
-          </span>
-          <div className="pp-actions">
-            {editable && selectedFile && (
-              <>
+      <div className="pp-body">
+        {onDeploy && !deploymentPrimaryPane && (
+          <section className="pp-release-overview" aria-label={t("projectPreview.releaseOverview")}>
+            <div className={`pp-release-preview${embedded ? " is-embedded" : ""}`}>
+              <div className="pp-flow-thumbnail">
+                {agentDraft && (
+                  <AgentBuildCanvas
+                    draft={agentDraft}
+                    direction="horizontal"
+                    selectedPath={[]}
+                    onSelect={ignoreCanvasAction}
+                    onAdd={ignoreCanvasAction}
+                    onInsert={ignoreCanvasAction}
+                    onDelete={ignoreCanvasAction}
+                    readOnly
+                    interactivePreview
+                  />
+                )}
+                <button
+                  type="button"
+                  className="pp-flow-expand"
+                  onClick={() => setFlowPreviewOpen(true)}
+                  aria-label={t("projectPreview.expandFlow")}
+                  title={t("projectPreview.expand")}
+                >
+                  <Maximize2 aria-hidden />
+                </button>
+              </div>
+              {embedded && artifactActions}
+              {!embedded && (
+                <div className="pp-release-info">
+                <div className="pp-release-card-head">{t("projectPreview.agentOverview")}</div>
+                <div className="pp-release-info-body">
+                  <div className="pp-release-info-main">
+                    <h2>{agentName || project.name || t("projectPreview.unnamedAgent")}</h2>
+                    {agentDraft?.description && (
+                      <p
+                        className="pp-release-description"
+                        title={agentDraft.description}
+                      >
+                        {agentDraft.description}
+                      </p>
+                    )}
+                    <dl className="pp-release-facts">
+                    <div>
+                      <dt>{t("projectPreview.agentCount")}</dt>
+                      <dd>{agentCount ?? 1}</dd>
+                    </div>
+                    {releaseConfiguration && (
+                      <>
+                        <div>
+                          <dt>{t("projectPreview.model")}</dt>
+                          <dd>{releaseConfiguration.modelName}</dd>
+                        </div>
+                        <div>
+                          <dt>{t("common.description")}</dt>
+                          <dd className="pp-release-fact-long">
+                            {releaseConfiguration.description}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t("projectPreview.systemPrompt")}</dt>
+                          <dd className="pp-release-fact-long pp-release-prompt">
+                            {releaseConfiguration.instruction}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t("projectPreview.optimizations")}</dt>
+                          <dd>
+                            {releaseConfiguration.optimizations.length > 0
+                              ? releaseConfiguration.optimizations.join(t("environmentCenter.listSeparator"))
+                              : t("projectPreview.notEnabled")}
+                          </dd>
+                        </div>
+                        {releaseConfiguration.effectiveOptimizations &&
+                          releaseConfiguration.effectiveOptimizations.length > 0 && (
+                            <div>
+                              <dt>{t("projectPreview.effectiveCapabilities")}</dt>
+                              <dd>
+                                {releaseConfiguration.effectiveOptimizations.join(t("environmentCenter.listSeparator"))}
+                              </dd>
+                            </div>
+                          )}
+                        {releaseConfiguration.autoAddedOptimizations &&
+                          releaseConfiguration.autoAddedOptimizations.length > 0 && (
+                            <div>
+                              <dt>{t("projectPreview.automaticProtection")}</dt>
+                              <dd>
+                                {releaseConfiguration.autoAddedOptimizations.join(t("environmentCenter.listSeparator"))}
+                              </dd>
+                            </div>
+                          )}
+                        {releaseConfiguration.planHash && (
+                          <div>
+                            <dt>{t("projectPreview.planHash")}</dt>
+                            <dd className="pp-release-fact-long">
+                              {releaseConfiguration.planHash}
+                            </dd>
+                          </div>
+                        )}
+                      </>
+                    )}
+                    </dl>
+                  </div>
+                  {artifactActions}
+                </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+        <div className="pp-files-area">
+          <div className="pp-sidebar">
+            <div className="pp-sidebar-head">
+              <span className="pp-project-name" title={project.name}>
+                {t("projectPreview.files.preview")}
+              </span>
+              {editable && (
                 <button
                   type="button"
                   className="pp-icon-btn"
-                  title="重命名"
-                  onClick={handleRename}
+                  title={t("projectPreview.files.new")}
+                  onClick={() => {
+                    setAdding(true);
+                    setNewPath("");
+                  }}
                 >
-                  <Pencil className="pp-ic" />
+                  <FilePlus className="pp-ic" />
                 </button>
-                <button
-                  type="button"
-                  className="pp-icon-btn pp-danger"
-                  title="删除"
-                  onClick={handleDelete}
-                >
-                  <Trash2 className="pp-ic" />
-                </button>
-              </>
-            )}
-            {project.files.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  className="pp-secondary"
-                  title="测试运行"
-                  onClick={() => setTesting(true)}
-                  disabled={testing}
-                >
-                  <Play className="pp-ic" />
-                  测试运行
-                </button>
-                <button
-                  type="button"
-                  className="pp-secondary"
-                  title="下载 ZIP"
-                  onClick={handleDownloadZip}
-                >
-                  <Download className="pp-ic" />
-                  下载 ZIP
-                </button>
-              </>
-            )}
-            {onDeploy && (
-              <button
-                type="button"
-                className="pp-deploy"
-                onClick={handleDeploy}
-                disabled={deploying}
-              >
-                {deploying ? (
-                  <Loader2 className="pp-ic spin" />
-                ) : (
-                  <Rocket className="pp-ic" />
+              )}
+            </div>
+            <div className="pp-tree">
+              {adding && (
+                <input
+                  className="pp-new-input"
+                  autoFocus
+                  placeholder="path/to/file.py"
+                  value={newPath}
+                  onChange={(e) => setNewPath(e.target.value)}
+                  onBlur={handleAddSubmit}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddSubmit();
+                    if (e.key === "Escape") {
+                      setAdding(false);
+                      setNewPath("");
+                    }
+                  }}
+                />
+              )}
+              {project.files.length === 0 && !adding ? (
+                <div className="pp-empty">{t("projectPreview.files.empty")}</div>
+              ) : (
+                renderNode(tree, 0, "")
+              )}
+            </div>
+          </div>
+
+          <div className="pp-main">
+            <div className="pp-main-head">
+              <span className="pp-path" title={selectedFile?.path}>
+                {selectedFile?.path ?? t("projectPreview.files.noneSelected")}
+              </span>
+              <div className="pp-actions">
+                {editable && selectedFile && (
+                  <>
+                    <button
+                      type="button"
+                      className="pp-icon-btn"
+                      title={t("projectPreview.files.rename")}
+                      onClick={handleRename}
+                    >
+                      <Pencil className="pp-ic" />
+                    </button>
+                    <button
+                      type="button"
+                      className="pp-icon-btn pp-danger"
+                      title={t("common.delete")}
+                      onClick={handleDelete}
+                    >
+                      <Trash2 className="pp-ic" />
+                    </button>
+                  </>
                 )}
-                部署到 AgentKit
-              </button>
-            )}
-          </div>
-        </div>
-
-        {deployError && <div className="pp-error">{deployError}</div>}
-
-        {deployResult && (
-          <div className="pp-deploy-result">
-            <div className="pp-deploy-result-header">
-              <span className="pp-deploy-result-icon">🎉</span>
-              <span>部署成功！</span>
-            </div>
-            <div className="pp-deploy-result-body">
-              <div className="pp-deploy-result-field">
-                <label>Agent 名称</label>
-                <code>{deployResult.agentName}</code>
-              </div>
-              <div className="pp-deploy-result-field">
-                <label>API 端点</label>
-                <code className="pp-deploy-result-url">{deployResult.url}</code>
-              </div>
-              <div className="pp-deploy-result-field">
-                <label>API Key 名称</label>
-                <code>{deployResult.apikey}</code>
               </div>
             </div>
-            <button
-              type="button"
-              className="pp-deploy-result-btn"
-              onClick={handleAddAgent}
-              disabled={addingAgent}
-            >
-              {addingAgent ? <Loader2 className="pp-ic spin" /> : null}
-              {addingAgent ? "连接中…" : "添加此 Agent"}
-            </button>
-          </div>
-        )}
-
-        <div className="pp-content">
-          {testing ? (
-            <AgentTest
-              projectName={project.name}
-              files={project.files}
-              onClose={() => setTesting(false)}
-            />
-          ) : selectedFile == null ? (
-            <div className="pp-placeholder">选择左侧文件以查看内容</div>
-          ) : editable ? (
-            <div className="pp-editor-wrap">
-              <pre className="pp-hl hljs" aria-hidden="true" ref={underlayRef}>
-                <code
+            <div className="pp-content">
+              {selectedFile == null ? (
+                <div className="pp-placeholder">{t("projectPreview.files.selectToView")}</div>
+              ) : editable ? (
+                <div className="pp-codemirror">
+                  <Suspense fallback={<div className="pp-editor-loading">{t("projectPreview.files.loadingEditor")}</div>}>
+                    <CodeEditor
+                      value={selectedFile.content}
+                      path={selectedFile.path}
+                      onChange={handleEdit}
+                    />
+                  </Suspense>
+                </div>
+              ) : (
+                <pre
+                  className="pp-pre hljs"
                   dangerouslySetInnerHTML={{
                     __html: highlight(selectedFile.content, selectedFile.path),
                   }}
                 />
-              </pre>
-              <textarea
-                className="pp-input"
-                spellCheck={false}
-                value={selectedFile.content}
-                onChange={(e) => handleEdit(e.target.value)}
-                onScroll={(e) => {
-                  const el = underlayRef.current;
-                  if (!el) return;
-                  el.scrollTop = e.currentTarget.scrollTop;
-                  el.scrollLeft = e.currentTarget.scrollLeft;
-                }}
-              />
+              )}
             </div>
-          ) : (
-            <pre className="pp-pre hljs">
-              <code
-                dangerouslySetInnerHTML={{
-                  __html: highlight(selectedFile.content, selectedFile.path),
-                }}
-              />
-            </pre>
-          )}
+          </div>
         </div>
+
+        {onDeploy && (
+          <aside className="pp-config" aria-label={t("projectPreview.deploymentConfiguration")}>
+            <div className="pp-config-head">
+              <div className="pp-config-title">{t("projectPreview.deploymentConfiguration")}</div>
+            </div>
+            <div className="pp-config-scroll">
+              {deploymentPrimaryPane}
+
+              {!deploymentPrimaryPane && (
+                <section className="pp-config-section">
+                  <label className="pp-config-label" htmlFor={runtimeNameInputId}>
+                    {t("projectPreview.runtimeName")}
+                  </label>
+                  <div className="pp-runtime-name-field">
+                    <input
+                      id={runtimeNameInputId}
+                      className="pp-runtime-name-input"
+                      value={effectiveRuntimeName}
+                      disabled={deploying || runtimeNameChecking || isRuntimeUpdate}
+                      maxLength={64}
+                      autoComplete="off"
+                      aria-label={t("projectPreview.runtimeName")}
+                      aria-invalid={Boolean(runtimeNameError)}
+                      aria-describedby={`${runtimeNameHelpId}${runtimeNameError ? ` ${runtimeNameErrorId}` : ""}`}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setRuntimeNameConflict(null);
+                        setDeployError(null);
+                        if (onDeploymentRuntimeNameChange) {
+                          onDeploymentRuntimeNameChange(value);
+                        } else {
+                          setUncontrolledRuntimeName(value);
+                        }
+                      }}
+                    />
+                    <p id={runtimeNameHelpId} className="pp-config-note">
+                      {isRuntimeUpdate
+                        ? t("projectPreview.runtimeNamePreserved")
+                        : t("projectPreview.runtimeNameHint")}
+                    </p>
+                    {runtimeNameError && (
+                      <p
+                        id={runtimeNameErrorId}
+                        className="pp-runtime-name-error"
+                        role="alert"
+                      >
+                        {runtimeNameError}
+                      </p>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {!deploymentPrimaryPane && (
+                <section className="pp-config-section">
+                  <div className="pp-config-label">{t("projectPreview.releaseRegion")}</div>
+                  {deploymentRegionPicker(false)}
+                </section>
+              )}
+
+              {!deploymentPrimaryPane && (
+                <>
+                <section className="pp-config-section pp-auth-section">
+                  <div className="pp-config-label">{t("projectPreview.accessAuthentication")}</div>
+                  {isRuntimeUpdate ? (
+                    <p className="pp-config-note pp-auth-preserved-note">
+                      {t("projectPreview.authenticationPreserved")}
+                    </p>
+                  ) : (
+                    <div className="pp-auth-fields">
+                      <label>
+                        <span>{t("projectPreview.authenticationMethod")}</span>
+                        <DeploymentSelect
+                          ariaLabel={t("projectPreview.authenticationAriaLabel")}
+                          value={authenticationType}
+                          placeholder={t("projectPreview.authenticationPlaceholder")}
+                          options={deploymentAuthenticationOptions(t)}
+                          disabled={deploying}
+                          onChange={(value) => {
+                            setDeployError(null);
+                            setAuthenticationType(
+                              value as DeployAuthentication["type"],
+                            );
+                          }}
+                        />
+                      </label>
+                      {authenticationType === "user_pool" && (
+                        <label>
+                          <span>{t("projectPreview.userPool.label")}</span>
+                          <IdentityUserPoolSelect
+                            value={userPoolUid}
+                            disabled={deploying}
+                            onChange={(uid) => {
+                              setDeployError(null);
+                              setUserPoolUid(uid);
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
+                </section>
+                {showGitSync && <GithubCicdPanel
+                  project={project}
+                  region={deployRegion}
+                  cloudProvider={cloudProvider}
+                  runtimeId={deploymentRuntimeId}
+                  binding={githubCicdBinding}
+                  showSetup={!isRuntimeUpdate}
+                  onPendingCicdChange={setPendingGithubCicd}
+                  onBindingChange={handleGithubCicdBindingChange}
+                  disabled={
+                    deploying ||
+                    feishuUpdating ||
+                    deployDisabled ||
+                    !!deployDisabledReason
+                  }
+                />}
+                </>
+              )}
+
+              {!deploymentPrimaryPane && showMessageChannels && (
+                <section className="pp-config-section">
+                <div className="pp-config-label">{t("projectPreview.messageChannels")}</div>
+                <FeishuDeploymentCard
+                  enabled={feishuEnabled}
+                  updating={feishuUpdating}
+                  disabled={
+                    deploying ||
+                    runtimeNameChecking ||
+                    !onFeishuEnabledChange ||
+                    !onFeishuCredentialsChange
+                  }
+                  agentName={agentName || project.name}
+                  appId={deploymentEnvValues.FEISHU_APP_ID ?? ""}
+                  appSecret={deploymentEnvValues.FEISHU_APP_SECRET ?? ""}
+                  appIdConfigured={configuredRuntimeEnvKeySet.has(
+                    "FEISHU_APP_ID",
+                  )}
+                  appSecretConfigured={configuredRuntimeEnvKeySet.has(
+                    "FEISHU_APP_SECRET",
+                  )}
+                  onToggle={handleFeishuToggle}
+                  onCredentialsChange={(appId, appSecret) => {
+                    onFeishuCredentialsChange?.(appId, appSecret);
+                  }}
+                />
+              </section>
+              )}
+
+              {!isRuntimeUpdate && (
+                <section className="pp-config-section">
+                  <div className="pp-config-label">{t("projectPreview.instanceSettings")}</div>
+                  <div className="pp-instance-fields">
+                    <label htmlFor="runtime-min-instance">
+                      <span>{t("projectPreview.minInstances")}</span>
+                      <input
+                        id="runtime-min-instance"
+                        type="number"
+                        min="0"
+                        step="1"
+                        inputMode="numeric"
+                        value={minInstance}
+                        disabled={deploying || sidecarEnabled}
+                        aria-invalid={!instanceRange.valid}
+                        onChange={(event) => setMinInstance(event.currentTarget.value)}
+                      />
+                    </label>
+                    <label htmlFor="runtime-max-instance">
+                      <span>{t("projectPreview.maxInstances")}</span>
+                      <input
+                        id="runtime-max-instance"
+                        type="number"
+                        min="1"
+                        step="1"
+                        inputMode="numeric"
+                        value={maxInstance}
+                        disabled={deploying || sidecarEnabled}
+                        aria-invalid={!instanceRange.valid}
+                        onChange={(event) => setMaxInstance(event.currentTarget.value)}
+                      />
+                    </label>
+                  </div>
+                  {(inMemorySession || sidecarEnabled) && (
+                    <p className="pp-instance-note" role="note">
+                      {sidecarEnabled
+                        ? t("projectPreview.sidecarSingleInstance")
+                        : t("projectPreview.inMemorySingleInstance")}
+                    </p>
+                  )}
+                  {!instanceRange.valid && (
+                    <p className="pp-instance-error" role="alert">
+                      {instanceRange.error}
+                    </p>
+                  )}
+                </section>
+              )}
+
+              <section className="pp-config-section">
+                <div className="pp-config-label">{t("projectPreview.network")}</div>
+                {deploymentPrimaryPane && deploymentRegionPicker(true)}
+                {isRuntimeUpdate && (
+                  <p className="pp-config-note">{t("projectPreview.networkPreserved")}</p>
+                )}
+                <div className="pp-network-layout">
+                  <div className="pp-network-modes" role="radiogroup" aria-label={t("projectPreview.networkMode")}>
+                    {(["public", "private", "both"] as const).map((mode) => (
+                      <label className="pp-network-option" key={mode}>
+                        <input
+                          type="radio"
+                          name="deployment-network-mode"
+                          value={mode}
+                          checked={networkMode === mode}
+                          onChange={() => setNetworkMode(mode)}
+                          disabled={deploying || isRuntimeUpdate || !onNetworkChange}
+                        />
+                        <span>
+                          {mode === "public"
+                            ? t("projectPreview.networkModes.public")
+                            : mode === "private"
+                              ? "VPC"
+                              : t("projectPreview.networkModes.both")}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {networkMode !== "public" && (
+                    <div className="pp-network-fields">
+                      <label>
+                        <span>VPC ID</span>
+                        <input
+                          value={network?.vpcId ?? ""}
+                          placeholder="vpc-xxxxxxxx"
+                          disabled={deploying || isRuntimeUpdate}
+                          onChange={(e) => patchNetwork({ vpcId: e.target.value })}
+                        />
+                      </label>
+                      <label>
+                        <span>{t("projectPreview.subnetId")} <small>{t("projectPreview.subnetHint")}</small></span>
+                        <input
+                          value={network?.subnetIds ?? ""}
+                          placeholder="subnet-xxx, subnet-yyy"
+                          disabled={deploying || isRuntimeUpdate}
+                          onChange={(e) => patchNetwork({ subnetIds: e.target.value })}
+                        />
+                      </label>
+                      <label className="pp-network-check">
+                        <input
+                          type="checkbox"
+                          checked={!!network?.enableSharedInternetAccess}
+                          disabled={deploying || isRuntimeUpdate}
+                          onChange={(e) =>
+                            patchNetwork({ enableSharedInternetAccess: e.target.checked })
+                          }
+                        />
+                        {t("projectPreview.sharedInternetAccess")}
+                      </label>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {supportsEvaluationSets && (
+                <section className="pp-config-section">
+                  <div className="pp-config-label">{t("projectPreview.evaluationSets")}</div>
+                  <label className="pp-evaluation-set-option">
+                    <input
+                      type="checkbox"
+                      checked={createEvaluationSets}
+                      disabled={deploying}
+                      onChange={(event) =>
+                        setCreateEvaluationSets(event.currentTarget.checked)
+                      }
+                    />
+                    <span>
+                      <strong>{t("projectPreview.createEvaluationSets")}</strong>
+                      <small>
+                        {t("projectPreview.createEvaluationSetsHint")}
+                      </small>
+                    </span>
+                  </label>
+                </section>
+              )}
+
+              {!isRuntimeUpdate && (
+                <section className="pp-config-section pp-resource-section">
+                  <div className="pp-config-label">{t("projectPreview.resourceConfiguration")}</div>
+                  <DeploymentResources
+                    value={deployResources}
+                    agentName={agentName || project.name || "agentkit-app"}
+                    runtimeName={effectiveRuntimeName}
+                    region={deployRegion}
+                    disabled={deploying}
+                    validationError={deployResourcesValidationError}
+                    onChange={(resources) => {
+                      setDeployResources(resources);
+                      setDeployResourcesValidationError(null);
+                    }}
+                  />
+                </section>
+              )}
+
+              <section className="pp-config-section pp-env-section">
+                <div className="pp-env-head">
+                  <div>
+                    <div className="pp-config-label">
+                      {t("projectPreview.environmentVariables")}
+                      <span className="pp-agent-child-count pp-env-count">
+                        {t("projectPreview.itemCount", { count: environmentVariableCount })}
+                      </span>
+                    </div>
+                    <div className="pp-env-sub">
+                      {t("projectPreview.environmentVariablesHint")}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="pp-env-add"
+                  onClick={addEnvRow}
+                  disabled={deploying}
+                >
+                  <Plus className="pp-ic" />
+                  {t("projectPreview.addVariable")}
+                </button>
+                {(automaticEnvRows.length > 0 ||
+                  requiredSecretEnv.length > 0 ||
+                  envRows.length > 0) && (
+                  <div className="pp-env-table">
+                    {automaticEnvRows.length > 0 && (
+                      <div className="pp-env-group">
+                        <div className="pp-env-group-head">
+                          <span>{t("projectPreview.componentGenerated")}</span>
+                          <small>{t("projectPreview.itemCount", { count: automaticEnvRows.length })}</small>
+                        </div>
+                        {automaticEnvRows.map((row) => {
+                          const fixed =
+                            row.readOnly || row.key.startsWith("ENABLE_");
+                          const serverManagedModelApiKey =
+                            row.serverManaged &&
+                            row.key === "MODEL_AGENT_API_KEY";
+                          const displayedValue = serverManagedModelApiKey
+                            ? modelApiKeyRevealVisible
+                              ? currentModelApiKeyRevealState.value
+                              : t("projectPreview.injectedByApiKey")
+                            : row.value;
+                          const jsonError = runtimeEnvJsonError(
+                            row,
+                            deploymentEnvValues,
+                          );
+                          const fieldError = deploymentEnvErrors[row.key];
+                          const errorId = `deployment-env-${row.key.toLowerCase()}-error`;
+                          const helpText =
+                            runtimeEnvRequirementHint(row) ||
+                            row.help ||
+                            row.comment;
+                          const multiline = row.multiline || row.format === "json";
+                          return (
+                            <div
+                              className={`pp-env-row pp-env-row-derived${multiline ? " is-multiline" : ""}`}
+                              key={row.key}
+                            >
+                              <div
+                                className="pp-env-key-fixed pp-env-key-cell"
+                                aria-label={t("projectPreview.envNameAriaLabel", { key: row.key })}
+                                aria-disabled={deploying}
+                              >
+                                <span title={row.key}>{row.key}</span>
+                                {helpText && (
+                                  <span
+                                    className="pp-env-help"
+                                    tabIndex={0}
+                                    data-help={helpText}
+                                    aria-label={t("projectPreview.envDescriptionAriaLabel", { key: row.key, description: helpText })}
+                                  >
+                                    ?
+                                    <span className="pp-env-help-popover" role="tooltip">
+                                      {helpText}
+                                    </span>
+                                  </span>
+                                )}
+                                {row.link && (
+                                  <a
+                                    className="pp-env-link"
+                                    href={row.link.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title={t("projectPreview.openOpenViking", { label: row.link.label })}
+                                    aria-label={t("projectPreview.openOpenVikingAriaLabel", { key: row.key, label: row.link.label })}
+                                  >
+                                    <ExternalLink aria-hidden="true" />
+                                  </a>
+                                )}
+                              </div>
+                              <div className="pp-env-value-wrap">
+                                {multiline ? (
+                                  <textarea
+                                    ref={(element) => {
+                                      if (element) {
+                                        deploymentEnvInputRefs.current.set(
+                                          row.key,
+                                          element,
+                                        );
+                                      } else {
+                                        deploymentEnvInputRefs.current.delete(row.key);
+                                      }
+                                    }}
+                                    className="pp-env-value pp-env-json-value"
+                                    value={row.value}
+                                    placeholder={
+                                      row.placeholder ||
+                                      (row.required
+                                        ? t("projectPreview.requiredEmpty")
+                                        : t("projectPreview.optionalEmpty"))
+                                    }
+                                    readOnly={fixed}
+                                    disabled={
+                                      deploying || (!fixed && !onDeploymentEnvChange)
+                                    }
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    aria-invalid={Boolean(fieldError || jsonError)}
+                                    aria-describedby={
+                                      fieldError ? errorId : undefined
+                                    }
+                                    aria-label={t("projectPreview.envValueAriaLabel", { key: row.key })}
+                                    onChange={(event) => {
+                                      const value = event.currentTarget.value;
+                                      onDeploymentEnvChange?.(
+                                        row.key,
+                                        value,
+                                      );
+                                      if (fieldError && value.trim()) {
+                                        clearDeploymentEnvError(row.key);
+                                        setDeployError(null);
+                                      }
+                                    }}
+                                  />
+                                ) : (
+                                  <div
+                                    className={
+                                      serverManagedModelApiKey
+                                        ? "pp-env-secret-control"
+                                        : undefined
+                                    }
+                                  >
+                                    <input
+                                      ref={(element) => {
+                                        if (element) {
+                                          deploymentEnvInputRefs.current.set(
+                                            row.key,
+                                            element,
+                                          );
+                                        } else {
+                                          deploymentEnvInputRefs.current.delete(
+                                            row.key,
+                                          );
+                                        }
+                                      }}
+                                      className="pp-env-value"
+                                      type={
+                                        serverManagedModelApiKey
+                                          ? "text"
+                                          : row.secret
+                                            ? "password"
+                                            : "text"
+                                      }
+                                      value={displayedValue}
+                                      placeholder={
+                                        row.placeholder ||
+                                        (row.required
+                                          ? t("projectPreview.requiredEmpty")
+                                          : t("projectPreview.optionalEmpty"))
+                                      }
+                                      readOnly={fixed}
+                                      disabled={
+                                        deploying ||
+                                        (!fixed && !onDeploymentEnvChange)
+                                      }
+                                      autoComplete={
+                                        row.secret ? "new-password" : "off"
+                                      }
+                                      spellCheck={row.secret ? false : undefined}
+                                      aria-invalid={Boolean(fieldError || jsonError)}
+                                      aria-describedby={
+                                        fieldError ? errorId : undefined
+                                      }
+                                      aria-label={t("projectPreview.envValueAriaLabel", { key: row.key })}
+                                      onChange={(event) => {
+                                        const value = event.currentTarget.value;
+                                        onDeploymentEnvChange?.(
+                                          row.key,
+                                          value,
+                                        );
+                                        if (fieldError && value.trim()) {
+                                          clearDeploymentEnvError(row.key);
+                                          setDeployError(null);
+                                        }
+                                      }}
+                                    />
+                                    {serverManagedModelApiKey && (
+                                      <button
+                                        type="button"
+                                        className="pp-env-secret-toggle"
+                                        aria-label={modelApiKeyRevealLabel}
+                                        title={modelApiKeyRevealLabel}
+                                        aria-pressed={modelApiKeyRevealVisible}
+                                        disabled={
+                                          currentModelApiKeyRevealState.status ===
+                                            "loading" || !selectedModelApiKeyId
+                                        }
+                                        onClick={() => {
+                                          if (modelApiKeyRevealVisible) {
+                                            clearModelApiKeyReveal();
+                                          } else {
+                                            void revealSelectedModelApiKey();
+                                          }
+                                        }}
+                                      >
+                                        {currentModelApiKeyRevealState.status ===
+                                        "loading" ? (
+                                          <Loader2
+                                            className="pp-env-secret-spinner"
+                                            aria-hidden="true"
+                                          />
+                                        ) : modelApiKeyRevealVisible ? (
+                                          <ModelApiKeyEyeOffIcon />
+                                        ) : (
+                                          <ModelApiKeyEyeIcon />
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                                {fieldError && (
+                                  <span
+                                    id={errorId}
+                                    className="pp-env-error"
+                                    role="alert"
+                                  >
+                                    {fieldError}
+                                  </span>
+                                )}
+                                {jsonError && (
+                                  <span className="pp-env-error">{jsonError}</span>
+                                )}
+                                {serverManagedModelApiKey &&
+                                  currentModelApiKeyRevealState.status ===
+                                    "error" && (
+                                    <span
+                                      className="pp-env-reveal-error"
+                                      role="alert"
+                                    >
+                                      {currentModelApiKeyRevealState.error}
+                                    </span>
+                                  )}
+                              </div>
+                              <span className="pp-env-source">
+                                {fixed ? t("projectPreview.automatic") : t("projectPreview.synced")}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {requiredSecretEnv.length > 0 && (
+                      <div className="pp-env-group">
+                        <div className="pp-env-group-head">
+                          <span>{t("projectPreview.customModelCredentials")}</span>
+                          <small>{t("projectPreview.itemCount", { count: requiredSecretEnv.length })}</small>
+                        </div>
+                        {requiredSecretEnv.map((env) => {
+                          const invalid = secretEnvErrorKey === env.key;
+                          const errorId = `${env.key.toLowerCase()}-error`;
+                          const value = effectiveSecretEnvValues[env.key] ?? "";
+                          const configuredSecret =
+                            configuredRuntimeEnvKeySet.has(env.key);
+                          return (
+                            <div
+                              className="pp-env-row pp-env-row-derived"
+                              key={env.key}
+                            >
+                              <label
+                                className="pp-env-key-fixed pp-env-key-cell"
+                                htmlFor={env.key}
+                                title={env.label}
+                              >
+                                <span>{env.key}</span>
+                              </label>
+                              <div className="pp-env-value-wrap">
+                                <input
+                                  id={env.key}
+                                  className="pp-env-value"
+                                  type="password"
+                                  value={value}
+                                  placeholder={
+                                    configuredSecret && !value
+                                      ? "••••••"
+                                      : t("projectPreview.releaseOnlySecret")
+                                  }
+                                  disabled={deploying}
+                                  autoComplete="new-password"
+                                  spellCheck={false}
+                                  aria-invalid={invalid}
+                                  aria-describedby={invalid ? errorId : undefined}
+                                  aria-label={env.label}
+                                  onChange={(event) => {
+                                    const value = event.currentTarget.value;
+                                    if (onRequiredSecretEnvChange) {
+                                      onRequiredSecretEnvChange(env.key, value);
+                                    } else {
+                                      setSecretEnvValues((current) => ({
+                                        ...current,
+                                        [env.key]: value,
+                                      }));
+                                    }
+                                    if (invalid && value.trim()) {
+                                      setSecretEnvErrorKey(null);
+                                      setDeployError(null);
+                                    }
+                                  }}
+                                />
+                                {invalid && (
+                                  <span
+                                    id={errorId}
+                                    className="pp-env-error"
+                                    role="alert"
+                                  >
+                                    {t("projectPreview.errors.modelApiKeyRequired")}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="pp-env-source">
+                                {configuredSecret && !value.trim()
+                                  ? t("projectPreview.synced")
+                                  : t("projectPreview.thisRelease")}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {envRows.length > 0 && (
+                      <div className="pp-env-group-head pp-env-group-head-custom">
+                        <span>{t("projectPreview.customVariables")}</span>
+                        <small>{t("projectPreview.itemCount", { count: envRows.length })}</small>
+                      </div>
+                    )}
+                    {envRows.map((row) => (
+                      <div className="pp-env-row" key={row.id}>
+                        <input
+                          value={row.key}
+                          placeholder={t("common.name")}
+                          disabled={deploying}
+                          autoComplete="off"
+                          onChange={(e) => updateEnvRow(row.id, { key: e.currentTarget.value })}
+                        />
+                        <input
+                          type="text"
+                          value={row.value}
+                          placeholder={t("projectPreview.value")}
+                          disabled={deploying}
+                          autoComplete="off"
+                          onChange={(e) => updateEnvRow(row.id, { value: e.currentTarget.value })}
+                        />
+                        <button
+                          type="button"
+                          className="pp-icon-btn pp-env-remove"
+                          title={t("projectPreview.deleteVariable")}
+                          disabled={deploying}
+                          onClick={() => removeEnvRow(row.id)}
+                        >
+                          <X className="pp-ic" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              {(deploying || deployResult || Object.keys(stageMap).length > 0) && (
+                <section className="pp-config-section pp-progress-section">
+                  <div className="pp-config-label">{t("projectPreview.deploymentProgress")}</div>
+                  <ol className="pp-steps">
+                    {deploymentSteps.map((step, index) => {
+                      const activeIndex = activePhase
+                        ? deploymentSteps.findIndex((item) => item.phase === activePhase)
+                        : -1;
+                      const failed =
+                        !!deployError &&
+                        (activeIndex === -1 ? index === 0 : index === activeIndex);
+                      const frame = stageMap[step.phase];
+                      let status: "pending" | "active" | "done" | "failed";
+                      if (deployResult || frame?.level === "success") status = "done";
+                      else if (failed) status = "failed";
+                      else if (activeIndex === -1) status = deploying ? "active" : "pending";
+                      else if (index < activeIndex) status = "done";
+                      else if (index === activeIndex) status = deployError ? "failed" : "active";
+                      else status = "pending";
+                      return (
+                        <li key={step.phase} className={`pp-step is-${status}`}>
+                          <span className="pp-step-dot">
+                            {status === "active" ? (
+                              <Loader2 className="pp-ic spin" />
+                            ) : status === "done" ? (
+                              "✓"
+                            ) : status === "failed" ? (
+                              "✕"
+                            ) : (
+                              index + 1
+                            )}
+                          </span>
+                          <span className="pp-step-body">
+                            <span className="pp-step-label">{step.label}</span>
+                            {status === "active" && frame?.message && (
+                              <span className="pp-step-msg">
+                                {localizeDeployStageMessage(frame)}
+                                {typeof frame.pct === "number" ? ` (${frame.pct}%)` : ""}
+                              </span>
+                            )}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
+              )}
+
+              {deployError && (
+                <DeploymentErrorMessage
+                  className="pp-error"
+                  message={
+                    activePhase
+                      ? t("projectPreview.errors.failedAtStage", {
+                          action: isRuntimeUpdate ? t("projectPreview.update") : t("projectPreview.deploy"),
+                          stage: deploymentSteps.find(
+                            (step) => step.phase === activePhase,
+                          )?.label ?? activePhase,
+                          message: deployError,
+                        })
+                      : deployError
+                  }
+                  onRetry={requestDeploymentConfirmation}
+                  retryLabel={
+                    isRuntimeUpdate ? t("projectPreview.retryUpdate") : t("projectPreview.retryDeploy")
+                  }
+                />
+              )}
+
+              {deploymentStatusUnconfirmed && (
+                <div className="pp-status-unconfirmed" role="status">
+                  <strong>{t("projectPreview.task.deploymentStatusUnconfirmed")}</strong>
+                  <span>{t("projectPreview.errors.deploymentStatusUnconfirmed")}</span>
+                </div>
+              )}
+
+              {deployResult && (
+                <section className="pp-deploy-result">
+                  <div className="pp-deploy-result-header">
+                    {isRuntimeUpdate ? t("projectPreview.updateSucceeded") : t("projectPreview.deploySucceeded")}
+                  </div>
+                  <div className="pp-deploy-result-body">
+                    {deployResult.warnings && deployResult.warnings.length > 0 && (
+                      <div className="pp-deploy-result-warning" role="status">
+                        {deployResult.warnings.map((warning) => (
+                          <span key={warning}>{warning}</span>
+                        ))}
+                      </div>
+                    )}
+                    {deployResult.region && (
+                      <div className="pp-deploy-result-field">
+                        <label>{t("projectPreview.region")}</label>
+                        <code>
+                          {formatCloudRegion(deployResult.region, cloudProvider)}
+                        </code>
+                      </div>
+                    )}
+                    <div className="pp-deploy-result-field">
+                      <label>{t("projectPreview.agentName")}</label>
+                      <code>{deployResult.agentName}</code>
+                    </div>
+                    <div className="pp-deploy-result-field">
+                      <label>{t("projectPreview.runtimeName")}</label>
+                      <code>{deployResult.runtimeName}</code>
+                    </div>
+                    <div className="pp-deploy-result-field">
+                      <label>{t("projectPreview.apiEndpoint")}</label>
+                      <code className="pp-deploy-result-url">{deployResult.url}</code>
+                    </div>
+                  </div>
+                  <div className="pp-deploy-result-actions">
+                    <button
+                      type="button"
+                      className="pp-deploy-result-btn"
+                      onClick={handleAddAgent}
+                      disabled={addingAgent}
+                    >
+                      {addingAgent ? (
+                        <Loader2 className="pp-ic spin" />
+                      ) : (
+                        <MessageSquare className="pp-ic" />
+                      )}
+                      {addingAgent ? t("projectPreview.connecting") : t("projectPreview.chatNow")}
+                    </button>
+                    {deployResult.consoleUrl && (
+                      <a
+                        href={deployResult.consoleUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="pp-console-link pp-console-link-btn"
+                      >
+                        <ExternalLink className="pp-ic" />
+                        {t("projectPreview.console")}
+                      </a>
+                    )}
+                  </div>
+                </section>
+              )}
+            </div>
+            <div
+              className={`pp-config-actions${deploymentActionTarget ? " is-external" : ""}`}
+            >
+              {deploymentActionTarget
+                ? createPortal(
+                    <button
+                      type="button"
+                      className="pp-deploy studio-update-action"
+                      onClick={requestDeploymentConfirmation}
+                      disabled={
+                        deploying ||
+                        deploymentStatusUnconfirmed ||
+                        runtimeNameChecking ||
+                        feishuUpdating ||
+                        deployDisabled ||
+                        !!deployDisabledReason ||
+                        Boolean(runtimeNameError)
+                      }
+                      title={deployDisabledReason || runtimeNameError || undefined}
+                    >
+                      {deploying
+                        ? t("projectPreview.actionInProgress", { action: deploymentActionLabel })
+                        : deploymentStatusUnconfirmed
+                          ? t("projectPreview.task.deploymentStatusUnconfirmed")
+                          : runtimeNameChecking
+                            ? t("projectPreview.checkingName")
+                            : deployError
+                              ? t("projectPreview.retryAction", { action: deploymentActionLabel })
+                              : deploymentActionLabel}
+                    </button>,
+                    deploymentActionTarget,
+                  )
+                : (
+              <button
+                type="button"
+                className="pp-deploy studio-update-action"
+                onClick={requestDeploymentConfirmation}
+                disabled={
+                  deploying ||
+                  deploymentStatusUnconfirmed ||
+                  runtimeNameChecking ||
+                  feishuUpdating ||
+                  deployDisabled ||
+                  !!deployDisabledReason ||
+                  Boolean(runtimeNameError)
+                }
+                title={deployDisabledReason || runtimeNameError || undefined}
+              >
+                {deploying
+                  ? t("projectPreview.actionInProgress", { action: deploymentActionLabel })
+                  : deploymentStatusUnconfirmed
+                    ? t("projectPreview.task.deploymentStatusUnconfirmed")
+                    : runtimeNameChecking
+                      ? t("projectPreview.checkingName")
+                      : deployError
+                        ? t("projectPreview.retryAction", { action: deploymentActionLabel })
+                        : deploymentActionLabel}
+              </button>
+                  )}
+            </div>
+          </aside>
+        )}
       </div>
+      {flowPreviewOpen && agentDraft &&
+        createPortal(
+          <div
+            className="pp-flow-backdrop"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setFlowPreviewOpen(false);
+              }
+            }}
+          >
+            <section
+              className="pp-flow-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("projectPreview.flowPreview")}
+            >
+              <header>
+                <div>
+                  <strong>{t("projectPreview.executionFlow")}</strong>
+                  <span>{t("projectPreview.flowPreviewHint")}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFlowPreviewOpen(false)}
+                  aria-label={t("projectPreview.closeFlowPreview")}
+                >
+                  <X aria-hidden />
+                </button>
+              </header>
+              <div className="pp-flow-dialog-canvas">
+                <AgentBuildCanvas
+                  draft={agentDraft}
+                  direction="horizontal"
+                  selectedPath={[]}
+                  onSelect={ignoreCanvasAction}
+                  onAdd={ignoreCanvasAction}
+                  onInsert={ignoreCanvasAction}
+                  onDelete={ignoreCanvasAction}
+                  readOnly
+                  interactivePreview
+                />
+              </div>
+            </section>
+          </div>,
+          document.body,
+        )}
+      <DeploymentConfirmDialog
+        open={deployConfirmOpen}
+        isUpdate={isRuntimeUpdate}
+        {...deploymentConfirmation}
+        onCancel={cancelDeploymentConfirmation}
+        onConfirm={() => void performDeployment()}
+      />
     </div>
   );
 }

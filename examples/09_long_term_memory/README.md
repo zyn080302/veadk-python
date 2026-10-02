@@ -45,9 +45,52 @@ python main.py
 Session #2's recommendation should respect the peanut allergy and vegetarian
 preference from session #1.
 
+## Auto-save policy preview
+
+To inspect what `auto_save_memory_policy` persists without calling a model or a
+real memory service, run:
+
+```bash
+python auto_save_memory_policy.py
+```
+
+The preview compares `"default"`, `"all"`, and a custom
+`MemoryAutoSavePolicy`.
+
 ## What to try next
 
 - Short-term vs long-term: see [03](../03_short_term_memory/) for the
   in-session kind.
-- Swap `backend="local"` for a persistent store (`viking`, `redis`, `opensearch`,
-  `mem0`) so memories survive process restarts.
+- Swap `backend="local"` for a persistent store (`openviking`, `viking`,
+  `redis`, `opensearch`, `mem0`) so memories survive process restarts.
+
+### OpenViking variant
+
+For OpenViking, configure the service connection and the owner/context ID:
+
+```bash
+export DATABASE_OPENVIKING_URL="http://127.0.0.1:1933"
+export DATABASE_OPENVIKING_API_KEY="your-openviking-api-key"
+export DATABASE_OPENVIKING_USER_ID="agent_context"
+```
+
+Then switch the backend:
+
+```python
+long_term_memory = LongTermMemory(
+    backend="openviking",
+    app_name="ltm_demo",
+    backend_config={
+        # Optional. If omitted, VeADK keeps its default OpenViking policy.
+        "memory_policy": {
+            "self": {"enabled": False},
+            "peer": {"enabled": True},
+            "memory_types": ["entities", "events", "preferences"],
+        },
+    },
+)
+```
+
+`Runner.user_id` is still the end-user identifier and is sent to OpenViking as
+`peer_id`. `DATABASE_OPENVIKING_USER_ID` identifies the OpenViking memory
+owner/context and defaults to `default` when omitted.

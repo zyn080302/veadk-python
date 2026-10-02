@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -158,6 +159,399 @@ class TestResolveAgentkitToolId(unittest.TestCase):
     def test_resolve_raises_when_all_tool_ids_missing(self):
         with self.assertRaisesRegex(ValueError, "AGENTKIT_TOOL_ID"):
             self.agentkit_module.resolve_agentkit_tool_id("AGENTKIT_TOOL_ID_SCRIPT")
+
+
+class TestAgentkitEndpointConfig(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.agentkit_module = _load_agentkit_module()
+
+    def setUp(self):
+        self.env_patcher = patch.dict(os.environ, {}, clear=False)
+        self.env_patcher.start()
+        for env_name in [
+            "AGENTKIT_TOOL_REGION",
+            "AGENTKIT_TOOL_HOST",
+            "AGENTKIT_TOOL_SERVICE_CODE",
+            "AGENTKIT_TOOL_SCHEME",
+            "CLOUD_PROVIDER",
+            "REGION",
+        ]:
+            os.environ.pop(env_name, None)
+
+    def tearDown(self):
+        self.env_patcher.stop()
+
+    def test_uses_region_env_as_fallback(self):
+        os.environ["REGION"] = "cn-shanghai"
+
+        service, region, host, scheme = (
+            self.agentkit_module.get_agentkit_endpoint_config()
+        )
+
+        self.assertEqual(service, "agentkit")
+        self.assertEqual(region, "cn-shanghai")
+        self.assertEqual(host, "agentkit.cn-shanghai.volces.com")
+        self.assertEqual(scheme, "https")
+
+    def test_agentkit_tool_region_wins_over_region_env(self):
+        os.environ["AGENTKIT_TOOL_REGION"] = "cn-beijing"
+        os.environ["REGION"] = "cn-shanghai"
+
+        _, region, host, _ = self.agentkit_module.get_agentkit_endpoint_config()
+
+        self.assertEqual(region, "cn-beijing")
+        self.assertEqual(host, "agentkit.cn-beijing.volces.com")
+
+    def test_byteplus_ignores_region_env_fallback(self):
+        os.environ["CLOUD_PROVIDER"] = "byteplus"
+        os.environ["REGION"] = "cn-shanghai"
+
+        _, region, host, _ = self.agentkit_module.get_agentkit_endpoint_config()
+
+        self.assertEqual(region, "ap-southeast-1")
+        self.assertEqual(host, "agentkit.ap-southeast-1.bytepluses.com")
+
+
+class TestInvokeAgentkitExecBash(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.agentkit_module = _load_agentkit_module()
+
+    def test_builds_exec_bash_invoke_tool_request(self):
+        with patch.object(
+            self.agentkit_module,
+            "ve_request",
+            return_value={"Result": {"Result": "shell output"}},
+        ) as ve_request:
+            result = self.agentkit_module.invoke_agentkit_exec_bash(
+                tool_id="shell-tool",
+                tool_user_session_id="kk",
+                command="echo hello",
+                exec_dir="/tmp",
+                env={"DEMO_ENV": "from-invoke-tool"},
+                timeout=120,
+                hard_timeout=300,
+                max_output_length=30000,
+                ttl=1800,
+            )
+
+        self.assertEqual(result, {"Result": {"Result": "shell output"}})
+        request_body = ve_request.call_args.kwargs["request_body"]
+        self.assertEqual(request_body["ToolId"], "shell-tool")
+        self.assertEqual(request_body["OperationType"], "ExecBash")
+        self.assertEqual(request_body["UserSessionId"], "kk")
+        self.assertEqual(request_body["Ttl"], 1800)
+        self.assertEqual(
+            json.loads(request_body["OperationPayload"]),
+            {
+                "command": "echo hello",
+                "exec_dir": "/tmp",
+                "env": {"DEMO_ENV": "from-invoke-tool"},
+                "timeout": 120,
+                "hard_timeout": 300,
+                "max_output_length": 30000,
+            },
+        )
+        self.assertEqual(ve_request.call_args.kwargs["timeout"], (10.0, 330.0))
+
+
+class TestInvokeAgentkitRunCode(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.agentkit_module = _load_agentkit_module()
+
+    def test_request_timeout_covers_code_execution_timeout(self):
+        with patch.object(
+            self.agentkit_module,
+            "ve_request",
+            return_value={"Result": {"Result": "code output"}},
+        ) as ve_request:
+            result = self.agentkit_module.invoke_agentkit_run_code(
+                tool_id="code-tool",
+                tool_user_session_id="kk",
+                code="print('hello')",
+                timeout=120,
+                kernel_name="python3",
+            )
+
+        self.assertEqual(result, {"Result": {"Result": "code output"}})
+        self.assertEqual(ve_request.call_args.kwargs["timeout"], (10.0, 150.0))
+
+
+class TestEnsureAgentkitSessionEndpoint(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.agentkit_module = _load_agentkit_module()
+
+    def test_creates_session_and_prefers_public_endpoint(self):
+        captured = {}
+
+        class FakeCreateSessionRequest:
+            def __init__(self, **kwargs):
+                captured["create_request"] = kwargs
+
+        class FakeGetSessionRequest:
+            def __init__(self, **kwargs):
+                captured["get_request"] = kwargs
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["client"] = kwargs
+
+            def create_session(self, _request):
+                return types.SimpleNamespace(session_id="session-1")
+
+            def get_session(self, _request):
+                return types.SimpleNamespace(
+                    endpoint="https://public.example",
+                    internal_endpoint="http://internal.example",
+                    status="Ready",
+                )
+
+        fake_tools_types = types.ModuleType("agentkit.sdk.tools.types")
+        fake_tools_types.CreateSessionRequest = FakeCreateSessionRequest
+        fake_tools_types.GetSessionRequest = FakeGetSessionRequest
+        fake_tools_client = types.ModuleType("agentkit.sdk.tools.client")
+        fake_tools_client.AgentkitToolsClient = FakeClient
+        fake_tools_package = types.ModuleType("agentkit.sdk.tools")
+        fake_tools_package.types = fake_tools_types
+        fake_sdk_package = types.ModuleType("agentkit.sdk")
+        fake_agentkit_package = types.ModuleType("agentkit")
+
+        with patch.dict(
+            sys.modules,
+            {
+                "agentkit": fake_agentkit_package,
+                "agentkit.sdk": fake_sdk_package,
+                "agentkit.sdk.tools": fake_tools_package,
+                "agentkit.sdk.tools.types": fake_tools_types,
+                "agentkit.sdk.tools.client": fake_tools_client,
+            },
+        ):
+            with (
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_endpoint_config",
+                    return_value=("agentkit", "cn-beijing", "host", "https"),
+                ),
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_credentials",
+                    return_value=("ak", "sk", {"X-Security-Token": "token"}),
+                ),
+            ):
+                endpoint = self.agentkit_module.ensure_agentkit_session_endpoint(
+                    tool_id="tool-1",
+                    tool_user_session_id="user-session-1",
+                    tool_state={"state": "value"},
+                    ttl=900,
+                )
+
+        self.assertEqual(endpoint, "https://public.example")
+        self.assertEqual(
+            captured["client"],
+            {
+                "access_key": "ak",
+                "secret_key": "sk",
+                "region": "cn-beijing",
+                "session_token": "token",
+            },
+        )
+        self.assertEqual(
+            captured["create_request"],
+            {
+                "ToolId": "tool-1",
+                "UserSessionId": "user-session-1",
+                "Ttl": 900,
+            },
+        )
+        self.assertEqual(
+            captured["get_request"],
+            {
+                "ToolId": "tool-1",
+                "SessionId": "session-1",
+            },
+        )
+
+    def test_uses_create_session_endpoint_without_waiting_by_default(self):
+        captured = {"get_calls": 0}
+
+        class FakeCreateSessionRequest:
+            def __init__(self, **_kwargs):
+                pass
+
+        class FakeGetSessionRequest:
+            def __init__(self, **_kwargs):
+                pass
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def create_session(self, _request):
+                return types.SimpleNamespace(
+                    session_id="session-1",
+                    endpoint="https://public.example",
+                    internal_endpoint="http://internal.example",
+                )
+
+            def get_session(self, _request):
+                captured["get_calls"] += 1
+                raise AssertionError(
+                    "get_session should not be called when waiting is disabled"
+                )
+
+        fake_tools_types = types.ModuleType("agentkit.sdk.tools.types")
+        fake_tools_types.CreateSessionRequest = FakeCreateSessionRequest
+        fake_tools_types.GetSessionRequest = FakeGetSessionRequest
+        fake_tools_client = types.ModuleType("agentkit.sdk.tools.client")
+        fake_tools_client.AgentkitToolsClient = FakeClient
+        fake_tools_package = types.ModuleType("agentkit.sdk.tools")
+        fake_tools_package.types = fake_tools_types
+
+        with patch.dict(
+            sys.modules,
+            {
+                "agentkit": types.ModuleType("agentkit"),
+                "agentkit.sdk": types.ModuleType("agentkit.sdk"),
+                "agentkit.sdk.tools": fake_tools_package,
+                "agentkit.sdk.tools.types": fake_tools_types,
+                "agentkit.sdk.tools.client": fake_tools_client,
+            },
+        ):
+            with (
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_endpoint_config",
+                    return_value=("agentkit", "cn-beijing", "host", "https"),
+                ),
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_credentials",
+                    return_value=("ak", "sk", {}),
+                ),
+            ):
+                endpoint = self.agentkit_module.ensure_agentkit_session_endpoint(
+                    tool_id="tool-1",
+                    tool_user_session_id="user-session-1",
+                )
+
+        self.assertEqual(endpoint, "https://public.example")
+        self.assertEqual(captured["get_calls"], 0)
+
+    def test_polls_until_session_is_ready(self):
+        statuses = iter(["Starting", "Ready"])
+
+        class FakeRequest:
+            def __init__(self, **_kwargs):
+                pass
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def create_session(self, _request):
+                return types.SimpleNamespace(session_id="session-1")
+
+            def get_session(self, _request):
+                return types.SimpleNamespace(
+                    status=next(statuses),
+                    endpoint="https://public.example",
+                    internal_endpoint=None,
+                )
+
+        fake_tools_types = types.ModuleType("agentkit.sdk.tools.types")
+        fake_tools_types.CreateSessionRequest = FakeRequest
+        fake_tools_types.GetSessionRequest = FakeRequest
+        fake_tools_client = types.ModuleType("agentkit.sdk.tools.client")
+        fake_tools_client.AgentkitToolsClient = FakeClient
+        fake_tools_package = types.ModuleType("agentkit.sdk.tools")
+        fake_tools_package.types = fake_tools_types
+
+        with patch.dict(
+            sys.modules,
+            {
+                "agentkit": types.ModuleType("agentkit"),
+                "agentkit.sdk": types.ModuleType("agentkit.sdk"),
+                "agentkit.sdk.tools": fake_tools_package,
+                "agentkit.sdk.tools.types": fake_tools_types,
+                "agentkit.sdk.tools.client": fake_tools_client,
+            },
+        ):
+            with (
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_endpoint_config",
+                    return_value=("agentkit", "cn-beijing", "host", "https"),
+                ),
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_credentials",
+                    return_value=("ak", "sk", {}),
+                ),
+                patch.object(self.agentkit_module.time, "sleep") as sleep,
+            ):
+                endpoint = self.agentkit_module.ensure_agentkit_session_endpoint(
+                    tool_id="tool-1",
+                    tool_user_session_id="user-session-1",
+                    wait_until_ready=True,
+                )
+
+        self.assertEqual(endpoint, "https://public.example")
+        sleep.assert_called_once_with(1.0)
+
+    def test_raises_when_session_enters_failed_status(self):
+        class FakeRequest:
+            def __init__(self, **_kwargs):
+                pass
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def create_session(self, _request):
+                return types.SimpleNamespace(session_id="session-1")
+
+            def get_session(self, _request):
+                return types.SimpleNamespace(status="Failed")
+
+        fake_tools_types = types.ModuleType("agentkit.sdk.tools.types")
+        fake_tools_types.CreateSessionRequest = FakeRequest
+        fake_tools_types.GetSessionRequest = FakeRequest
+        fake_tools_client = types.ModuleType("agentkit.sdk.tools.client")
+        fake_tools_client.AgentkitToolsClient = FakeClient
+        fake_tools_package = types.ModuleType("agentkit.sdk.tools")
+        fake_tools_package.types = fake_tools_types
+
+        with patch.dict(
+            sys.modules,
+            {
+                "agentkit": types.ModuleType("agentkit"),
+                "agentkit.sdk": types.ModuleType("agentkit.sdk"),
+                "agentkit.sdk.tools": fake_tools_package,
+                "agentkit.sdk.tools.types": fake_tools_types,
+                "agentkit.sdk.tools.client": fake_tools_client,
+            },
+        ):
+            with (
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_endpoint_config",
+                    return_value=("agentkit", "cn-beijing", "host", "https"),
+                ),
+                patch.object(
+                    self.agentkit_module,
+                    "get_agentkit_credentials",
+                    return_value=("ak", "sk", {}),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "terminal status Failed"):
+                    self.agentkit_module.ensure_agentkit_session_endpoint(
+                        tool_id="tool-1",
+                        tool_user_session_id="user-session-1",
+                        wait_until_ready=True,
+                    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,282 @@
+# Copyright (c) 2025 Beijing Volcano Engine Technology Co., Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for Studio title and logo validation."""
+
+import base64
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
+
+import pytest
+from click.testing import CliRunner
+
+from veadk.cli.frontend_branding import (
+    DEFAULT_SITE_TITLE,
+    normalize_site_title,
+    resolve_site_logo,
+)
+from veadk.cli.cli_frontend import studio
+from veadk.cli.studio_dependencies import STUDIO_AGENTKIT_CLI_ARTIFACT
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
+    "AScY42YAAAAASUVORK5CYII="
+)
+
+
+def _stage_test_agentkit_cli_archive(destination: Path, **_kwargs: object) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    archive = destination / STUDIO_AGENTKIT_CLI_ARTIFACT.filename
+    archive.write_bytes(b"test-agentkit-cli")
+    return archive
+
+
+@pytest.fixture(autouse=True)
+def _avoid_network_cli_archive_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "veadk.cli.studio_package.stage_studio_agentkit_cli_archive",
+        _stage_test_agentkit_cli_archive,
+    )
+
+
+class _LogoResponse:
+    def raise_for_status(self) -> None:
+        pass
+
+    def iter_bytes(self) -> Iterator[bytes]:
+        yield _PNG
+
+
+class _LogoStream:
+    def __enter__(self) -> _LogoResponse:
+        return _LogoResponse()
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+
+def test_normalize_site_title_uses_default_and_accepts_sixteen_characters() -> None:
+    assert DEFAULT_SITE_TITLE == "AgentKit Studio"
+    assert normalize_site_title(None) == DEFAULT_SITE_TITLE
+    assert normalize_site_title(" 火山助手 ") == "火山助手"
+    assert normalize_site_title("AgentKit Studio") == "AgentKit Studio"
+    assert normalize_site_title("ABCDEFGHIJKLMNOP") == "ABCDEFGHIJKLMNOP"
+
+
+@pytest.mark.parametrize("title", ["", "       ", "ABCDEFGHIJKLMNOPQ", "火" * 17])
+def test_normalize_site_title_rejects_invalid_values(title: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_site_title(title)
+
+
+def test_studio_cli_rejects_overlong_site_title() -> None:
+    result = CliRunner().invoke(studio, ["--site-title", "ABCDEFGHIJKLMNOPQ"])
+
+    assert result.exit_code == 1
+    assert "at most 16 characters" in result.output
+
+
+def test_resolve_site_logo_reads_and_validates_local_image(tmp_path: Path) -> None:
+    logo_path = tmp_path / "logo.png"
+    logo_path.write_bytes(_PNG)
+
+    logo = resolve_site_logo(str(logo_path))
+
+    assert logo is not None
+    assert logo.content == _PNG
+    assert logo.media_type == "image/png"
+    assert logo.extension == "png"
+
+
+def test_resolve_site_logo_rejects_non_image(tmp_path: Path) -> None:
+    logo_path = tmp_path / "logo.txt"
+    logo_path.write_text("not an image", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be PNG"):
+        resolve_site_logo(str(logo_path))
+
+
+def test_resolve_site_logo_downloads_network_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("httpx.stream", lambda *args, **kwargs: _LogoStream())
+
+    logo = resolve_site_logo("https://example.com/logo.png")
+
+    assert logo is not None
+    assert logo.content == _PNG
+    assert logo.media_type == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("title_args", "expected_site_title"),
+    [([], None), (["--site-title", "火山助手"], "火山助手")],
+)
+@pytest.mark.parametrize("workspace_id", [None, "existing-studio-tool"])
+def test_studio_deploy_bundles_logo_and_optional_title(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    title_args: list[str],
+    expected_site_title: str | None,
+    workspace_id: str | None,
+) -> None:
+    logo_path = tmp_path / "logo.png"
+    logo_path.write_bytes(_PNG)
+    captured: dict[str, object] = {}
+    environments: dict[str, str] = {}
+    monkeypatch.setattr(
+        "frontend.server.user_management.deployment.prepare_identity_roles",
+        lambda **kwargs: {"VEADK_STUDIO_IDENTITY_ROLES": "1"},
+    )
+
+    class _FakeCloudAgentEngine:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def deploy(self, **kwargs: object) -> SimpleNamespace:
+            deploy_root = Path(str(kwargs["path"]))
+            packaged_logo = deploy_root / "site-logo.png"
+            captured["logo"] = packaged_logo.read_bytes()
+            captured["run_script"] = (deploy_root / "run.sh").read_text(
+                encoding="utf-8"
+            )
+            return SimpleNamespace(
+                vefaas_endpoint="",
+                vefaas_application_id="app-id",
+                vefaas_function_id="",
+            )
+
+    monkeypatch.setattr("veadk.config.veadk_environments", environments)
+    monkeypatch.setattr(
+        "veadk.cloud.cloud_agent_engine.CloudAgentEngine", _FakeCloudAgentEngine
+    )
+    monkeypatch.setattr(
+        "veadk.cli.cli_frontend._resolve_studio_identity_region",
+        lambda **kwargs: kwargs["deployment_region"],
+    )
+    monkeypatch.setattr(
+        "veadk.integrations.ve_identity.identity_client.IdentityClient.configure_user_pool_for_idp_only",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "frontend.server.storage.provisioning.resolve_studio_storage_for_deploy",
+        lambda **kwargs: SimpleNamespace(
+            bucket="veadk-studio-test",
+            region=kwargs["region"],
+            object_host=f"veadk-studio-test.tos-{kwargs['region']}.volces.com",
+        ),
+    )
+    monkeypatch.setattr(
+        "veadk.cli.studio_deploy_serverless_iam.ensure_serverless_application_role",
+        lambda *_, **__: False,
+    )
+    monkeypatch.setattr(
+        "veadk.cli.studio_sandbox_tools.ensure_studio_code_env_tool",
+        lambda **kwargs: f"auto-{kwargs['name']}",
+    )
+    monkeypatch.setattr(
+        "veadk.cli.studio_sandbox_tools.ensure_studio_agent_tool",
+        lambda **kwargs: f"auto-{kwargs['name']}",
+    )
+    monkeypatch.setattr(
+        "veadk.cli.studio_sandbox_tools.ensure_studio_dev_env_tool",
+        lambda **kwargs: f"auto-{kwargs['name']}",
+    )
+    monkeypatch.setattr(
+        "veadk.cli.studio_sandbox_tools.ensure_studio_agent_model_credential",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        "veadk.cli.frontend_skill_creator.ensure_skill_creator_model_credential",
+        lambda **_: None,
+    )
+    from threading import Event
+
+    workspace_started = Event()
+    other_tool_started = Event()
+
+    def create_code_tool(**kwargs):
+        other_tool_started.set()
+        if workspace_id is None:
+            assert workspace_started.wait(5), "Studio Sandbox must start concurrently"
+        return f"auto-{kwargs['name']}"
+
+    monkeypatch.setattr(
+        "veadk.cli.studio_sandbox_tools.ensure_studio_code_env_tool",
+        create_code_tool,
+    )
+    workspace_calls = []
+
+    def provision_workspace(**kwargs):
+        workspace_started.set()
+        assert other_tool_started.wait(5), (
+            "Other tools must not wait for Studio Sandbox"
+        )
+        workspace_calls.append(kwargs)
+        return "studio-workspace-tool"
+
+    monkeypatch.setattr(
+        "frontend.server.workspace_tool.provision_workspace_tool",
+        provision_workspace,
+    )
+    monkeypatch.setattr(
+        "frontend.service.studio_scheduler.deploy.deploy_scheduler",
+        lambda *_args, **_kwargs: (
+            "scheduler-function",
+            "scheduler-timer",
+            "worker-function",
+            "worker-timer",
+        ),
+    )
+
+    args = [
+        "deploy",
+        "--user-pool-id",
+        "pool-id",
+        "--allowed-client-id",
+        "client-id",
+        "--vefaas-app-name",
+        "branded-studio",
+        "--iam-role",
+        "trn:iam::role/test",
+        "--gateway-name",
+        "gateway",
+        "--volcengine-access-key",
+        "ak",
+        "--volcengine-secret-key",
+        "sk",
+        "--site-logo",
+        str(logo_path),
+    ]
+    if workspace_id:
+        args.extend(["--studio-sandbox-tool-id", workspace_id])
+    result = CliRunner().invoke(studio, args + title_args)
+
+    assert result.exit_code == 0, result.output
+    if workspace_id:
+        assert workspace_calls == []
+        assert environments["STUDIO_WORKSPACE_TOOL_ID"] == workspace_id
+    else:
+        assert len(workspace_calls) == 1
+        assert workspace_calls[0]["provider"] == "volcengine"
+        assert workspace_calls[0]["access_key"] == "ak"
+        assert environments["STUDIO_WORKSPACE_TOOL_ID"] == "studio-workspace-tool"
+        assert "Studio Sandbox Tool and model credentials are ready" in result.output
+    assert captured["logo"] == _PNG
+    assert '--site-logo "$ROOT_DIR/site-logo.png"' in str(captured["run_script"])
+    if expected_site_title is None:
+        assert "VEADK_SITE_TITLE" not in environments
+    else:
+        assert environments["VEADK_SITE_TITLE"] == expected_site_title

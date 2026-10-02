@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from dataclasses import dataclass
 
 from opentelemetry import context as context_api
@@ -20,12 +21,13 @@ from opentelemetry.sdk import trace as trace_sdk
 from veadk.config import settings
 from veadk.tracing.telemetry import telemetry
 from veadk.tracing.telemetry.content_tracing import should_trace_content
-from veadk.tracing.telemetry.exporters.apmplus_exporter import MeterUploader
+from veadk.tracing.telemetry.portal_metrics import PortalMetricRecorder
 
 
 @dataclass
 class _FakePart:
     text: str | None = None
+    thought: bool | None = None
     function_call: object | None = None
     function_response: object | None = None
     inline_data: object | None = None
@@ -141,8 +143,8 @@ def _event_names(span):
     return [event.name for event in span.events]
 
 
-def setup_function():
-    telemetry.meter_uploader = None
+def _event_count(span, name: str) -> int:
+    return _event_names(span).count(name)
 
 
 def test_trace_call_llm_records_content_by_default(monkeypatch):
@@ -164,6 +166,98 @@ def test_trace_call_llm_records_content_by_default(monkeypatch):
         assert "gen_ai.choice" in _event_names(span)
 
 
+def test_trace_call_llm_records_request_events_once_per_span(monkeypatch):
+    monkeypatch.delenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", raising=False)
+
+    with _start_test_span("call_llm") as span:
+        for _ in range(2):
+            telemetry.trace_call_llm(
+                _FakeInvocationContext(),
+                "event-id",
+                _FakeLlmRequest(),
+                _FakeLlmResponse(),
+            )
+
+        assert _event_count(span, "gen_ai.system.message") == 1
+        assert _event_count(span, "gen_ai.user.message") == 1
+        assert _event_count(span, "gen_ai.choice") == 2
+
+
+def test_trace_call_llm_request_sentinel_does_not_require_system_event(monkeypatch):
+    monkeypatch.delenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", raising=False)
+    monkeypatch.setattr(
+        telemetry,
+        "get_attributes",
+        lambda kind: {
+            "gen_ai.messages": lambda params: telemetry.ExtractorResponse(
+                type="event_list",
+                content=[{"gen_ai.user.message": {"role": "user"}}],
+            ),
+            "gen_ai.choice": lambda params: telemetry.ExtractorResponse(
+                type="event", content={"role": "assistant"}
+            ),
+        },
+    )
+
+    with _start_test_span("call_llm") as span:
+        for _ in range(2):
+            telemetry.trace_call_llm(
+                _FakeInvocationContext(),
+                "event-id",
+                _FakeLlmRequest(),
+                _FakeLlmResponse(),
+            )
+
+        assert _event_count(span, "gen_ai.system.message") == 0
+        assert _event_count(span, "gen_ai.user.message") == 1
+        assert _event_count(span, "gen_ai.choice") == 2
+
+
+def test_trace_call_llm_records_request_events_for_each_span(monkeypatch):
+    monkeypatch.delenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", raising=False)
+
+    spans = []
+    for name in ("call_llm.first", "call_llm.second"):
+        with _start_test_span(name) as span:
+            spans.append(span)
+            telemetry.trace_call_llm(
+                _FakeInvocationContext(),
+                "event-id",
+                _FakeLlmRequest(),
+                _FakeLlmResponse(),
+            )
+
+    for span in spans:
+        assert _event_count(span, "gen_ai.system.message") == 1
+        assert _event_count(span, "gen_ai.user.message") == 1
+        assert _event_count(span, "gen_ai.choice") == 1
+
+
+def test_trace_call_llm_prefers_explicit_adk_span(monkeypatch):
+    """ADK 1.24+ calls the hook while a nested inference span is current."""
+    monkeypatch.delenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", raising=False)
+
+    provider = trace_sdk.TracerProvider()
+    tracer = provider.get_tracer(__name__)
+    with tracer.start_as_current_span("call_llm") as call_llm_span:
+        with tracer.start_as_current_span("generate_content") as inference_span:
+            for _ in range(2):
+                telemetry.trace_call_llm(
+                    _FakeInvocationContext(),
+                    "event-id",
+                    _FakeLlmRequest(),
+                    _FakeLlmResponse(),
+                    call_llm_span,
+                )
+
+    assert call_llm_span.attributes["gen_ai.request.model"] == "test-model"
+    assert _event_count(call_llm_span, "gen_ai.system.message") == 1
+    assert _event_count(call_llm_span, "gen_ai.user.message") == 1
+    assert _event_count(call_llm_span, "gen_ai.choice") == 2
+    assert "gen_ai.request.model" not in inference_span.attributes
+    assert not inference_span.events
+
+
 def test_content_tracing_uses_veadk_config_when_env_missing(monkeypatch):
     monkeypatch.delenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", raising=False)
     monkeypatch.setattr(settings.opentelemetry_config, "trace_content", False)
@@ -175,12 +269,13 @@ def test_trace_call_llm_skips_content_when_env_false(monkeypatch):
     monkeypatch.setenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", "false")
 
     with _start_test_span("call_llm") as span:
-        telemetry.trace_call_llm(
-            _FakeInvocationContext(),
-            "event-id",
-            _FakeLlmRequest(),
-            _FakeLlmResponse(),
-        )
+        for _ in range(2):
+            telemetry.trace_call_llm(
+                _FakeInvocationContext(),
+                "event-id",
+                _FakeLlmRequest(),
+                _FakeLlmResponse(),
+            )
 
         assert span.attributes["gen_ai.request.model"] == "test-model"
         assert span.attributes["gen_ai.usage.total_tokens"] == 18
@@ -215,19 +310,19 @@ def test_trace_tool_call_skips_content_when_env_false(monkeypatch):
 
 
 def test_apmplus_tool_metrics_skip_token_usage_when_tool_content_missing():
-    meter_uploader = object.__new__(MeterUploader)
-    meter_uploader.apmplus_span_latency = _FakeMetricRecorder()
-    meter_uploader.apmplus_tool_token_usage = _FakeMetricRecorder()
+    metric_recorder = object.__new__(PortalMetricRecorder)
+    metric_recorder.apmplus_span_latency = _FakeMetricRecorder()
+    metric_recorder.apmplus_tool_token_usage = _FakeMetricRecorder()
 
     with _start_test_span("execute_tool lookup"):
-        meter_uploader.record_tool_call(
+        metric_recorder.record_tool_call(
             _FakeTool(),
             {"query": "tool input secret"},
             _ExplodingFunctionResponseEvent(),
         )
 
-    assert len(meter_uploader.apmplus_span_latency.records) == 1
-    assert meter_uploader.apmplus_tool_token_usage.records == []
+    assert len(metric_recorder.apmplus_span_latency.records) == 1
+    assert metric_recorder.apmplus_tool_token_usage.records == []
 
 
 def test_agent_root_span_skips_content_when_env_false(monkeypatch):
@@ -241,6 +336,48 @@ def test_agent_root_span_skips_content_when_env_false(monkeypatch):
         assert "gen_ai.output" not in span.attributes
         assert "gen_ai.user.message" not in _event_names(span)
         assert "gen_ai.choice" not in _event_names(span)
+
+
+def test_agent_output_serializes_reasoning_for_apmplus():
+    response = _FakeLlmResponse()
+    response.content = _FakeContent(
+        "model",
+        [
+            _FakePart(text="thinking", thought=True),
+            _FakePart(text="answer"),
+        ],
+    )
+
+    with _start_test_span("invocation") as span:
+        telemetry._set_agent_output_attribute(span, response)
+
+        assert json.loads(span.attributes["gen_ai.output"]) == {
+            "messages": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {"type": "reasoning", "content": "thinking"},
+                        {"type": "text", "content": "answer"},
+                    ],
+                }
+            ]
+        }
+
+
+def test_agent_output_serializes_plain_text_for_apmplus():
+    with _start_test_span("invocation") as span:
+        telemetry._set_agent_output_attribute(span, _FakeLlmResponse())
+
+        assert json.loads(span.attributes["gen_ai.output"]) == {
+            "messages": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {"type": "text", "content": "assistant secret"},
+                    ],
+                }
+            ]
+        }
 
 
 def test_content_tracing_context_override_allows_content(monkeypatch):

@@ -20,23 +20,45 @@
 | 09 | [长期记忆](./09_long_term_memory/) | 复杂 | 跨会话回忆事实（`auto_save_session`） |
 | 10 | [智能体路由](./10_agent_routing/) | 复杂 | 协调者动态委派给专家智能体 |
 | 11 | [链路追踪](./11_tracing/) | 复杂 | 观测大模型/工具调用；导出 span |
+| 13 | [OpenViking](./13_openviking/) | 复杂 | 使用 OpenViking 做知识检索与长期记忆 |
 
-另外还有 [`a2ui_agent/`](./a2ui_agent/) —— 一个由智能体驱动 UI 的示例，
-可通过 `veadk frontend --agents-dir examples` 运行。
+另外还有可通过 `veadk frontend --agents-dir examples` 运行的 frontend 示例：
+
+- [`a2ui_agent/`](./a2ui_agent/) 展示由智能体驱动的 UI。
+- [`multimodal_agent/`](./multimodal_agent/) 分析从聊天输入框上传的图片、
+  TXT/Markdown、PDF 和视频。
 
 如需一个可部署的**完整应用**（Web 前端 + Agent API 同处一个容器，通过
 `veadk agentkit` 部署到火山引擎 AgentKit），参见 [`basic-app/`](./basic-app/)。
 
 这些示例按概念分组：01–02 基础，03 与 09 记忆，04–05 工具与知识，
-06 与 10 多智能体，07–08 模型行为，11 可观测性。
+06 与 10 多智能体，07–08 模型行为，11 可观测性，13 为 OpenViking 知识与记忆。
+
+## Codex 运行时
+
+有四个示例使用 `Agent(runtime="codex")`——它把内层循环交给一个沙箱里的 coding
+agent，让模型可以写下文件、跑起来、读到报错、再改掉。其中两个讲**这个运行时是干
+什么用的**，另外两个讲**怎么把它接起来**。
+
+| 示例 | 类型 | 你将学到 |
+| --- | --- | --- |
+| [数据分析](./codex_data_analysis/) | 用来干什么 | Codex 写分析脚本、在脏数据上撞到真实报错、自己改好、重跑、出报告——自迭代循环 |
+| [运维助手](./codex_ops_assistant/) | 用来干什么 | 用一次性脚本把日志、指标与发布记录关联起来定位根因，全程在断网沙箱里 |
+| [Skill + MCP](./codex_with_skill_and_mcp/) | 怎么接线 | 本地 skill 与 MCP 工具在这个运行时下分别走哪条路 |
+| [部署到 AgentKit](./codex_runtime_on_agentkit/) | 怎么部署 | 把一个 `runtime="codex"` 智能体发布到火山引擎 AgentKit |
+
+当任务的步骤无法事先枚举成工具时（临时分析、日志排障、数据清洗）才用这个运行时。
+如果只是一次固定的工具调用加一段格式化回答，请继续用 `runtime="adk"`：更快、更便宜，
+而且不会拒绝 `sub_agents` / `output_schema` / `planner` / `code_executor`。
+详见[什么时候该用 codex 运行时](../docs/content/docs/framework/agent/runtime.mdx#什么时候该用-codex-运行时)。
 
 ## 通用准备
 
-1. 安装 VeADK（示例 05 需要 `extensions` 扩展）：
+1. 安装 VeADK（示例 05 使用 local 后端时需要 `extensions` 扩展）：
 
    ```bash
    pip install veadk-python
-   # RAG 示例需要：
+   # 示例 05 的 local RAG 后端需要：
    pip install "veadk-python[extensions]"
    ```
 

@@ -1,0 +1,2889 @@
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
+import { useTranslation } from "react-i18next";
+import {
+  DEFAULT_LOCALE,
+  localeCompatibleBackendText,
+  resolveSupportedLocale,
+} from "../i18n/locales";
+import {
+  confirmMigrationTask,
+  createMigrationTask,
+  downloadMigrationArtifact,
+  downloadMigrationEvaluationReport,
+  getMigrationActivity,
+  getMigrationArtifact,
+  getMigrationArtifactFile,
+  getMigrationCapabilities,
+  getMigrationEvaluationDataset,
+  getMigrationEvaluationReport,
+  getMigrationTask,
+  listMigrationTasks,
+  MigrationApiError,
+  putMigrationEvaluationDataset,
+  resumeMigrationEvaluation,
+  retryMigrationEvaluation,
+  stopMigrationTask,
+  submitMigrationAnalysisAnswers,
+  uploadMigrationSource,
+  type MigrationAnalysis,
+  type MigrationActivity,
+  type MigrationArtifact,
+  type MigrationCapabilities,
+  type MigrationEvaluationDataset,
+  type MigrationFramework,
+  type MigrationTask,
+} from "../adk/migrations";
+import {
+  deployAgentkitProject,
+  listModelOptions,
+  type DeployStage,
+  type ModelOption,
+} from "../adk/client";
+import { defaultCloudRegion, type CloudProvider } from "../adk/cloudProvider";
+import type { AgentProject } from "../create/project";
+import type {
+  IntelligentCreateBaseVersion,
+  IntelligentDevelopmentCapabilities,
+  IntelligentPreparationStage,
+} from "../create/IntelligentCreate";
+import type { IntelligentDevelopmentReleaseRef } from "../blocks";
+import type { NetworkConfig } from "../create/types";
+import type { EnvVar } from "../create/veadkCatalog";
+import CodeEditor from "../ui/CodeEditor";
+import { Blocks } from "../ui/Blocks";
+import { Markdown } from "../ui/Markdown";
+import { StudioConfirmDialog } from "../ui/StudioConfirmDialog";
+import { NewChatCompactSelect } from "../ui/new-chat-modes/NewChatCompactSelect";
+import {
+  ProjectPreview,
+  type DeployResult,
+  type DeploymentTaskUpdate,
+} from "../ui/ProjectPreview";
+import { TextShimmer } from "../ui/text-shimmer/TextShimmer";
+import { useStickToBottom } from "../ui/useStickToBottom";
+import {
+  BackIcon,
+  CloseIcon,
+  DeployIcon,
+  DownloadIcon,
+  FileIcon,
+  PlusIcon,
+  UploadIcon,
+} from "./MigrationIcons";
+import {
+  isMigrationRuntimeEnvironmentKey,
+  isSecretEnvironmentKey,
+  migrationDeploymentEnvDefaults,
+} from "./deploymentEnvironment";
+import { migrationActivityBlocks } from "./migrationActivityBlocks";
+import {
+  isMigrationEnvironmentExpired,
+  migrationHistoryStatus,
+} from "./migrationHistoryStatus";
+import {
+  createMigrationEvaluationDraft,
+  evaluationCasesFromDraft,
+  evaluationDraftFromDataset,
+  MigrationEvaluationResult,
+  MigrationEvaluationSetup,
+  validateMigrationEvaluationDraft,
+  type MigrationEvaluationDraft,
+} from "./MigrationEvaluation";
+import {
+  evaluationSettingsAreLocked,
+  needsEvaluationDraftHydration,
+} from "./evaluationDraftState";
+import { MigratedProjectsPage } from "./MigratedProjectsPage";
+import { i18n } from "../i18n/runtime";
+import "./MigrationWorkspace.css";
+
+const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
+const POLL_INTERVAL_MS = 1_200;
+const ACTIVITY_POLL_INTERVAL_MS = 3_000;
+const LIST_POLL_INTERVAL_MS = 5_000;
+const MAX_VISIBLE_FILES = 500;
+const ignoreMigrationAction = () => undefined;
+
+function isEvaluationPollingState(task: MigrationTask): boolean {
+  return Boolean(
+    task.evaluation?.enabled &&
+      [
+        "pending",
+        "preparing",
+        "deploying",
+        "executing",
+        "judging",
+        "aggregating",
+      ].includes(task.evaluation.state),
+  );
+}
+
+function evaluationTabStatusKey(task: MigrationTask): string {
+  const state = task.evaluation?.state;
+  if (!state || state === "pending") return "evaluation.tabs.waitingMigration";
+  if (["waiting_dataset", "waiting_environment"].includes(state)) {
+    return "evaluation.tabs.waitingConfiguration";
+  }
+  if (["preparing", "deploying", "executing", "judging", "aggregating"].includes(state)) {
+    return "evaluation.tabs.running";
+  }
+  if (state === "completed") return "evaluation.tabs.completed";
+  return "evaluation.tabs.issue";
+}
+
+const FRAMEWORK_LABEL_KEYS: Record<MigrationFramework, string> = {
+  langchain: "framework.langchain",
+  langgraph: "framework.langgraph",
+  adk: "framework.adk",
+  strands: "framework.strands",
+  agentcore: "framework.agentcore",
+  dify: "framework.dify",
+  any: "framework.any",
+};
+
+function migrationText(key: string, options?: Record<string, unknown>): string {
+  return i18n.t(key, { ns: "migrations", ...options });
+}
+
+function frameworkLabel(framework: MigrationFramework): string {
+  return migrationText(FRAMEWORK_LABEL_KEYS[framework]);
+}
+
+const STRUCTURED_FRAMEWORKS = new Set<MigrationFramework>([
+  "langchain",
+  "langgraph",
+  "adk",
+  "strands",
+  "agentcore",
+]);
+
+interface MigrationWorkspaceProps {
+  cloudProvider: CloudProvider;
+  onBack: () => void;
+  onAgentAdded?: (agentId: string, agentName: string) => void;
+  onDeploymentTaskChange?: (task: DeploymentTaskUpdate) => void;
+  onDeploymentStarted?: (task: DeploymentTaskUpdate) => void;
+  onDeploymentComplete?: (result: DeployResult) => void | Promise<void>;
+  initialDeployRegion?: string;
+  projectCapabilities: IntelligentDevelopmentCapabilities | null;
+  projectCapabilitiesLoading: boolean;
+  optimizationPreparationStage: IntelligentPreparationStage | null;
+  optimizationError: string;
+  onOptimizeVersion: (
+    goal: string,
+    modelId: string,
+    base: IntelligentCreateBaseVersion,
+  ) => Promise<void>;
+  onCancelOptimization: () => void;
+  onDownloadSavedVersion: (
+    delivery: IntelligentDevelopmentReleaseRef,
+  ) => Promise<void>;
+  onDeploySavedVersion: (delivery: IntelligentDevelopmentReleaseRef) => void;
+  initialPage?: "new" | "projects";
+  initialProjectId?: string;
+}
+
+interface PreviewState {
+  path: string;
+  loading: boolean;
+  text?: string;
+  imageUrl?: string;
+  error?: string;
+}
+
+function taskDisplayMessage(task: MigrationTask): string {
+  if (task.state === "partial" && task.artifact.previewReady) {
+    return migrationText("task.partialReady");
+  }
+  if (
+    ["succeeded", "succeeded_with_warnings"].includes(task.state) &&
+    task.artifact.previewReady
+  ) {
+    return task.state === "succeeded_with_warnings"
+      ? migrationText("task.readyWithWarnings")
+      : migrationText("task.ready");
+  }
+  return task.message;
+}
+
+function verificationLabel(
+  status: MigrationArtifact["verification"]["status"],
+): string {
+  switch (status) {
+    case "passed":
+      return migrationText("verification.passed");
+    case "failed":
+      return migrationText("verification.failed");
+    case "degraded":
+      return migrationText("verification.degraded");
+  }
+}
+
+function MigrationTransferProgress({
+  stage,
+}: {
+  stage: "session" | "upload" | "analysis";
+}) {
+  const { t } = useTranslation("migrations");
+  const stages = [
+    { id: "session", label: t("transfer.session") },
+    { id: "upload", label: t("transfer.upload") },
+    { id: "analysis", label: t("transfer.analysis") },
+  ] as const;
+  const activeIndex = stages.findIndex((item) => item.id === stage);
+  return (
+    <div className="migration-transfer-progress" role="status">
+      {stages.map((item, index) => (
+        <div
+          key={item.id}
+          className={
+            index < activeIndex
+              ? "is-complete"
+              : index === activeIndex
+                ? "is-active"
+                : ""
+          }
+        >
+          <span
+            className="migration-transfer-progress__marker"
+            aria-hidden="true"
+          />
+          {index === activeIndex ? (
+            <TextShimmer>{item.label}</TextShimmer>
+          ) : (
+            <strong>{item.label}</strong>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function isActiveState(state: MigrationTask["state"]): boolean {
+  return ["analyzing", "migrating", "validating", "packaging"].includes(state);
+}
+
+function migrationStartingTask(
+  task: MigrationTask,
+  framework: MigrationFramework,
+  entry: string | null,
+  appName: string,
+): MigrationTask {
+  return {
+    ...task,
+    state: "migrating",
+    message: migrationText("confirmation.starting"),
+    canModify: false,
+    canUpload: false,
+    canAnswer: false,
+    canConfirm: false,
+    canStop: false,
+    confirmation: {
+      framework,
+      entry,
+      app_name: appName,
+    },
+  };
+}
+
+function isTerminalState(state: MigrationTask["state"]): boolean {
+  return [
+    "succeeded",
+    "succeeded_with_warnings",
+    "partial",
+    "failed",
+    "cancelled",
+    "expired",
+  ].includes(state);
+}
+
+function shouldShowCodexActivity(task: MigrationTask): boolean {
+  return (
+    task.state === "analyzing" ||
+    Boolean(task.analysisRef) ||
+    Boolean(task.confirmation) ||
+    task.error?.code.startsWith("MIGRATION_ANALYSIS_") === true
+  );
+}
+
+function sourceStem(name: string): string {
+  return name.replace(/\.zip$/i, "");
+}
+
+function isSelectableMigrationModel(
+  model: ModelOption,
+  unsupportedModelIds: ReadonlySet<string>,
+): boolean {
+  return (
+    model.apiKeyAllowed !== false &&
+    !unsupportedModelIds.has(model.id) &&
+    (model.available || model.lifecycleStatus === "Retiring")
+  );
+}
+
+function defaultAppName(name: string): string {
+  const value = sourceStem(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return (
+    (value || "agent-migration").slice(0, 63).replace(/-+$/g, "") ||
+    "agent-migration"
+  );
+}
+
+function appNameError(value: string): string {
+  if (!value.trim()) return migrationText("validation.agentNameRequired");
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value.trim())) {
+    return migrationText("validation.agentNameInvalid");
+  }
+  return "";
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function formatByteLimit(value: number): string {
+  return formatBytes(value).replace(".0 MiB", " MiB").replace(".0 KiB", " KiB");
+}
+
+function formatElapsedTime(seconds: number): string {
+  if (seconds < 60) return migrationText("duration.seconds", { seconds });
+  return migrationText("duration.minutesSeconds", {
+    minutes: Math.floor(seconds / 60),
+    seconds: seconds % 60,
+  });
+}
+
+function formatDate(value: string | number): string {
+  const date =
+    typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(i18n.resolvedLanguage || i18n.language, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function migrationExpiryCopy(
+  task: MigrationTask,
+  now: number,
+): { title: string; detail: string } {
+  const sourceSaved = task.persistence?.state === "saved";
+  const sourceSaving = task.persistence?.state === "saving";
+  const activeDetail = sourceSaved
+    ? migrationText("expiry.savedUnaffected")
+    : sourceSaving
+      ? migrationText("expiry.savingUnaffected")
+      : migrationText("expiry.activeDetail");
+  const expiry = new Date(task.expiresAt).getTime();
+  if (!Number.isFinite(expiry)) {
+    return {
+      title: migrationText("expiry.oneHour"),
+      detail: activeDetail,
+    };
+  }
+  if (isMigrationEnvironmentExpired(task, now)) {
+    return {
+      title: migrationText("expiry.ended"),
+      detail: sourceSaved
+        ? migrationText("expiry.savedAvailable")
+        : migrationText("expiry.unavailable"),
+    };
+  }
+  const remaining = Math.max(0, expiry - now);
+  const minutes = Math.floor(remaining / 60_000);
+  const seconds = Math.floor((remaining % 60_000) / 1_000);
+  return {
+    title: migrationText("expiry.countdown", { minutes, seconds }),
+    detail: activeDetail,
+  };
+}
+
+function upsertTask(
+  tasks: MigrationTask[],
+  task: MigrationTask,
+): MigrationTask[] {
+  const next = tasks.filter((item) => item.id !== task.id);
+  return [task, ...next].sort((left, right) => {
+    const leftTime =
+      typeof left.createdAt === "number"
+        ? left.createdAt * 1000
+        : new Date(left.createdAt).getTime();
+    const rightTime =
+      typeof right.createdAt === "number"
+        ? right.createdAt * 1000
+        : new Date(right.createdAt).getTime();
+    return rightTime - leftTime;
+  });
+}
+
+function selectedTask(
+  tasks: MigrationTask[],
+  taskId: string,
+): MigrationTask | null {
+  return tasks.find((item) => item.id === taskId) ?? null;
+}
+
+function isTextMime(mimeType: string, path: string): boolean {
+  return (
+    mimeType.startsWith("text/") ||
+    /(?:json|javascript|xml|yaml)/i.test(mimeType) ||
+    /\.(?:py|ts|tsx|js|jsx|json|ya?ml|md|txt|toml|ini|cfg|env|sh|dockerfile)$/i.test(
+      path,
+    )
+  );
+}
+
+function AnalysisSummary({ analysis }: { analysis: MigrationAnalysis }) {
+  const { t } = useTranslation("migrations");
+  return (
+    <div className="migration-analysis">
+      <Markdown text={analysis.summary} allowRawHtml={false} />
+      <div className="migration-analysis__facts">
+        {analysis.recommended ? (
+          <section>
+            <h3>{t("analysis.recommended")}</h3>
+            <strong>{frameworkLabel(analysis.recommended.framework)}</strong>
+            <p>{analysis.recommended.reason}</p>
+          </section>
+        ) : null}
+        <section>
+          <h3>{t("analysis.scope")}</h3>
+          <ul>
+            {analysis.boundary.include.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+        {analysis.boundary.exclude.length > 0 ? (
+          <section>
+            <h3>{t("analysis.excluded")}</h3>
+            <ul>
+              {analysis.boundary.exclude.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+      </div>
+      {analysis.frameworks[0]?.evidence.length ? (
+        <details className="migration-analysis__evidence">
+          <summary>{t("analysis.viewEvidence")}</summary>
+          <ul>
+            {analysis.frameworks.flatMap((candidate) =>
+              candidate.evidence.map((item) => (
+                <li key={`${candidate.id}:${item.path}:${item.line}`}>
+                  <code>
+                    {item.path}:{item.line}
+                  </code>
+                  <span>{item.reason}</span>
+                </li>
+              )),
+            )}
+          </ul>
+        </details>
+      ) : null}
+      {analysis.warnings.length > 0 ? (
+        <div className="migration-analysis__warnings">
+          {analysis.warnings.map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+        </div>
+      ) : null}
+      {analysis.assumptions.length > 0 ? (
+        <details className="migration-analysis__evidence">
+          <summary>{t("analysis.viewAssumptions")}</summary>
+          <ul>
+            {analysis.assumptions.map((assumption) => (
+              <li key={assumption}>{assumption}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function MigrationActivityFeed({
+  activity,
+  loading,
+  error,
+  analyzing,
+}: {
+  activity: MigrationActivity | null;
+  loading: boolean;
+  error: string;
+  analyzing: boolean;
+}) {
+  const { t } = useTranslation("migrations");
+  const items = activity?.items ?? [];
+  const blocks = migrationActivityBlocks(items);
+
+  return (
+    <section
+      className="migration-activity"
+      aria-label={t("activity.ariaLabel")}
+    >
+      <div className="migration-activity__heading">
+        <span
+          className={`migration-activity__marker${activity?.complete ? " is-complete" : ""}`}
+          aria-hidden="true"
+        />
+        <strong>{t("activity.title")}</strong>
+      </div>
+      {blocks.length > 0 ? (
+        <div className="migration-activity__stream">
+          <Blocks blocks={blocks} onAction={ignoreMigrationAction} />
+        </div>
+      ) : loading || !activity?.complete ? (
+        <TextShimmer>
+          {analyzing
+            ? t("activity.startingAnalysis")
+            : t("activity.startingMigration")}
+        </TextShimmer>
+      ) : null}
+      {error ? (
+        <p className="migration-activity__error" role="status">
+          {error}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function ArtifactBrowser({
+  task,
+  artifact,
+}: {
+  task: MigrationTask;
+  artifact: MigrationArtifact;
+}) {
+  const { t, i18n: translation } = useTranslation("migrations");
+  const [query, setQuery] = useState("");
+  const [activePath, setActivePath] = useState(artifact.files[0]?.path ?? "");
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const activeFile =
+    artifact.files.find((file) => file.path === activePath) ??
+    artifact.files[0];
+  const filteredFiles = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    const matches = normalized
+      ? artifact.files.filter((file) =>
+          file.path.toLocaleLowerCase().includes(normalized),
+        )
+      : artifact.files;
+    return matches.slice(0, MAX_VISIBLE_FILES);
+  }, [artifact.files, query]);
+
+  useEffect(() => {
+    if (!activeFile) return;
+    if (activeFile.size > 2 * 1024 * 1024) {
+      setPreview({
+        path: activeFile.path,
+        loading: false,
+        error: t("artifact.fileTooLarge"),
+      });
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl = "";
+    setPreview({ path: activeFile.path, loading: true });
+    void getMigrationArtifactFile(task.id, activeFile.path, controller.signal)
+      .then(async ({ blob, mimeType }) => {
+        if (controller.signal.aborted) return;
+        if (mimeType.startsWith("image/")) {
+          objectUrl = URL.createObjectURL(blob);
+          setPreview({
+            path: activeFile.path,
+            loading: false,
+            imageUrl: objectUrl,
+          });
+          return;
+        }
+        if (isTextMime(mimeType, activeFile.path)) {
+          const text = await blob.text();
+          if (controller.signal.aborted) return;
+          setPreview({
+            path: activeFile.path,
+            loading: false,
+            text,
+          });
+          return;
+        }
+        setPreview({
+          path: activeFile.path,
+          loading: false,
+          error: t("artifact.unsupportedPreview"),
+        });
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setPreview({
+          path: activeFile.path,
+          loading: false,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [activeFile, task.id, t, translation.resolvedLanguage]);
+
+  return (
+    <div className="migration-artifact-browser">
+      <aside aria-label={t("artifact.filesAria")}>
+        <label className="migration-artifact-browser__search">
+          <span className="sr-only">{t("artifact.searchAria")}</span>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder={t("artifact.searchPlaceholder")}
+          />
+        </label>
+        <div className="migration-artifact-browser__files">
+          {filteredFiles.map((file) => (
+            <button
+              type="button"
+              key={file.path}
+              className={file.path === activeFile?.path ? "is-active" : ""}
+              onClick={() => setActivePath(file.path)}
+              title={file.path}
+            >
+              <FileIcon />
+              <span>{file.path}</span>
+              <small>{formatBytes(file.size)}</small>
+            </button>
+          ))}
+        </div>
+        {artifact.files.length > filteredFiles.length ? (
+          <p className="migration-artifact-browser__limit">
+            {t("artifact.limit", { count: MAX_VISIBLE_FILES })}
+          </p>
+        ) : null}
+      </aside>
+      <section>
+        <header>
+          <span title={activeFile?.path}>
+            {activeFile?.path || t("artifact.noSelection")}
+          </span>
+          {activeFile ? <small>{formatBytes(activeFile.size)}</small> : null}
+        </header>
+        <div className="migration-artifact-browser__preview">
+          {!activeFile ? (
+            <p>{t("artifact.noPreview")}</p>
+          ) : preview?.path !== activeFile.path || preview.loading ? (
+            <TextShimmer>{t("artifact.loadingFile")}</TextShimmer>
+          ) : preview.error ? (
+            <p role="status">{preview.error}</p>
+          ) : preview.imageUrl ? (
+            <img src={preview.imageUrl} alt={activeFile.path} />
+          ) : (
+            <CodeEditor
+              value={preview.text ?? ""}
+              path={activeFile.path}
+              readOnly
+              onChange={() => undefined}
+            />
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export function MigrationWorkspace({
+  cloudProvider,
+  onBack,
+  onAgentAdded,
+  onDeploymentTaskChange,
+  onDeploymentStarted,
+  onDeploymentComplete,
+  initialDeployRegion = defaultCloudRegion(cloudProvider),
+  projectCapabilities,
+  projectCapabilitiesLoading,
+  optimizationPreparationStage,
+  optimizationError,
+  onOptimizeVersion,
+  onCancelOptimization,
+  onDownloadSavedVersion,
+  onDeploySavedVersion,
+  initialPage = "new",
+  initialProjectId = "",
+}: MigrationWorkspaceProps) {
+  const { t, i18n } = useTranslation("migrations");
+  const locale = i18n.resolvedLanguage || i18n.language;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const migrationTabRef = useRef<HTMLButtonElement>(null);
+  const evaluationTabRef = useRef<HTMLButtonElement>(null);
+  const preparedAnalysisRef = useRef("");
+  const evaluationDraftTaskRef = useRef("");
+  const transferAbortRef = useRef<AbortController | null>(null);
+  const evaluationReportAbortRef = useRef<AbortController | null>(null);
+  const [capability, setCapability] = useState<MigrationCapabilities | null>(
+    null,
+  );
+  const [tasks, setTasks] = useState<MigrationTask[]>([]);
+  const [page, setPage] = useState<"new" | "projects">(initialPage);
+  const [focusedProjectId, setFocusedProjectId] = useState(initialProjectId);
+  const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [activeTaskTab, setActiveTaskTab] = useState<"migration" | "evaluation">(
+    "migration",
+  );
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState("");
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
+  const [modelsReloadKey, setModelsReloadKey] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [capabilityError, setCapabilityError] = useState("");
+  const [loadKey, setLoadKey] = useState(0);
+  const [showAllTasks, setShowAllTasks] = useState(false);
+  const [action, setAction] = useState<
+    "create" | "upload" | "answer" | "confirm" | "stop" | "download" | ""
+  >("");
+  const [error, setError] = useState("");
+  const [pollError, setPollError] = useState("");
+  const [pollErrorRetryable, setPollErrorRetryable] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [createStartedAt, setCreateStartedAt] = useState<number | null>(null);
+  const [framework, setFramework] = useState<MigrationFramework>("langchain");
+  const [entry, setEntry] = useState("");
+  const [appName, setAppName] = useState("");
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [artifact, setArtifact] = useState<MigrationArtifact | null>(null);
+  const [artifactError, setArtifactError] = useState("");
+  const [artifactErrorRetryable, setArtifactErrorRetryable] = useState(false);
+  const [artifactReload, setArtifactReload] = useState(0);
+  const [activity, setActivity] = useState<MigrationActivity | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState("");
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
+  const [deploymentOpen, setDeploymentOpen] = useState(false);
+  const [deployRegion, setDeployRegion] = useState(initialDeployRegion);
+  const [network, setNetwork] = useState<NetworkConfig | undefined>();
+  const [deploymentEnvValues, setDeploymentEnvValues] = useState<
+    Record<string, string>
+  >({});
+  const [evaluationDraft, setEvaluationDraft] =
+    useState<MigrationEvaluationDraft>(createMigrationEvaluationDraft);
+  const [evaluationErrors, setEvaluationErrors] = useState<
+    Record<string, string>
+  >({});
+  const [evaluationAction, setEvaluationAction] = useState<
+    "dataset" | "resume" | "retry" | "download" | ""
+  >("");
+  const [evaluationDatasetSaveError, setEvaluationDatasetSaveError] = useState<{
+    taskId: string;
+    message: string;
+  } | null>(null);
+  const [evaluationDraftLoadingTaskId, setEvaluationDraftLoadingTaskId] =
+    useState("");
+  const [evaluationDraftLoadError, setEvaluationDraftLoadError] = useState<{
+    taskId: string;
+    message: string;
+  } | null>(null);
+  const [evaluationDraftReloadKey, setEvaluationDraftReloadKey] = useState(0);
+  const [evaluationReport, setEvaluationReport] = useState<string | null>(null);
+  const [evaluationReportLoading, setEvaluationReportLoading] = useState(false);
+  const [evaluationReportError, setEvaluationReportError] = useState("");
+  const [evaluationActionError, setEvaluationActionError] = useState("");
+  const task = selectedTask(tasks, selectedTaskId);
+  const taskEnvironmentExpired = task
+    ? isMigrationEnvironmentExpired(task, now)
+    : false;
+  const hasPollableTasks = tasks.some(
+    (item) =>
+      !isMigrationEnvironmentExpired(item, now) &&
+      (isActiveState(item.state) || isEvaluationPollingState(item)),
+  );
+  const maxSourceBytes = capability?.maxUploadBytes ?? MAX_SOURCE_BYTES;
+  const maxSourceSizeLabel = formatByteLimit(maxSourceBytes);
+  const unsupportedMigrationModelIds = useMemo(
+    () => new Set(capability?.unsupportedModelIds ?? []),
+    [capability?.unsupportedModelIds],
+  );
+  const selectableModels = useMemo(
+    () =>
+      models.filter((model) =>
+        isSelectableMigrationModel(model, unsupportedMigrationModelIds),
+      ),
+    [models, unsupportedMigrationModelIds],
+  );
+  const composerModelId = task?.modelId || selectedModelId;
+  const modelSelectOptions = useMemo(() => {
+    const options = selectableModels.map((model) => ({
+      value: model.id,
+      label: model.displayName,
+      description: [
+        model.id,
+        model.vendorName,
+        model.lifecycleStatus === "Retiring" ? t("model.retiring") : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    }));
+    const fallbackId = (
+      task?.modelId ||
+      selectedModelId ||
+      capability?.model?.id ||
+      ""
+    ).trim();
+    const preservesExistingTaskModel =
+      Boolean(task?.modelId) && task?.modelId === fallbackId;
+    if (
+      fallbackId &&
+      preservesExistingTaskModel &&
+      !options.some((option) => option.value === fallbackId)
+    ) {
+      options.unshift({
+        value: fallbackId,
+        label: fallbackId,
+        description: t("model.currentDefault"),
+      });
+    }
+    return options;
+  }, [
+    capability?.model?.id,
+    selectableModels,
+    selectedModelId,
+    task?.modelId,
+    t,
+  ]);
+  const createElapsedSeconds = createStartedAt
+    ? Math.max(0, Math.floor((now - createStartedAt) / 1_000))
+    : 0;
+  const latestActivity = activity?.items[activity.items.length - 1];
+  const activityKey = [
+    activity?.items.length ?? 0,
+    latestActivity?.id ?? "",
+    latestActivity?.status ?? "",
+    latestActivity?.detail?.length ?? 0,
+  ].join(":");
+  const {
+    ref: conversationRef,
+    onScroll: handleConversationScroll,
+  } = useStickToBottom<HTMLDivElement>(
+    `${task?.id ?? "new"}:${task?.state ?? "new"}:${activityKey}`,
+  );
+
+  async function reconcileTaskState(
+    taskId: string,
+    surfaceError = true,
+    signal?: AbortSignal,
+  ) {
+    try {
+      const authoritative = await getMigrationTask(taskId, signal);
+      if (signal?.aborted) return null;
+      setTasks((current) => upsertTask(current, authoritative));
+      setPollError("");
+      setPollErrorRetryable(false);
+      return authoritative;
+    } catch (cause) {
+      if (signal?.aborted) return null;
+      if (surfaceError) {
+        setPollError(cause instanceof Error ? cause.message : String(cause));
+        setPollErrorRetryable(
+          cause instanceof MigrationApiError && cause.retryable,
+        );
+      }
+      return null;
+    }
+  }
+
+  async function reconcileTaskList(signal?: AbortSignal) {
+    try {
+      const authoritative = await listMigrationTasks(signal);
+      if (signal?.aborted) return;
+      setTasks(authoritative);
+      setPollError("");
+      setPollErrorRetryable(false);
+    } catch (cause) {
+      if (signal?.aborted) return;
+      setPollError(cause instanceof Error ? cause.message : String(cause));
+      setPollErrorRetryable(
+        cause instanceof MigrationApiError && cause.retryable,
+      );
+    }
+  }
+
+  function updateTaskEvaluation(
+    taskId: string,
+    evaluation: NonNullable<MigrationTask["evaluation"]>,
+  ) {
+    setTasks((current) =>
+      current.map((item) =>
+        item.id === taskId
+          ? {
+              ...item,
+              evaluation: { ...item.evaluation, ...evaluation },
+            }
+          : item,
+      ),
+    );
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setLoadError("");
+    setCapabilityError("");
+    void Promise.allSettled([
+      getMigrationCapabilities(controller.signal),
+      listMigrationTasks(controller.signal),
+    ])
+      .then(([capabilityResult, taskResult]) => {
+        if (controller.signal.aborted) return;
+        if (capabilityResult.status === "fulfilled") {
+          setCapability(capabilityResult.value);
+        } else {
+          setCapabilityError(
+            capabilityResult.reason instanceof Error
+              ? capabilityResult.reason.message
+              : String(capabilityResult.reason),
+          );
+        }
+        if (taskResult.status === "fulfilled") {
+          setTasks(taskResult.value);
+        } else {
+          setLoadError(
+            taskResult.reason instanceof Error
+              ? taskResult.reason.message
+              : String(taskResult.reason),
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [loadKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setModelsLoading(true);
+    setModelsError("");
+    void listModelOptions({
+      signal: controller.signal,
+      refresh: modelsReloadKey > 0,
+      scope: "development",
+    })
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setModels(response.models);
+      })
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) {
+          setModelsError(
+            cause instanceof Error ? cause.message : t("model.loadError"),
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setModelsLoading(false);
+      });
+    return () => controller.abort();
+  }, [cloudProvider, modelsReloadKey, t]);
+
+  useEffect(() => {
+    if (
+      !capability ||
+      task ||
+      modelsLoading ||
+      modelsError ||
+      selectableModels.length === 0
+    ) {
+      return;
+    }
+    if (selectableModels.some((model) => model.id === selectedModelId)) return;
+    const configuredModelId = capability.model?.id.trim() || "";
+    const defaultModelId =
+      configuredModelId &&
+      selectableModels.some((model) => model.id === configuredModelId)
+        ? configuredModelId
+        : selectableModels[0]?.id || "";
+    if (defaultModelId) setSelectedModelId(defaultModelId);
+  }, [
+    capability,
+    modelsError,
+    modelsLoading,
+    selectableModels,
+    selectedModelId,
+    task,
+  ]);
+
+  useEffect(
+    () => () => {
+      transferAbortRef.current?.abort();
+      transferAbortRef.current = null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!hasPollableTasks || action === "confirm") return;
+    const controller = new AbortController();
+    const timer = window.setInterval(() => {
+      void listMigrationTasks(controller.signal)
+        .then((nextTasks) => {
+          if (!controller.signal.aborted) setTasks(nextTasks);
+          setPollError("");
+          setPollErrorRetryable(false);
+        })
+        .catch((cause: unknown) => {
+          if (controller.signal.aborted) return;
+          setPollError(cause instanceof Error ? cause.message : String(cause));
+          setPollErrorRetryable(
+            cause instanceof MigrationApiError && cause.retryable,
+          );
+          if (!(cause instanceof MigrationApiError && cause.retryable)) {
+            window.clearInterval(timer);
+          }
+        });
+    }, LIST_POLL_INTERVAL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [action, hasPollableTasks]);
+
+  useEffect(() => {
+    if (
+      action === "confirm" ||
+      !task ||
+      taskEnvironmentExpired ||
+      (!isActiveState(task.state) &&
+        task.persistence?.state !== "saving" &&
+        !isEvaluationPollingState(task))
+    )
+      return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await getMigrationTask(task.id, controller.signal);
+        if (controller.signal.aborted) return;
+        setTasks((current) => upsertTask(current, next));
+        setPollError("");
+        setPollErrorRetryable(false);
+        if (
+          !isMigrationEnvironmentExpired(next, Date.now()) &&
+          (isActiveState(next.state) ||
+            next.persistence?.state === "saving" ||
+            isEvaluationPollingState(next))
+        ) {
+          timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+        }
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setPollError(cause instanceof Error ? cause.message : String(cause));
+        setPollErrorRetryable(
+          cause instanceof MigrationApiError && cause.retryable,
+        );
+        if (cause instanceof MigrationApiError && cause.retryable) {
+          timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+        }
+      }
+    };
+    timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    task?.id,
+    task?.state,
+    task?.persistence?.state,
+    task?.evaluation?.state,
+    taskEnvironmentExpired,
+    action,
+  ]);
+
+  useEffect(() => {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    conversation.scrollTop =
+      activeTaskTab === "evaluation" ? 0 : conversation.scrollHeight;
+    handleConversationScroll();
+  }, [activeTaskTab, selectedTaskId, conversationRef, handleConversationScroll]);
+
+  useEffect(() => {
+    setActiveTaskTab("migration");
+  }, [selectedTaskId]);
+
+  useEffect(() => {
+    setActivity(null);
+    setActivityError("");
+    setActivityLoading(false);
+  }, [task?.id]);
+
+  useEffect(() => {
+    if (!task || taskEnvironmentExpired || !shouldShowCodexActivity(task)) {
+      return;
+    }
+
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = async () => {
+      setActivityLoading(true);
+      try {
+        const next = await getMigrationActivity(task.id, controller.signal);
+        if (controller.signal.aborted) return;
+        setActivity(next);
+        setActivityError("");
+        if (
+          !next.complete &&
+          !taskEnvironmentExpired &&
+          isActiveState(task.state)
+        ) {
+          timer = window.setTimeout(
+            () => void poll(),
+            ACTIVITY_POLL_INTERVAL_MS,
+          );
+        }
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setActivityError(t("activity.loadError"));
+        if (
+          !taskEnvironmentExpired &&
+          isActiveState(task.state) &&
+          cause instanceof MigrationApiError &&
+          cause.retryable
+        ) {
+          timer = window.setTimeout(
+            () => void poll(),
+            ACTIVITY_POLL_INTERVAL_MS,
+          );
+        }
+      } finally {
+        if (!controller.signal.aborted) setActivityLoading(false);
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    task?.id,
+    task?.state,
+    task?.analysisRef?.sha256,
+    task?.confirmation?.framework,
+    taskEnvironmentExpired,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (
+      !task?.analysis ||
+      !task.analysisRef ||
+      !["needs_input", "analysis_ready"].includes(task.state)
+    ) {
+      return;
+    }
+    const analysisKey = `${task.id}:${task.analysisRef.attempt}:${task.analysisRef.sha256}`;
+    if (preparedAnalysisRef.current === analysisKey) return;
+    preparedAnalysisRef.current = analysisKey;
+    setAnswers({});
+    if (task.state !== "analysis_ready") return;
+    const recommended = task.analysis.recommended;
+    if (!recommended) return;
+    setFramework(recommended.framework);
+    setEntry(recommended.entry || "");
+    setAppName(defaultAppName(task.sourceFileName));
+  }, [task]);
+
+  useEffect(() => {
+    setArtifact(null);
+    setArtifactError("");
+    setArtifactErrorRetryable(false);
+    setDeploymentOpen(false);
+    setDeploymentEnvValues({});
+    if (!task?.artifact.previewReady || taskEnvironmentExpired) return;
+    const controller = new AbortController();
+    void getMigrationArtifact(task.id, controller.signal)
+      .then((next) => {
+        if (!controller.signal.aborted) setArtifact(next);
+      })
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) {
+          setArtifactError(
+            cause instanceof Error ? cause.message : String(cause),
+          );
+          setArtifactErrorRetryable(
+            cause instanceof MigrationApiError && cause.retryable,
+          );
+        }
+      });
+    return () => controller.abort();
+  }, [
+    task?.id,
+    task?.artifact.previewReady,
+    taskEnvironmentExpired,
+    artifactReload,
+  ]);
+
+  useEffect(() => {
+    setEvaluationErrors({});
+    if (!task?.evaluation?.enabled) {
+      evaluationDraftTaskRef.current = "";
+      setEvaluationDraftLoadingTaskId("");
+      setEvaluationDraftLoadError(null);
+      setEvaluationDraft(createMigrationEvaluationDraft());
+      return;
+    }
+    if (
+      !needsEvaluationDraftHydration(
+        task.id,
+        task.evaluation.enabled,
+        evaluationDraftTaskRef.current,
+      )
+    )
+      return;
+    evaluationDraftTaskRef.current = task.id;
+    const draft = createMigrationEvaluationDraft();
+    const fallbackDraft: MigrationEvaluationDraft = {
+      ...draft,
+      enabled: true,
+      preset: task.evaluation.preset ?? "standard",
+      dimensions: task.evaluation.dimensions?.length
+        ? [...task.evaluation.dimensions]
+        : draft.dimensions,
+    };
+    setEvaluationDraft(fallbackDraft);
+    setEvaluationDraftLoadingTaskId(task.id);
+    setEvaluationDraftLoadError(null);
+    const controller = new AbortController();
+    void getMigrationEvaluationDataset(task.id, controller.signal)
+      .then((dataset) => {
+        if (controller.signal.aborted) return;
+        if (!dataset.locked) {
+          if (task.state !== "awaiting_upload") {
+            recordEvaluationDatasetSaveFailure(
+              task.id,
+              new Error(t("evaluation.dataset.missing")),
+            );
+          }
+          return;
+        }
+        if (!dataset.asset) {
+          throw new Error(t("evaluation.dataset.invalidLockResponse"));
+        }
+        setEvaluationDraft(
+          evaluationDraftFromDataset(dataset, task.evaluation!),
+        );
+        applySavedEvaluationDataset(task.id, dataset);
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setEvaluationDraftLoadError({
+          taskId: task.id,
+          message: cause instanceof Error ? cause.message : String(cause),
+        });
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setEvaluationDraftLoadingTaskId("");
+      });
+    return () => controller.abort();
+  }, [task?.id, task?.evaluation?.enabled, evaluationDraftReloadKey]);
+
+  useEffect(() => {
+    evaluationReportAbortRef.current?.abort();
+    evaluationReportAbortRef.current = null;
+    setEvaluationReport(null);
+    setEvaluationReportError("");
+    setEvaluationActionError("");
+    setEvaluationReportLoading(false);
+  }, [
+    task?.id,
+    task?.evaluation?.report?.versionId,
+  ]);
+
+  useEffect(
+    () => () => {
+      evaluationReportAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!artifact) return;
+    const defaults = migrationDeploymentEnvDefaults(artifact, cloudProvider);
+    setDeploymentEnvValues((current) => {
+      const next = { ...current };
+      for (const [key, value] of Object.entries(defaults)) {
+        if (!next[key]?.trim()) next[key] = value;
+      }
+      return next;
+    });
+  }, [artifact, cloudProvider]);
+
+  function selectFile(file: File | undefined) {
+    if (transferAbortRef.current) return;
+    setError("");
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setSourceFile(null);
+      setError(t("upload.zipOnly"));
+      return;
+    }
+    if (file.name.length > 255 || /[/\\\u0000-\u001f]/.test(file.name)) {
+      setSourceFile(null);
+      setError(t("upload.invalidName"));
+      return;
+    }
+    if (file.size > maxSourceBytes) {
+      setSourceFile(null);
+      setError(t("upload.tooLarge", { size: maxSourceSizeLabel }));
+      return;
+    }
+    if (file.size === 0) {
+      setSourceFile(null);
+      setError(t("upload.empty"));
+      return;
+    }
+    setSourceFile(file);
+  }
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    selectFile(file);
+  }
+
+  function validateEvaluationDraft(): boolean {
+    const unavailableMessage =
+      evaluationDraft.enabled && !capability?.evaluation?.available
+        ? capability?.evaluation?.reason || t("evaluation.setup.unavailable")
+        : "";
+    const validation = validateMigrationEvaluationDraft(
+      evaluationDraft,
+      unavailableMessage,
+      (key, options) => t(key, options),
+    );
+    setEvaluationErrors(validation.errors);
+    return validation.valid;
+  }
+
+  async function saveEvaluationDataset(
+    taskId: string,
+    signal: AbortSignal,
+  ): Promise<MigrationEvaluationDataset> {
+    const dataset = await putMigrationEvaluationDataset(
+      taskId,
+      evaluationCasesFromDraft(evaluationDraft),
+      signal,
+    );
+    if (!dataset.locked || !dataset.asset) {
+      throw new Error(t("evaluation.dataset.invalidLockResponse"));
+    }
+    return dataset;
+  }
+
+  function applySavedEvaluationDataset(
+    taskId: string,
+    dataset: MigrationEvaluationDataset,
+  ) {
+    if (!dataset.asset) return;
+    setTasks((current) =>
+      current.map((item) => {
+        if (item.id !== taskId || !item.evaluation?.enabled) return item;
+        return {
+          ...item,
+          evaluation: {
+            ...item.evaluation,
+            state:
+              item.evaluation.state === "waiting_dataset"
+                ? "pending"
+                : item.evaluation.state,
+            message:
+              item.evaluation.state === "waiting_dataset"
+                ? t("evaluation.state.pending")
+                : item.evaluation.message,
+            dataset: dataset.asset,
+          },
+        };
+      }),
+    );
+    setEvaluationDatasetSaveError((current) =>
+      current?.taskId === taskId ? null : current,
+    );
+  }
+
+  function recordEvaluationDatasetSaveFailure(taskId: string, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    setEvaluationDatasetSaveError({ taskId, message });
+    setTasks((current) =>
+      current.map((item) =>
+        item.id === taskId && item.evaluation?.enabled
+          ? {
+              ...item,
+              evaluation: {
+                ...item.evaluation,
+                state: "waiting_dataset",
+                message: t("evaluation.dataset.saveWarning"),
+                canResume: false,
+                canRetry: false,
+              },
+            }
+          : item,
+      ),
+    );
+  }
+
+  async function createAndUpload() {
+    if (!sourceFile || action || transferAbortRef.current) return;
+    if (!validateEvaluationDraft()) return;
+    const controller = new AbortController();
+    transferAbortRef.current = controller;
+    const isCurrent = () =>
+      transferAbortRef.current === controller && !controller.signal.aborted;
+    const createdTaskId = `migration-v1-${crypto.randomUUID().replace(/-/g, "")}`;
+    setAction("create");
+    setCreateStartedAt(Date.now());
+    setError("");
+    try {
+      const created = await createMigrationTask({
+        taskId: createdTaskId,
+        sourceFileName: sourceFile.name,
+        instruction: "",
+        modelId: selectedModelId || undefined,
+        evaluation: evaluationDraft.enabled
+          ? {
+              enabled: true,
+              preset: evaluationDraft.preset,
+              locale: resolveSupportedLocale(locale) ?? DEFAULT_LOCALE,
+              ...(evaluationDraft.preset === "custom"
+                ? { dimensions: evaluationDraft.dimensions }
+                : {}),
+            }
+          : undefined,
+        signal: controller.signal,
+      });
+      if (!isCurrent()) return;
+      setTasks((current) => upsertTask(current, created));
+      evaluationDraftTaskRef.current = created.id;
+      setSelectedTaskId(created.id);
+      setAction("upload");
+      setCreateStartedAt(null);
+      const [uploadResult, datasetResult] = await Promise.allSettled([
+        uploadMigrationSource(created.id, sourceFile, controller.signal),
+        evaluationDraft.enabled
+          ? saveEvaluationDataset(created.id, controller.signal)
+          : Promise.resolve(null),
+      ]);
+      if (!isCurrent()) return;
+      if (uploadResult.status === "rejected") throw uploadResult.reason;
+      const uploaded = uploadResult.value;
+      setTasks((current) => upsertTask(current, uploaded));
+      if (datasetResult.status === "fulfilled" && datasetResult.value) {
+        applySavedEvaluationDataset(created.id, datasetResult.value);
+      } else if (datasetResult.status === "rejected") {
+        recordEvaluationDatasetSaveFailure(created.id, datasetResult.reason);
+      }
+      setSourceFile(null);
+    } catch (cause) {
+      if (!isCurrent()) return;
+      const authoritative = await reconcileTaskState(
+        createdTaskId,
+        false,
+        controller.signal,
+      );
+      if (!isCurrent()) return;
+      if (authoritative) {
+        setSelectedTaskId(authoritative.id);
+        if (authoritative.state !== "awaiting_upload") {
+          setSourceFile(null);
+          return;
+        }
+      } else {
+        await reconcileTaskList(controller.signal);
+        if (!isCurrent()) return;
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (transferAbortRef.current === controller) {
+        transferAbortRef.current = null;
+        setCreateStartedAt(null);
+        setAction("");
+      }
+    }
+  }
+
+  async function uploadExistingTask() {
+    if (!task?.canUpload || !sourceFile || action || transferAbortRef.current) {
+      return;
+    }
+    if (task.evaluation?.enabled && !task.evaluation.dataset) {
+      if (!validateEvaluationDraft()) return;
+    }
+    const controller = new AbortController();
+    transferAbortRef.current = controller;
+    const isCurrent = () =>
+      transferAbortRef.current === controller && !controller.signal.aborted;
+    setAction("upload");
+    setError("");
+    try {
+      const [uploadResult, datasetResult] = await Promise.allSettled([
+        uploadMigrationSource(task.id, sourceFile, controller.signal),
+        task.evaluation?.enabled && !task.evaluation.dataset
+          ? saveEvaluationDataset(task.id, controller.signal)
+          : Promise.resolve(null),
+      ]);
+      if (!isCurrent()) return;
+      if (uploadResult.status === "rejected") throw uploadResult.reason;
+      const uploaded = uploadResult.value;
+      setTasks((current) => upsertTask(current, uploaded));
+      if (datasetResult.status === "fulfilled" && datasetResult.value) {
+        applySavedEvaluationDataset(task.id, datasetResult.value);
+      } else if (datasetResult.status === "rejected") {
+        recordEvaluationDatasetSaveFailure(task.id, datasetResult.reason);
+      }
+      setSourceFile(null);
+    } catch (cause) {
+      if (!isCurrent()) return;
+      const authoritative = await reconcileTaskState(
+        task.id,
+        true,
+        controller.signal,
+      );
+      if (!isCurrent()) return;
+      if (authoritative && authoritative.state !== "awaiting_upload") {
+        setSourceFile(null);
+        return;
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (transferAbortRef.current === controller) {
+        transferAbortRef.current = null;
+        setAction("");
+      }
+    }
+  }
+
+  const entryOptions = useMemo(
+    () =>
+      (task?.analysis?.entries ?? [])
+        .filter((candidate) => candidate.framework === framework)
+        .map((candidate) => ({
+          value: candidate.value,
+          label: candidate.value,
+          description: candidate.evidence,
+        })),
+    [framework, task?.analysis?.entries],
+  );
+  const requiredQuestionsAnswered = (task?.analysis?.questions ?? []).every(
+    (question) => !question.required || Boolean(answers[question.id]?.trim()),
+  );
+  const confirmationNameError = appNameError(appName);
+  const canConfirm = Boolean(
+    task?.canConfirm &&
+      task.analysisRef &&
+      !action &&
+      !confirmationNameError &&
+      (!STRUCTURED_FRAMEWORKS.has(framework) || entry.trim()),
+  );
+  const canSubmitAnswers = Boolean(
+    task?.canAnswer &&
+      task.analysisRef &&
+      !action &&
+      requiredQuestionsAnswered,
+  );
+
+  async function submitAnswers() {
+    if (!task?.analysisRef || !canSubmitAnswers) return;
+    setAction("answer");
+    setError("");
+    try {
+      const next = await submitMigrationAnalysisAnswers({
+        taskId: task.id,
+        analysisAttempt: task.analysisRef.attempt,
+        analysisSha256: task.analysisRef.sha256,
+        inputSha256: task.analysisRef.inputSha256,
+        answers,
+      });
+      setTasks((current) => upsertTask(current, next));
+    } catch (cause) {
+      const authoritative = await reconcileTaskState(task.id);
+      if (authoritative && authoritative.state !== "needs_input") return;
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAction("");
+    }
+  }
+
+  async function confirmMigration() {
+    if (!task?.analysisRef || !canConfirm) return;
+    const confirmedEntry = STRUCTURED_FRAMEWORKS.has(framework)
+      ? entry.trim()
+      : null;
+    const confirmedAppName = appName.trim();
+    setAction("confirm");
+    setError("");
+    setTasks((current) =>
+      upsertTask(
+        current,
+        migrationStartingTask(
+          task,
+          framework,
+          confirmedEntry,
+          confirmedAppName,
+        ),
+      ),
+    );
+    try {
+      const next = await confirmMigrationTask({
+        taskId: task.id,
+        framework,
+        entry: confirmedEntry || undefined,
+        appName: confirmedAppName,
+        instruction: "",
+        analysisAttempt: task.analysisRef.attempt,
+        analysisSha256: task.analysisRef.sha256,
+        inputSha256: task.analysisRef.inputSha256,
+      });
+      setTasks((current) => upsertTask(current, next));
+    } catch (cause) {
+      const authoritative = await reconcileTaskState(task.id);
+      if (authoritative && authoritative.state !== "analysis_ready") return;
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAction("");
+    }
+  }
+
+  async function stopTask() {
+    if (!task?.canStop || taskEnvironmentExpired || action) return;
+    setAction("stop");
+    setError("");
+    try {
+      const next = await stopMigrationTask(task.id);
+      setTasks((current) => upsertTask(current, next));
+      setStopConfirmOpen(false);
+    } catch (cause) {
+      const authoritative = await reconcileTaskState(task.id);
+      if (authoritative && !authoritative.canStop) {
+        setStopConfirmOpen(false);
+        return;
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAction("");
+    }
+  }
+
+  async function downloadArtifact() {
+    if (!task?.artifact.downloadReady || taskEnvironmentExpired || action)
+      return;
+    setAction("download");
+    setError("");
+    try {
+      await downloadMigrationArtifact(task.id, sourceStem(task.sourceFileName));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAction("");
+    }
+  }
+
+  async function resumeEvaluation(environment: Record<string, string>) {
+    if (!task?.evaluation?.canResume || evaluationAction) return;
+    setEvaluationAction("resume");
+    setEvaluationActionError("");
+    try {
+      const evaluation = await resumeMigrationEvaluation(task.id, environment);
+      updateTaskEvaluation(task.id, evaluation);
+    } catch (cause) {
+      setEvaluationActionError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+      await reconcileTaskState(task.id, false);
+    } finally {
+      setEvaluationAction("");
+    }
+  }
+
+  async function retryEvaluation() {
+    if (!task?.evaluation?.canRetry || evaluationAction) return;
+    setEvaluationAction("retry");
+    setEvaluationActionError("");
+    try {
+      const evaluation = await retryMigrationEvaluation(task.id);
+      updateTaskEvaluation(task.id, evaluation);
+    } catch (cause) {
+      setEvaluationActionError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+      await reconcileTaskState(task.id, false);
+    } finally {
+      setEvaluationAction("");
+    }
+  }
+
+  async function retryEvaluationDatasetSave() {
+    if (!task?.evaluation?.enabled || evaluationAction) return;
+    if (!validateEvaluationDraft()) return;
+    const controller = new AbortController();
+    setEvaluationAction("dataset");
+    try {
+      const dataset = await saveEvaluationDataset(task.id, controller.signal);
+      applySavedEvaluationDataset(task.id, dataset);
+    } catch (cause) {
+      recordEvaluationDatasetSaveFailure(task.id, cause);
+    } finally {
+      setEvaluationAction("");
+    }
+  }
+
+  async function loadEvaluationReport() {
+    if (
+      !task?.evaluation?.report?.viewReady ||
+      task.evaluation.state !== "completed" ||
+      evaluationReportLoading ||
+      evaluationReport
+    )
+      return;
+    evaluationReportAbortRef.current?.abort();
+    const controller = new AbortController();
+    evaluationReportAbortRef.current = controller;
+    setEvaluationReportLoading(true);
+    setEvaluationReportError("");
+    try {
+      const report = await getMigrationEvaluationReport(
+        task.id,
+        task.evaluation.report.versionId,
+        controller.signal,
+      );
+      if (!controller.signal.aborted) setEvaluationReport(report);
+    } catch (cause) {
+      if (!controller.signal.aborted) {
+        setEvaluationReportError(
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    } finally {
+      if (evaluationReportAbortRef.current === controller) {
+        evaluationReportAbortRef.current = null;
+        setEvaluationReportLoading(false);
+      }
+    }
+  }
+
+  async function downloadEvaluationReport() {
+    if (!task?.evaluation?.report?.downloadReady || evaluationAction) return;
+    setEvaluationAction("download");
+    setEvaluationActionError("");
+    try {
+      await downloadMigrationEvaluationReport(
+        task.id,
+        task.evaluation.report.versionId,
+      );
+    } catch (cause) {
+      setEvaluationActionError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    } finally {
+      setEvaluationAction("");
+    }
+  }
+
+  function startNewMigration() {
+    setPage("new");
+    setFocusedProjectId("");
+    setSelectedTaskId("");
+    setSourceFile(null);
+    setError("");
+    setPollError("");
+    setPollErrorRetryable(false);
+    setArtifact(null);
+    setArtifactError("");
+    setArtifactErrorRetryable(false);
+    setDeploymentOpen(false);
+    setStopConfirmOpen(false);
+    evaluationDraftTaskRef.current = "";
+    setEvaluationDraft(createMigrationEvaluationDraft());
+    setEvaluationErrors({});
+    setEvaluationAction("");
+    setEvaluationDatasetSaveError(null);
+    setEvaluationDraftLoadingTaskId("");
+    setEvaluationDraftLoadError(null);
+    setEvaluationDraftReloadKey(0);
+    setEvaluationReport(null);
+    setEvaluationReportError("");
+    setEvaluationActionError("");
+    const configuredModelId = capability?.model?.id.trim() || "";
+    setSelectedModelId(
+      selectableModels.some((model) => model.id === configuredModelId)
+        ? configuredModelId
+        : selectableModels[0]?.id || "",
+    );
+  }
+
+  const deploymentProject: AgentProject | null = artifact
+    ? {
+        name:
+          task?.confirmation?.app_name ||
+          defaultAppName(task?.sourceFileName || "migration.zip"),
+        files: [
+          {
+            path: "migration-result.json",
+            content: `${JSON.stringify(artifact, null, 2)}\n`,
+          },
+        ],
+      }
+    : null;
+  const deploymentSecretEnv = artifact
+    ? artifact.environment.required
+        .filter(isMigrationRuntimeEnvironmentKey)
+        .filter(isSecretEnvironmentKey)
+        .map((key) => ({ key, label: key }))
+    : [];
+  const deploymentEnv: EnvVar[] = artifact
+    ? [
+        ...artifact.environment.required
+          .filter(isMigrationRuntimeEnvironmentKey)
+          .filter((key) => !isSecretEnvironmentKey(key))
+          .map((key) => ({
+            key,
+            required: true,
+            comment: key,
+            placeholder: t("deployment.requiredPlaceholder", { key }),
+          })),
+        ...artifact.environment.optional
+          .filter(isMigrationRuntimeEnvironmentKey)
+          .map((key) => ({
+            key,
+            required: false,
+            comment: key,
+            placeholder: t("deployment.optionalPlaceholder", { key }),
+          })),
+      ]
+    : [];
+
+  async function handleDeploy(
+    project: AgentProject,
+    onStage?: (stage: DeployStage) => void,
+    options?: Parameters<typeof deployAgentkitProject>[3],
+  ) {
+    if (!task || !artifact) throw new Error(t("deployment.notReady"));
+    const runtimeNetwork =
+      network && network.mode !== "public"
+        ? {
+            mode: network.mode,
+            vpc_id: network.vpcId,
+            subnet_ids: network.subnetIds,
+            enable_shared_internet_access: network.enableSharedInternetAccess,
+          }
+        : undefined;
+    return deployAgentkitProject(
+      project.name,
+      project.files,
+      {
+        region: deployRegion,
+        projectName: "default",
+        network: runtimeNetwork,
+      },
+      {
+        ...options,
+        migrationTaskId: task.id,
+        onStage,
+      },
+    );
+  }
+
+  if (deploymentOpen && deploymentProject && task && artifact) {
+    return (
+      <div className="migration-deployment">
+        <ProjectPreview
+          cloudProvider={cloudProvider}
+          project={deploymentProject}
+          agentName={deploymentProject.name}
+          onDeploy={handleDeploy}
+          onAgentAdded={onAgentAdded}
+          onDeploymentTaskChange={onDeploymentTaskChange}
+          onDeploymentStarted={onDeploymentStarted}
+          onDeploymentComplete={onDeploymentComplete}
+          network={network}
+          onNetworkChange={setNetwork}
+          deployRegion={deployRegion}
+          onDeployRegionChange={setDeployRegion}
+          deploymentEnv={deploymentEnv}
+          requiredSecretEnv={deploymentSecretEnv}
+          deploymentEnvValues={deploymentEnvValues}
+          onDeploymentEnvChange={(key, value) =>
+            setDeploymentEnvValues((current) => ({ ...current, [key]: value }))
+          }
+          deploymentTelemetry={{
+            source: "migration",
+            createMode: "migration",
+            aiAssisted: true,
+          }}
+          onBack={() => setDeploymentOpen(false)}
+          backLabel={t("deployment.back")}
+          deploymentPrimaryPane={
+            <section className="migration-deployment-summary">
+              <strong>{t("artifact.title")}</strong>
+              <span>{task.sourceFileName}</span>
+              <dl>
+                <div>
+                  <dt>{t("confirmation.framework")}</dt>
+                  <dd>{artifact.migration.framework}</dd>
+                </div>
+                <div>
+                  <dt>{t("artifact.startupFile")}</dt>
+                  <dd>{artifact.startup.module}</dd>
+                </div>
+                <div>
+                  <dt>{t("artifact.fileCountLabel")}</dt>
+                  <dd>{artifact.files.length}</dd>
+                </div>
+              </dl>
+            </section>
+          }
+        />
+      </div>
+    );
+  }
+
+  const composerFile = sourceFile;
+  const composerBusy = action === "create" || action === "upload";
+  const isHome = page === "new" && !task && action !== "create";
+  const navigationBusy = composerBusy || action === "confirm" || action === "answer" || action === "stop" || Boolean(evaluationAction);
+  const showComposer = !task || (task.canUpload && !taskEnvironmentExpired);
+  const expiryCopy = task ? migrationExpiryCopy(task, now) : null;
+  const hasEvaluationTab = Boolean(task?.evaluation?.enabled);
+  const evaluationDatasetSaveFailed =
+    evaluationDatasetSaveError?.taskId === task?.id;
+  const evaluationSettingsLocked = Boolean(
+    task?.evaluation?.enabled &&
+      evaluationSettingsAreLocked(
+        task.state,
+        Boolean(task.evaluation.dataset),
+        evaluationDatasetSaveFailed,
+      ),
+  );
+  const evaluationDraftLoading = Boolean(
+    task?.evaluation?.enabled &&
+      (evaluationDraftLoadingTaskId === task.id ||
+        evaluationDraftTaskRef.current !== task.id),
+  );
+  const currentEvaluationDraftLoadError =
+    evaluationDraftLoadError?.taskId === task?.id
+      ? evaluationDraftLoadError
+      : null;
+
+  const composer = activeTaskTab === "migration" && showComposer && capability?.enabled ? (
+            <div className="migration-composer">
+              <div
+                className={`migration-composer__box${dragging ? " is-dragging" : ""}`}
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  if (composerBusy) return;
+                  setDragging(true);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = composerBusy ? "none" : "copy";
+                }}
+                onDragLeave={(event: DragEvent<HTMLDivElement>) => {
+                  if (
+                    !event.currentTarget.contains(
+                      event.relatedTarget as Node | null,
+                    )
+                  ) {
+                    setDragging(false);
+                  }
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setDragging(false);
+                  if (composerBusy) return;
+                  selectFile(event.dataTransfer.files?.[0]);
+                }}
+              >
+              <div className="migration-composer__content">
+                {composerFile ? (
+                  <div className="migration-composer__file">
+                    <FileIcon />
+                    <span title={composerFile.name}>{composerFile.name}</span>
+                    <small>{formatBytes(composerFile.size)}</small>
+                    <button
+                      type="button"
+                      onClick={() => setSourceFile(null)}
+                      aria-label={t("upload.removeAria")}
+                      disabled={composerBusy}
+                    >
+                      <CloseIcon />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="migration-upload-prompt">
+                    <UploadIcon />
+                    <p>{task ? t("upload.reselectPrompt") : t("upload.selectPrompt")}</p>
+                    <small>{t("upload.sizeHint", { size: maxSourceSizeLabel })}</small>
+                  </div>
+                )}
+              </div>
+              <div className="migration-composer__actions">
+                <div className="migration-composer__tools">
+                  <button
+                    type="button"
+                    className="migration-attach-button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={composerBusy}
+                  >
+                    <UploadIcon />
+                    <span>{sourceFile ? t("upload.reselect") : t("upload.selectZip")}</span>
+                  </button>
+                  <div className="migration-composer__model-select">
+                    <NewChatCompactSelect
+                      label={t("model.label")}
+                      value={composerModelId}
+                      options={modelSelectOptions}
+                      onChange={setSelectedModelId}
+                      placeholder={t("model.placeholder")}
+                      searchable
+                      loading={modelsLoading}
+                      error={modelsError}
+                      disabled={composerBusy || Boolean(task)}
+                      onRetry={() =>
+                        setModelsReloadKey((current) => current + 1)
+                      }
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="migration-confirm-upload-button"
+                  onClick={() =>
+                    void (task ? uploadExistingTask() : createAndUpload())
+                  }
+                  disabled={!sourceFile || composerBusy}
+                >
+                  {composerBusy ? t("upload.uploading") : task ? t("upload.continue") : t("upload.start")}
+                </button>
+              </div>
+              <MigrationEvaluationSetup
+                value={evaluationDraft}
+                onChange={(value) => {
+                  setEvaluationDraft(value);
+                  setEvaluationErrors({});
+                }}
+                capability={capability.evaluation}
+                disabled={composerBusy}
+                configLocked={Boolean(task)}
+                locked={Boolean(task?.evaluation?.dataset)}
+                errors={evaluationErrors}
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".zip,application/zip"
+                onChange={handleFileChange}
+                aria-label={t("upload.inputAria")}
+                disabled={composerBusy}
+              />
+              </div>
+              <p>
+                {t("upload.retention")}
+              </p>
+            </div>
+          ) : null;
+
+  return (
+    <>
+      <section className="migration-workspace">
+        <header className="migration-workspace__nav">
+          <div className="migration-workspace__location">
+            <button type="button" className="migration-new-button"
+              onClick={isHome ? onBack : startNewMigration} disabled={navigationBusy}>
+              <BackIcon />
+              <span>{isHome ? t("common.back") : t("workspace.backToHome")}</span>
+            </button>
+            <h1>{page === "projects" ? t("projects.title") : t("workspace.title")}</h1>
+          </div>
+          <nav aria-label={t("workspace.navigation")}>
+            {!isHome ? (
+              <button type="button" className="migration-new-button"
+                onClick={startNewMigration} disabled={navigationBusy}>
+                <PlusIcon /><span>{t("workspace.newMigration")}</span>
+              </button>
+            ) : null}
+            {page !== "projects" ? (
+              <button type="button" className="migration-new-button"
+                onClick={() => { setFocusedProjectId(""); setPage("projects"); }}
+                disabled={navigationBusy}>
+                <FileIcon /><span>{t("projects.title")}</span>
+              </button>
+            ) : null}
+          </nav>
+        </header>
+
+        {page === "projects" ? (
+          <MigratedProjectsPage
+            capabilities={projectCapabilities}
+            capabilitiesLoading={projectCapabilitiesLoading}
+            preparationStage={optimizationPreparationStage}
+            optimizationError={optimizationError}
+            initialProjectId={focusedProjectId}
+            onOptimize={onOptimizeVersion}
+            onCancelOptimization={onCancelOptimization}
+            onDownload={onDownloadSavedVersion}
+            onDeploy={onDeploySavedVersion}
+          />
+        ) : isHome ? (
+          <main className="migration-home">
+            <div className="migration-home__content">
+              <header className="migration-home__heading">
+                <h2>{t("workspace.heading")}</h2>
+                <p>{t("workspace.intro")}</p>
+              </header>
+              {loading ? <TextShimmer>{t("workspace.loadingSessions")}</TextShimmer> : null}
+              {loadError ? (
+                <div className="migration-inline-error" role="alert">
+                  <span>{localeCompatibleBackendText(loadError, locale) || t("errors.loadFailed")}</span>
+                  <button type="button" disabled={loading} onClick={() => setLoadKey((key) => key + 1)}>{t("actions.reload")}</button>
+                </div>
+              ) : null}
+              {capabilityError ? (
+                <div className="migration-inline-error" role="alert">
+                  <span>{localeCompatibleBackendText(capabilityError, locale) || t("errors.loadFailed")}</span>
+                  <button type="button" disabled={loading} onClick={() => setLoadKey((key) => key + 1)}>{t("actions.reload")}</button>
+                </div>
+              ) : null}
+              {capability && !capability.enabled ? (
+                <div className="migration-system-state is-error" role="alert">
+                  <strong>{t("capability.unavailable")}</strong>
+                  <p>{localeCompatibleBackendText(capability.reason, locale) || t("capability.defaultReason")}</p>
+                </div>
+              ) : null}
+              {composer}
+              {error ? (
+                <div className="migration-inline-error" role="alert">
+                  <span>{localeCompatibleBackendText(error, locale) || t("errors.loadFailed")}</span>
+                  <button type="button" onClick={() => setError("")} aria-label={t("errors.closeAria")}><CloseIcon /></button>
+                </div>
+              ) : null}
+              <section className="migration-history" aria-labelledby="migration-recent-heading">
+                <header>
+                  <h2 id="migration-recent-heading">{t("workspace.recent")}</h2>
+                  {tasks.length > 5 ? (
+                    <button type="button" className="migration-new-button"
+                      aria-expanded={showAllTasks} aria-controls="migration-recent-list"
+                      onClick={() => setShowAllTasks((value) => !value)}>
+                      {t(showAllTasks ? "workspace.showLess" : "workspace.showMore")}
+                    </button>
+                  ) : null}
+                </header>
+                {pollError ? (
+                  <div className="migration-inline-error" role="alert">
+                    <span>{localeCompatibleBackendText(pollError, locale) || t("errors.refreshFailed")}</span>
+                    {pollErrorRetryable ? <button type="button" onClick={() => void reconcileTaskList()}>{t("actions.refreshStatus")}</button> : null}
+                  </div>
+                ) : null}
+                {!loading && !loadError && tasks.length === 0 ? <p className="migration-history__empty">{t("workspace.noSessions")}</p> : null}
+                {tasks.length > 0 ? (
+                  <table id="migration-recent-list">
+                    <thead><tr>
+                      <th scope="col">{t("workspace.projectName")}</th>
+                      <th scope="col">{t("workspace.status")}</th>
+                      <th scope="col">{t("workspace.createdAt")}</th>
+                      <th scope="col">{t("workspace.actions")}</th>
+                    </tr></thead>
+                    <tbody>{(showAllTasks ? tasks : tasks.slice(0, 5)).map((item) => {
+                      const status = migrationHistoryStatus(item);
+                      const environmentExpired = isMigrationEnvironmentExpired(item, now);
+                      const statusLabel = migrationText(status.labelKey);
+                      return (
+                        <tr key={item.id}>
+                          <th scope="row"><span title={sourceStem(item.sourceFileName)}>{sourceStem(item.sourceFileName)}</span></th>
+                          <td><span className="migration-history__status">
+                            <span className="migration-history__status-label" data-tone={status.tone} title={statusLabel}>{statusLabel}</span>
+                            {environmentExpired ? <span className="migration-history__expiry-badge">{t("historyStatus.environmentExpired")}</span> : null}
+                          </span></td>
+                          <td><time>{formatDate(item.createdAt)}</time></td>
+                          <td><button type="button" className="migration-new-button"
+                            aria-label={t("workspace.openTask", { name: sourceStem(item.sourceFileName) })}
+                            onClick={() => {
+                              setSelectedTaskId(item.id);
+                              setSourceFile(null);
+                              setError("");
+                            }}>
+                            {t(!environmentExpired && (item.canAnswer || item.canConfirm || item.canUpload) ? "workspace.continueTask" : "workspace.viewTask")}
+                          </button></td>
+                        </tr>
+                      );
+                    })}</tbody>
+                  </table>
+                ) : null}
+              </section>
+            </div>
+          </main>
+        ) : (
+          <main className="migration-main">
+            <div className="migration-main__top">
+            <header className="migration-main__header">
+            <div>
+              <h2>
+                {task ? sourceStem(task.sourceFileName) : t("workspace.heading")}
+              </h2>
+              <p>
+                {task
+                  ? taskDisplayMessage(task)
+                  : t("workspace.intro")}
+              </p>
+            </div>
+            {task ? (
+              <div className="migration-main__header-actions">
+                {task?.canStop && !taskEnvironmentExpired ? (
+                  <button
+                    type="button"
+                    className="migration-stop-button"
+                    onClick={() => setStopConfirmOpen(true)}
+                    disabled={Boolean(action)}
+                  >
+                    {action === "stop" ? t("actions.stopping") : t("actions.stop")}
+                  </button>
+                ) : null}
+                {expiryCopy ? (
+                  <div className="migration-ttl" aria-live="off">
+                    <strong>{expiryCopy.title}</strong>
+                    <small>{expiryCopy.detail}</small>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            </header>
+
+            {hasEvaluationTab && task ? (
+              <nav
+                className="migration-task-tabs"
+                role="tablist"
+                aria-label={t("evaluation.tabs.label")}
+              >
+                <button
+                  ref={migrationTabRef}
+                  id="migration-task-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTaskTab === "migration"}
+                  aria-controls="migration-task-panel"
+                  tabIndex={activeTaskTab === "migration" ? 0 : -1}
+                  className={activeTaskTab === "migration" ? "is-active" : ""}
+                  onClick={() => setActiveTaskTab("migration")}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowRight") return;
+                    event.preventDefault();
+                    setActiveTaskTab("evaluation");
+                    evaluationTabRef.current?.focus();
+                  }}
+                >
+                  {t("evaluation.tabs.migration")}
+                </button>
+                <button
+                  ref={evaluationTabRef}
+                  id="evaluation-task-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTaskTab === "evaluation"}
+                  aria-controls="evaluation-task-panel"
+                  tabIndex={activeTaskTab === "evaluation" ? 0 : -1}
+                  className={activeTaskTab === "evaluation" ? "is-active" : ""}
+                  onClick={() => setActiveTaskTab("evaluation")}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowLeft") return;
+                    event.preventDefault();
+                    setActiveTaskTab("migration");
+                    migrationTabRef.current?.focus();
+                  }}
+                >
+                  <span>{t("evaluation.tabs.evaluation")}</span>
+                  <small>{t(evaluationTabStatusKey(task))}</small>
+                </button>
+              </nav>
+            ) : null}
+            </div>
+
+          <div
+            id={activeTaskTab === "evaluation" ? "evaluation-task-panel" : "migration-task-panel"}
+            className={`migration-conversation${activeTaskTab === "evaluation" ? " is-evaluation" : ""}`}
+            role={hasEvaluationTab ? "tabpanel" : "log"}
+            aria-labelledby={
+              hasEvaluationTab
+                ? activeTaskTab === "evaluation"
+                  ? "evaluation-task-tab"
+                  : "migration-task-tab"
+                : undefined
+            }
+            aria-live={activeTaskTab === "migration" ? "polite" : undefined}
+            ref={conversationRef}
+            onScroll={handleConversationScroll}
+          >
+          {activeTaskTab === "migration" ? (
+            <>
+          {!capability?.enabled && !loading ? (
+            <div className="migration-system-state is-error" role="alert">
+              <strong>{t("capability.unavailable")}</strong>
+              <p>
+                {localeCompatibleBackendText(capability?.reason, locale)
+                  || localeCompatibleBackendText(capabilityError, locale)
+                  || t("capability.defaultReason")}
+              </p>
+            </div>
+          ) : null}
+
+          {!task ? (
+            <>
+              {action === "create" && sourceFile ? (
+                <>
+                  <article className="migration-turn is-user">
+                    <div className="migration-user-message">
+                      <span className="migration-file-chip">
+                        <FileIcon />
+                        <span title={sourceFile.name}>{sourceFile.name}</span>
+                      </span>
+                    </div>
+                  </article>
+                  <article className="migration-turn is-assistant">
+                    <div className="migration-assistant-mark">AI</div>
+                    <div className="migration-assistant-content">
+                      <MigrationTransferProgress stage="session" />
+                      <TextShimmer as="strong">
+                        {t("conversation.creatingSandbox")}
+                      </TextShimmer>
+                      <p className="migration-running-note">
+                        {t("conversation.initializing")}
+                      </p>
+                      <small>
+                        {t("conversation.elapsed", { duration: formatElapsedTime(createElapsedSeconds) })}
+                      </small>
+                    </div>
+                  </article>
+                </>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <article className="migration-turn is-user">
+                <div className="migration-user-message">
+                  <span className="migration-file-chip">
+                    <FileIcon />
+                    <span title={task.sourceFileName}>{task.sourceFileName}</span>
+                  </span>
+                  {task.instruction ? <p>{task.instruction}</p> : null}
+                </div>
+              </article>
+
+              <article className="migration-turn is-assistant">
+                <div className="migration-assistant-mark">AI</div>
+                <div className="migration-assistant-content">
+                  {action === "upload" ? (
+                    <>
+                      <MigrationTransferProgress stage="upload" />
+                      <p className="migration-running-note">
+                        {t("conversation.uploadThenAnalyze")}
+                      </p>
+                    </>
+                  ) : task.state === "analyzing" ? (
+                    <>
+                      <MigrationTransferProgress stage="analysis" />
+                      <p className="migration-running-note">
+                        {t("conversation.analyzing")}
+                      </p>
+                    </>
+                  ) : isActiveState(task.state) ? (
+                    <>
+                      <TextShimmer>{taskDisplayMessage(task)}</TextShimmer>
+                      <p className="migration-running-note">
+                        {t("conversation.migrationLocked")}
+                      </p>
+                    </>
+                  ) : task.state === "needs_input" && task.analysis ? (
+                    <>
+                      <p>{task.analysis.summary}</p>
+                      <p>{t("conversation.analysisPaused")}</p>
+                      {task.analysis.frameworks[0]?.evidence.length ? (
+                        <details className="migration-analysis__evidence">
+                          <summary>{t("analysis.viewSourceEvidence")}</summary>
+                          <ul>
+                            {task.analysis.frameworks.flatMap((candidate) =>
+                              candidate.evidence.map((item) => (
+                                <li
+                                  key={`${candidate.id}:${item.path}:${item.line}`}
+                                >
+                                  <code>{item.path}:{item.line}</code>
+                                  <span>{item.reason}</span>
+                                </li>
+                              )),
+                            )}
+                          </ul>
+                        </details>
+                      ) : null}
+                    </>
+                  ) : task.state === "analysis_ready" && task.analysis ? (
+                    <>
+                      <p>{t("conversation.analysisComplete")}</p>
+                      <AnalysisSummary analysis={task.analysis} />
+                    </>
+                  ) : task.state === "awaiting_upload" ? (
+                    <p>{t("conversation.awaitingUpload")}</p>
+                  ) : task.state === "expired" ? (
+                    <div className="migration-expired">
+                      <strong>{t("conversation.expiredTitle")}</strong>
+                      <p>{t("conversation.expiredDescription")}</p>
+                    </div>
+                  ) : task.state === "failed" ? (
+                    task.error?.code === "MIGRATION_ANALYSIS_UNSUPPORTED" &&
+                    task.analysis ? (
+                      <div className="migration-system-state is-error">
+                        <strong>{t("conversation.unsupportedTitle")}</strong>
+                        <Markdown text={task.analysis.summary} allowRawHtml={false} />
+                        {task.analysis.warnings.length > 0 ? (
+                          <ul>
+                            {task.analysis.warnings.map((warning) => (
+                              <li key={warning}>{warning}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        <p>{t("conversation.unsupportedHint")}</p>
+                      </div>
+                    ) : (
+                      <div className="migration-system-state is-error">
+                        <strong>{t("conversation.failedTitle")}</strong>
+                        <p>{task.message}</p>
+                      </div>
+                    )
+                  ) : task.state === "cancelled" ? (
+                    <p>{t("conversation.cancelled")}</p>
+                  ) : (
+                    <p>{taskDisplayMessage(task)}</p>
+                  )}
+                  {shouldShowCodexActivity(task) &&
+                  (activityLoading || activity?.available || activityError) ? (
+                    <MigrationActivityFeed
+                      activity={activity}
+                      loading={activityLoading}
+                      error={activityError}
+                      analyzing={task.state === "analyzing"}
+                    />
+                  ) : null}
+                </div>
+              </article>
+            </>
+          )}
+
+          {task?.state === "needs_input" && task.analysis ? (
+            <section
+              className="migration-confirmation"
+              aria-label={t("questions.ariaLabel")}
+            >
+              <div className="migration-confirmation__heading">
+                <strong>{t("questions.title")}</strong>
+                <span>{t("questions.description")}</span>
+              </div>
+              {task.analysis.questions.map((question) => (
+                <label className="migration-field" key={question.id}>
+                  <span>
+                    {question.prompt}
+                    {question.required ? <b aria-hidden="true">*</b> : null}
+                  </span>
+                  <textarea
+                    value={answers[question.id] || ""}
+                    maxLength={4_000}
+                    required={question.required}
+                    aria-required={question.required}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setAnswers((current) => ({
+                        ...current,
+                        [question.id]: value,
+                      }));
+                    }}
+                    disabled={Boolean(action)}
+                  />
+                </label>
+              ))}
+              <div className="migration-confirmation__actions">
+                <button
+                  type="button"
+                  className="migration-primary-button"
+                  onClick={() => void submitAnswers()}
+                  disabled={!canSubmitAnswers}
+                >
+                  {action === "answer" ? t("questions.submitting") : t("questions.submit")}
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {task?.state === "analysis_ready" && task.analysis ? (
+            <section
+              className="migration-confirmation"
+              aria-label={t("confirmation.ariaLabel")}
+            >
+              <div className="migration-confirmation__heading">
+                <strong>{t("confirmation.title")}</strong>
+                <span>{t("confirmation.description")}</span>
+              </div>
+              <div className="migration-confirmation__grid">
+                <div className="migration-confirmation__row">
+                  <span>{t("confirmation.framework")}</span>
+                  <NewChatCompactSelect
+                    hideLabel
+                    label={t("confirmation.framework")}
+                    value={framework}
+                    options={(capability?.frameworks ?? []).map((item) => ({
+                      value: item,
+                      label: frameworkLabel(item),
+                    }))}
+                    onChange={(value) => {
+                      const next = value as MigrationFramework;
+                      setFramework(next);
+                      const candidate = task.analysis?.entries.find(
+                        (item) => item.framework === next,
+                      );
+                      setEntry(candidate?.value || "");
+                    }}
+                    placeholder={t("confirmation.frameworkPlaceholder")}
+                    disabled={Boolean(action)}
+                  />
+                </div>
+                <label className="migration-field migration-confirmation__row">
+                  <span>
+                    {t("confirmation.agentName")}<b aria-hidden="true">*</b>
+                  </span>
+                  <input
+                    value={appName}
+                    onChange={(event) => setAppName(event.currentTarget.value)}
+                    maxLength={63}
+                    required
+                    disabled={Boolean(action)}
+                    aria-invalid={Boolean(confirmationNameError)}
+                    aria-required="true"
+                  />
+                  {confirmationNameError ? (
+                    <small role="alert">{confirmationNameError}</small>
+                  ) : null}
+                </label>
+                {STRUCTURED_FRAMEWORKS.has(framework) ? (
+                  entryOptions.length > 0 ? (
+                    <div className="migration-confirmation__row">
+                      <span>{t("confirmation.entry")}</span>
+                      <NewChatCompactSelect
+                        hideLabel
+                        label={t("confirmation.entry")}
+                        value={entry}
+                        options={entryOptions}
+                        onChange={setEntry}
+                        placeholder={t("confirmation.entryPlaceholder")}
+                        disabled={Boolean(action)}
+                      />
+                    </div>
+                  ) : (
+                    <label className="migration-field migration-confirmation__row">
+                      <span>
+                        {t("confirmation.entry")}<b aria-hidden="true">*</b>
+                      </span>
+                      <input
+                        value={entry}
+                        onChange={(event) => setEntry(event.currentTarget.value)}
+                        placeholder={t("confirmation.entryExample")}
+                        maxLength={512}
+                        required
+                        disabled={Boolean(action)}
+                        aria-required="true"
+                      />
+                    </label>
+                  )
+                ) : null}
+              </div>
+              <div className="migration-confirmation__footer">
+                <p className="migration-confirmation__consent">
+                  {t("confirmation.consent")}
+                </p>
+                <div className="migration-confirmation__actions">
+                  <button
+                    type="button"
+                    className="migration-primary-button"
+                    onClick={() => void confirmMigration()}
+                    disabled={!canConfirm}
+                  >
+                    {action === "confirm" ? t("confirmation.starting") : t("confirmation.start")}
+                  </button>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          {task &&
+          isTerminalState(task.state) &&
+          ((task.artifact.previewReady && !taskEnvironmentExpired) ||
+            task.persistence?.state === "saved") ? (
+            <section className="migration-result">
+              <header>
+                <div>
+                  <strong>{t("artifact.title")}</strong>
+                  <span>
+                    {task.persistence?.state === "saved"
+                      ? t("artifact.saved")
+                      : task.persistence?.state === "saving"
+                        ? t("artifact.saving")
+                        : task.artifact.deployReady
+                          ? t("artifact.deployReady")
+                          : t("artifact.deployUnavailable")}
+                  </span>
+                </div>
+                <div className="migration-result__actions">
+                  {task.persistence?.state === "saved" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFocusedProjectId(task.persistence?.projectId ?? "");
+                        setPage("projects");
+                      }}
+                    >
+                      <span>{t("artifact.viewProjects")}</span>
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void downloadArtifact()}
+                    disabled={
+                      taskEnvironmentExpired ||
+                      !task.artifact.downloadReady ||
+                      Boolean(action)
+                    }
+                  >
+                    <DownloadIcon />
+                    <span>{action === "download" ? t("artifact.downloading") : t("artifact.downloadZip")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="is-primary"
+                    onClick={() => setDeploymentOpen(true)}
+                    disabled={
+                      taskEnvironmentExpired ||
+                      !task.artifact.deployReady ||
+                      !artifact
+                    }
+                    title={
+                      taskEnvironmentExpired
+                        ? t("expiry.ended")
+                        : task.artifact.deployReady
+                        ? t("artifact.deployTitle")
+                        : t("artifact.deployUnavailableTitle")
+                    }
+                  >
+                    <DeployIcon />
+                    <span>{t("artifact.deployRuntime")}</span>
+                  </button>
+                </div>
+              </header>
+              {task.persistence
+                && ["failed", "unavailable"].includes(task.persistence.state) ? (
+                <div className="migration-system-state is-error" role="alert">
+                  <p>{task.persistence.message}</p>
+                </div>
+              ) : null}
+              {taskEnvironmentExpired ? (
+                <div className="migration-system-state">
+                  <p>
+                    {task.persistence?.state === "saved"
+                      ? t("expiry.savedAvailable")
+                      : t("expiry.unavailable")}
+                  </p>
+                </div>
+              ) : artifactError ? (
+                <div className="migration-system-state is-error" role="alert">
+                  <p>{artifactError}</p>
+                  {artifactErrorRetryable ? (
+                    <button
+                      type="button"
+                      className="migration-retry-button"
+                      onClick={() => {
+                        setArtifactError("");
+                        setArtifactErrorRetryable(false);
+                        setArtifactReload((current) => current + 1);
+                      }}
+                    >
+                      {t("actions.reload")}
+                    </button>
+                  ) : null}
+                </div>
+              ) : artifact ? (
+                <>
+                  <div className="migration-result__summary">
+                    <span>{t("artifact.fileCount", { count: artifact.files.length })}</span>
+                    <span>CLI {artifact.cli.version}</span>
+                    <span>{t("artifact.startup", { module: artifact.startup.module })}</span>
+                    <span>{verificationLabel(artifact.verification.status)}</span>
+                  </div>
+                  <ArtifactBrowser task={task} artifact={artifact} />
+                </>
+              ) : (
+                <TextShimmer>{t("artifact.loading")}</TextShimmer>
+              )}
+            </section>
+          ) : null}
+
+            </>
+          ) : task?.evaluation?.enabled ? (
+            <div className="migration-evaluation-tab">
+              {evaluationDraftLoading ? (
+                <div className="migration-system-state" role="status">
+                  <TextShimmer>
+                    {t("evaluation.dataset.loadingSettings")}
+                  </TextShimmer>
+                </div>
+              ) : currentEvaluationDraftLoadError ? (
+                <div className="migration-inline-error" role="alert">
+                  <span>
+                    {t("evaluation.dataset.loadSettingsFailed")} {currentEvaluationDraftLoadError.message}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      evaluationDraftTaskRef.current = "";
+                      setEvaluationDraftReloadKey((current) => current + 1);
+                    }}
+                  >
+                    {t("evaluation.dataset.retryLoadSettings")}
+                  </button>
+                </div>
+              ) : (
+                <MigrationEvaluationSetup
+                  value={evaluationDraft}
+                  onChange={(value) => {
+                    setEvaluationDraft(value);
+                    setEvaluationErrors({});
+                  }}
+                  capability={capability?.evaluation}
+                  disabled={Boolean(evaluationAction || action)}
+                  configLocked
+                  locked={evaluationSettingsLocked}
+                  compact
+                  errors={evaluationErrors}
+                />
+              )}
+              {evaluationDatasetSaveError?.taskId === task.id ? (
+                <div className="migration-inline-error" role="alert">
+                  <span>
+                    {t("evaluation.dataset.saveWarning")} {evaluationDatasetSaveError.message}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void retryEvaluationDatasetSave()}
+                    disabled={evaluationAction === "dataset"}
+                  >
+                    {evaluationAction === "dataset"
+                      ? t("evaluation.dataset.saving")
+                      : t("evaluation.dataset.retrySave")}
+                  </button>
+                </div>
+              ) : null}
+              <MigrationEvaluationResult
+                taskId={task.id}
+                evaluation={task.evaluation}
+                report={evaluationReport}
+                reportLoading={evaluationReportLoading}
+                reportError={evaluationReportError}
+                actionError={evaluationActionError}
+                busy={Boolean(evaluationAction)}
+                reportDownloading={evaluationAction === "download"}
+                onResume={(environment) => void resumeEvaluation(environment)}
+                onRetry={retryEvaluation}
+                onLoadReport={() => void loadEvaluationReport()}
+                onDownloadReport={() => void downloadEvaluationReport()}
+              />
+            </div>
+          ) : null}
+
+          {pollError ? (
+            <div className="migration-inline-error" role="alert">
+              <span>
+                {localeCompatibleBackendText(pollError, locale)
+                  || t("errors.refreshFailed")}
+              </span>
+              {pollErrorRetryable ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!task) return;
+                    setPollError("");
+                    setPollErrorRetryable(false);
+                    void getMigrationTask(task.id)
+                      .then((next) =>
+                        setTasks((current) => upsertTask(current, next)),
+                      )
+                      .catch((cause: unknown) => {
+                        setPollError(
+                          cause instanceof Error ? cause.message : String(cause),
+                        );
+                        setPollErrorRetryable(
+                          cause instanceof MigrationApiError && cause.retryable,
+                        );
+                      });
+                  }}
+                >
+                  {t("actions.refreshStatus")}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {error ? (
+            <div className="migration-inline-error" role="alert">
+              <span>
+                {localeCompatibleBackendText(error, locale)
+                  || t("errors.loadFailed")}
+              </span>
+              <button type="button" onClick={() => setError("")} aria-label={t("errors.closeAria")}>
+                <CloseIcon />
+              </button>
+            </div>
+          ) : null}
+          </div>
+
+          {composer}
+          </main>
+        )}
+      </section>
+      {stopConfirmOpen && task ? (
+        <StudioConfirmDialog
+          title={t("stopDialog.title")}
+          description={t("stopDialog.description")}
+          confirmLabel={
+            action === "stop" ? t("actions.stopping") : t("actions.stop")
+          }
+          variant="danger"
+          busy={action === "stop"}
+          onCancel={() => setStopConfirmOpen(false)}
+          onConfirm={() => void stopTask()}
+        />
+      ) : null}
+    </>
+  );
+}

@@ -19,6 +19,7 @@
 - ``"adk"`` (default): Google ADK's built-in ``BaseLlmFlow`` (handled directly in
   :class:`veadk.agent.Agent`, no runtime object).
 - ``"codex"``: the OpenAI Codex SDK as the agent harness.
+- ``"piagent"``: a local Pi coding agent binary as the agent harness.
 """
 
 from __future__ import annotations
@@ -26,6 +27,10 @@ from __future__ import annotations
 from functools import lru_cache
 
 from veadk.runtime.base_runtime import BaseRuntime
+from veadk.runtime.provider import DispatchRuntimeProvider
+from veadk.runtime.provider import LocalRuntimeProvider
+from veadk.runtime.provider import RuntimeProvider
+from veadk.runtime.provider import ToolCall
 
 
 @lru_cache(maxsize=None)
@@ -55,7 +60,19 @@ def get_runtime(name: str) -> BaseRuntime:
 
         return CodexRuntime()
 
+    if name == "piagent":
+        from veadk.runtime.piagent import PiAgentRuntime
+
+        return PiAgentRuntime()
+
     raise ValueError(f"Unknown runtime: {name!r}")
 
 
-__all__ = ["BaseRuntime", "get_runtime"]
+__all__ = [
+    "BaseRuntime",
+    "DispatchRuntimeProvider",
+    "LocalRuntimeProvider",
+    "RuntimeProvider",
+    "ToolCall",
+    "get_runtime",
+]

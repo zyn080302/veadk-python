@@ -40,6 +40,12 @@ from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
 from veadk.config import settings
 
 from veadk.utils.logger import get_logger
+from veadk.utils.cloud_provider import (
+    CloudProvider,
+    cloud_provider_from_env,
+    configure_openapi_tls,
+    identity_openapi_host,
+)
 
 logger = get_logger(__name__)
 
@@ -75,11 +81,28 @@ def refresh_credentials(func):
     def _refresh_creds(self: IdentityClient):
         """Helper to refresh credentials."""
         # Step 1: Get initial credentials from constructor or environment variables
-        ak = self._initial_access_key or os.getenv("VOLCENGINE_ACCESS_KEY", "")
-        sk = self._initial_secret_key or os.getenv("VOLCENGINE_SECRET_KEY", "")
-        session_token = self._initial_session_token or os.getenv(
-            "VOLCENGINE_SESSION_TOKEN", ""
-        )
+        if self.provider == "byteplus":
+            ak = (
+                self._initial_access_key
+                or os.getenv("BYTEPLUS_ACCESS_KEY", "")
+                or os.getenv("VOLCENGINE_ACCESS_KEY", "")
+            )
+            sk = (
+                self._initial_secret_key
+                or os.getenv("BYTEPLUS_SECRET_KEY", "")
+                or os.getenv("VOLCENGINE_SECRET_KEY", "")
+            )
+            session_token = (
+                self._initial_session_token
+                or os.getenv("BYTEPLUS_SESSION_TOKEN", "")
+                or os.getenv("VOLCENGINE_SESSION_TOKEN", "")
+            )
+        else:
+            ak = self._initial_access_key or os.getenv("VOLCENGINE_ACCESS_KEY", "")
+            sk = self._initial_secret_key or os.getenv("VOLCENGINE_SECRET_KEY", "")
+            session_token = self._initial_session_token or os.getenv(
+                "VOLCENGINE_SESSION_TOKEN", ""
+            )
 
         # Step 2: Clear expired session_token
         if self._is_sts_credential_expired():
@@ -88,7 +111,9 @@ def refresh_credentials(func):
 
         # Step 3: Try VeFaaS IAM if no credentials or no session_token
         # VeFaaS IAM provides complete credentials (ak, sk, session_token)
-        if not (ak and sk) or (ak and sk and not session_token):
+        if self._enable_vefaas_iam_fallback and (
+            not (ak and sk) or (ak and sk and not session_token)
+        ):
             if credentials := _try_get_vefaas_credentials():
                 ak, sk, session_token = credentials
 
@@ -142,7 +167,9 @@ class IdentityClient:
         access_key: Optional[str] = None,
         secret_key: Optional[str] = None,
         session_token: Optional[str] = None,
-        region: str = "cn-beijing",
+        region: str = "",
+        provider: CloudProvider | None = None,
+        enable_vefaas_iam_fallback: bool = True,
     ):
         """Initialize the identity client.
 
@@ -151,18 +178,47 @@ class IdentityClient:
             secret_key: VolcEngine secret key. Defaults to VOLCENGINE_SECRET_KEY env var.
             session_token: VolcEngine session token. Defaults to VOLCENGINE_SESSION_TOKEN env var.
             region: The VolcEngine region. Defaults to "cn-beijing".
+            enable_vefaas_iam_fallback: Whether API calls may refresh credentials
+                from the VeFaaS IAM file. Defaults to True.
 
         Raises:
             KeyError: If required environment variables are not set.
         """
+        self.provider = provider or cloud_provider_from_env()
+        if not region and self.provider != "byteplus":
+            region = os.getenv("REGION") or "cn-beijing"
+        elif not region:
+            region = "cn-beijing"
         self.region = region
+        self._enable_vefaas_iam_fallback = enable_vefaas_iam_fallback
 
         # Store initial credentials for fallback
-        self._initial_access_key = access_key or os.getenv("VOLCENGINE_ACCESS_KEY", "")
-        self._initial_secret_key = secret_key or os.getenv("VOLCENGINE_SECRET_KEY", "")
-        self._initial_session_token = session_token or os.getenv(
-            "VOLCENGINE_SESSION_TOKEN", ""
-        )
+        if self.provider == "byteplus":
+            self._initial_access_key = (
+                access_key
+                or os.getenv("BYTEPLUS_ACCESS_KEY", "")
+                or os.getenv("VOLCENGINE_ACCESS_KEY", "")
+            )
+            self._initial_secret_key = (
+                secret_key
+                or os.getenv("BYTEPLUS_SECRET_KEY", "")
+                or os.getenv("VOLCENGINE_SECRET_KEY", "")
+            )
+            self._initial_session_token = (
+                session_token
+                or os.getenv("BYTEPLUS_SESSION_TOKEN", "")
+                or os.getenv("VOLCENGINE_SESSION_TOKEN", "")
+            )
+        else:
+            self._initial_access_key = access_key or os.getenv(
+                "VOLCENGINE_ACCESS_KEY", ""
+            )
+            self._initial_secret_key = secret_key or os.getenv(
+                "VOLCENGINE_SECRET_KEY", ""
+            )
+            self._initial_session_token = session_token or os.getenv(
+                "VOLCENGINE_SESSION_TOKEN", ""
+            )
 
         # Initialize configuration and API client
         configuration = volcenginesdkcore.Configuration()
@@ -171,6 +227,11 @@ class IdentityClient:
         configuration.sk = self._initial_secret_key
         configuration.session_token = self._initial_session_token
         configuration.logger = {}
+        identity_scheme = os.getenv("IDENTITY_OPENAPI_SCHEME", "https").strip()
+        configuration.host = (
+            f"{identity_scheme}://{identity_openapi_host(region, self.provider)}"
+        )
+        configure_openapi_tls(configuration)
 
         self._api_client = volcenginesdkid.IDApi(
             volcenginesdkcore.ApiClient(configuration)
@@ -201,7 +262,7 @@ class IdentityClient:
             True if credential is expired or will expire within 5 minutes, False otherwise.
         """
         if self._sts_credential_expires_at is None:
-            return True
+            return False
 
         import time
 
@@ -240,6 +301,8 @@ class IdentityClient:
         sts_config.ak = access_key
         sts_config.sk = secret_key
         sts_config.logger = {}
+        if self.provider == "byteplus":
+            sts_config.host = "https://sts.byteplusapi.com"
 
         # Create an STS API client
         sts_client = volcenginesdksts.STSApi(volcenginesdkcore.ApiClient(sts_config))
@@ -733,6 +796,7 @@ class IdentityClient:
         )
         return response.allowed
 
+    @refresh_credentials
     def create_user_pool(self, name: str) -> tuple[str, str]:
         from volcenginesdkid import CreateUserPoolRequest, CreateUserPoolResponse
 
@@ -745,6 +809,73 @@ class IdentityClient:
 
         return response.uid, response.domain
 
+    @refresh_credentials
+    def configure_user_pool_for_idp_only(self, user_pool_uid: str) -> None:
+        """Disable local sign-up, recovery, and sign-in for a user pool."""
+        from volcenginesdkid import UpdateUserPoolRequest
+
+        request = UpdateUserPoolRequest(
+            email_passwordless_sign_in_enabled=False,
+            password_sign_in_enabled=False,
+            self_account_recovery_enabled=False,
+            self_sign_up_enabled=False,
+            sign_up_auto_verification_enabled=False,
+            sms_passwordless_sign_in_enabled=False,
+            unconfirmed_user_sign_in_enabled=False,
+            user_pool_uid=user_pool_uid,
+        )
+        self._api_client.update_user_pool(request)
+
+    @refresh_credentials
+    def configure_user_pool_for_local_login(self, user_pool_uid: str) -> None:
+        """Enable local sign-up, recovery, and sign-in for a user pool."""
+        from volcenginesdkid import UpdateUserPoolRequest
+
+        request = UpdateUserPoolRequest(
+            email_passwordless_sign_in_enabled=True,
+            password_sign_in_enabled=True,
+            self_account_recovery_enabled=True,
+            self_sign_up_enabled=True,
+            sign_up_auto_verification_enabled=True,
+            sms_passwordless_sign_in_enabled=True,
+            unconfirmed_user_sign_in_enabled=True,
+            user_pool_uid=user_pool_uid,
+        )
+        self._api_client.update_user_pool(request)
+
+    @refresh_credentials
+    def list_user_pools(self, *, page_size: int = 100) -> list[dict[str, str]]:
+        """List all user pools available to the current account."""
+        from volcenginesdkid import ListUserPoolsRequest, ListUserPoolsResponse
+
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+
+        pools: list[dict[str, str]] = []
+        page_number = 1
+        while True:
+            response: ListUserPoolsResponse = self._api_client.list_user_pools(
+                ListUserPoolsRequest(
+                    page_number=page_number,
+                    page_size=page_size,
+                )
+            )
+            page = list(response.data or [])
+            pools.extend(
+                {
+                    "uid": str(pool.uid or ""),
+                    "name": str(pool.name or ""),
+                    "domain": str(pool.domain or ""),
+                }
+                for pool in page
+            )
+            total_count = int(response.total_count or 0)
+            if not page or len(pools) >= total_count:
+                break
+            page_number += 1
+        return pools
+
+    @refresh_credentials
     def get_user_pool(
         self,
         name: Optional[str] = None,
@@ -799,6 +930,7 @@ class IdentityClient:
 
         raise ValueError("Either name or uid must be provided")
 
+    @refresh_credentials
     def create_user_pool_client(
         self, user_pool_uid: str, name: str, client_type: str
     ) -> tuple[str, str]:
@@ -817,12 +949,16 @@ class IdentityClient:
         )
         return response.uid, response.client_secret
 
+    @refresh_credentials
     def register_callback_for_user_pool_client(
         self,
         user_pool_uid: str,
         client_uid: str,
         callback_url: str,
         web_origin: str,
+        *,
+        dismiss_login_page_enabled: bool | None = None,
+        skip_consent_enabled: bool | None = None,
     ):
         from volcenginesdkid import (
             GetUserPoolClientRequest,
@@ -858,9 +994,39 @@ class IdentityClient:
             allowed_cors=response.allowed_cors,
             id_token=response.id_token,
             refresh_token=response.refresh_token,
+            dismiss_login_page_enabled=dismiss_login_page_enabled,
+            skip_consent_enabled=skip_consent_enabled,
         )
         self._api_client.update_user_pool_client(request2)
 
+    @refresh_credentials
+    def user_pool_client_exists(
+        self,
+        user_pool_uid: str,
+        client_uid: str,
+    ) -> bool:
+        """Return whether a user-pool client exists in this client's region.
+
+        Only a not-found response becomes ``False``. Permission, credential,
+        and transport failures are raised so callers do not silently search a
+        different region and hide the real problem.
+        """
+        from volcenginesdkcore.rest import ApiException
+        from volcenginesdkid import GetUserPoolClientRequest
+
+        request = GetUserPoolClientRequest(
+            user_pool_uid=user_pool_uid,
+            client_uid=client_uid,
+        )
+        try:
+            self._api_client.get_user_pool_client(request)
+        except ApiException as error:
+            if error.status == 404:
+                return False
+            raise
+        return True
+
+    @refresh_credentials
     def get_user_pool_client(
         self,
         user_pool_uid: str,
@@ -931,3 +1097,42 @@ class IdentityClient:
             return response2.uid, response2.client_secret
 
         raise ValueError("Either name or client_uid must be provided")
+
+    @refresh_credentials
+    def get_user_pool_client_refresh_token_lifetime(
+        self,
+        *,
+        user_pool_uid: str,
+        client_uid: str,
+    ) -> int | None:
+        """Return the configured maximum refresh-token lifetime in seconds.
+
+        User-pool clients may configure both an idle lifetime and a combined
+        (absolute) lifetime.  The browser session must never outlive the
+        absolute lifetime, so prefer it when present and otherwise fall back
+        to the idle lifetime.
+        """
+        from volcenginesdkid import GetUserPoolClientRequest, GetUserPoolClientResponse
+
+        request = GetUserPoolClientRequest(
+            user_pool_uid=user_pool_uid,
+            client_uid=client_uid,
+        )
+        response: GetUserPoolClientResponse = self._api_client.get_user_pool_client(
+            request
+        )
+        refresh_token = response.refresh_token
+        if not refresh_token:
+            return None
+
+        if refresh_token.has_combined_lifetime:
+            combined_lifetime = int(refresh_token.combined_lifetime_seconds or 0)
+            if combined_lifetime > 0:
+                return combined_lifetime
+
+        if refresh_token.has_idle_lifetime:
+            idle_lifetime = int(refresh_token.idle_lifetime_seconds or 0)
+            if idle_lifetime > 0:
+                return idle_lifetime
+
+        return None

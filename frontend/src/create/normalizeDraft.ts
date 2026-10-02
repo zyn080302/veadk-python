@@ -1,0 +1,420 @@
+import {
+  emptyDraft,
+  type A2aRegistryConfig,
+  type AgentDraft,
+  type CloudCliToolId,
+  type CustomTool,
+  type HarnessSidecarIntent,
+  type HarnessSidecarOptionId,
+  type HarnessSidecarProfileId,
+  type SelectedSkill,
+} from "./types";
+import { createBuiltinToolsForProvider, DEFAULT_KB_BACKEND } from "./veadkCatalog";
+import type { CloudProvider } from "../adk/cloudProvider";
+import {
+  HARNESS_SIDECAR_OPTION_IDS,
+  normalizeHarnessSidecarIntent,
+} from "./harnessSidecarOptions";
+import { normalizeDraftModelNames } from "./modelFallbacks";
+import { normalizeGlobalContext } from "./globalContext";
+
+const STM_IDS = new Set(["local", "sqlite", "mysql", "postgresql"]);
+const LTM_IDS = new Set([
+  "local",
+  "opensearch",
+  "redis",
+  "viking",
+  "openviking",
+  "mem0",
+]);
+const KB_IDS = new Set(["opensearch", "viking", "context_search", "openviking"]);
+const EXPORTER_IDS = new Set(["apmplus", "cozeloop", "tls"]);
+const TOOL_IDS = new Set([
+  "web_search",
+  "parallel_web_search",
+  "link_reader",
+  "web_scraper",
+  "image_generate",
+  "image_edit",
+  "video_generate",
+  "text_to_speech",
+  "run_code",
+  "vesearch",
+]);
+const AGENT_TYPES = new Set(["llm", "sequential", "parallel", "loop", "a2a"]);
+const CLOUD_CLI_TOOL_IDS = new Set<CloudCliToolId>([
+  "lark-cli",
+  "github-cli",
+  "pandoc",
+]);
+const HARNESS_SIDECAR_PROFILE_IDS = new Set<HarnessSidecarProfileId>([
+  "default",
+  "ops",
+]);
+
+function asString(v: unknown, fallback = ""): string {
+  return typeof v === "string" ? v : fallback;
+}
+
+function asBool(v: unknown): boolean {
+  return v === true;
+}
+
+function asHarnessSidecarProfile(v: unknown): HarnessSidecarProfileId {
+  return typeof v === "string" &&
+    HARNESS_SIDECAR_PROFILE_IDS.has(v as HarnessSidecarProfileId)
+    ? (v as HarnessSidecarProfileId)
+    : "default";
+}
+
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function asCloudCliTools(v: unknown): CloudCliToolId[] {
+  return Array.from(
+    new Set(
+      asStringArray(v).filter((tool): tool is CloudCliToolId =>
+        CLOUD_CLI_TOOL_IDS.has(tool as CloudCliToolId),
+      ),
+    ),
+  );
+}
+
+function asStringRecord(v: unknown): Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  return Object.fromEntries(
+    Object.entries(v).filter((entry): entry is [string, string] =>
+      typeof entry[1] === "string",
+    ),
+  );
+}
+
+function asCustomTools(v: unknown): CustomTool[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((t) =>
+      t && typeof t === "object"
+        ? {
+            name: asString((t as Record<string, unknown>).name),
+            description: asString((t as Record<string, unknown>).description),
+          }
+        : null,
+    )
+    .filter((t): t is CustomTool => !!t && !!t.name.trim());
+}
+
+function pick<T>(v: unknown, allowed: Set<string>, fallback: T): string | T {
+  return typeof v === "string" && allowed.has(v) ? v : fallback;
+}
+
+function asAgentType(v: unknown): NonNullable<AgentDraft["agentType"]> {
+  return typeof v === "string" && AGENT_TYPES.has(v)
+    ? (v as NonNullable<AgentDraft["agentType"]>)
+    : "llm";
+}
+
+function asCloudProvider(v: unknown): NonNullable<AgentDraft["cloudProvider"]> {
+  return v === "byteplus" ? "byteplus" : "volcengine";
+}
+
+function asMaxIterations(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 3;
+}
+
+function asA2aRegistry(v: unknown): A2aRegistryConfig {
+  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  return {
+    enabled: asBool(o.enabled),
+    registrySpaceId: asString(o.registrySpaceId),
+    registryTopK: asString(o.registryTopK),
+    registryRegion: asString(o.registryRegion),
+    registryEndpoint: asString(o.registryEndpoint),
+  };
+}
+
+function asHarnessSidecarIntent(v: unknown): HarnessSidecarIntent | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const raw = v as Record<string, unknown>;
+  const rawOverrides = (
+    raw.componentOverrides && typeof raw.componentOverrides === "object"
+      ? raw.componentOverrides
+      : {}
+  ) as Record<string, unknown>;
+  const componentOverrides = Object.fromEntries(
+    HARNESS_SIDECAR_OPTION_IDS.map((id) => [id, rawOverrides[id] === true]),
+  ) as Record<HarnessSidecarOptionId, boolean>;
+  const intent: HarnessSidecarIntent = {
+    enabled: Object.values(componentOverrides).some(Boolean),
+    profile: asHarnessSidecarProfile(raw.profile),
+    componentOverrides,
+  };
+  const catalogVersion = asString(raw.catalogVersion).trim();
+  const planHash = asString(raw.planHash).trim();
+  if (catalogVersion) intent.catalogVersion = catalogVersion;
+  if (planHash) intent.planHash = planHash;
+  const globalContext = normalizeGlobalContext(raw.globalContext);
+  if (globalContext !== undefined) intent.globalContext = globalContext;
+  return normalizeHarnessSidecarIntent(intent);
+}
+
+function parseSubAgents(
+  v: unknown,
+  cloudProvider: NonNullable<AgentDraft["cloudProvider"]> = "volcengine",
+): AgentDraft[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((s) => {
+    const so = (s && typeof s === "object" ? s : {}) as Record<string, unknown>;
+    const childCloudProvider = asCloudProvider(so.cloudProvider ?? cloudProvider);
+    const mem = (
+      so.memory && typeof so.memory === "object" ? so.memory : {}
+    ) as Record<string, unknown>;
+    const a2aRegistry = asA2aRegistry(so.a2aRegistry);
+    const parsedType = asAgentType(so.agentType);
+    const agentType =
+      a2aRegistry.enabled && parsedType === "llm" ? "a2a" : parsedType;
+    const modelNames = normalizeDraftModelNames(so.modelName, so.modelFallbacks);
+    return {
+      ...emptyDraft(childCloudProvider),
+      cloudProvider: childCloudProvider,
+      name: asString(so.name),
+      description: asString(so.description),
+      instruction: asString(so.instruction),
+      agentType,
+      maxIterations: asMaxIterations(so.maxIterations),
+      a2aUrl: asString(so.a2aUrl),
+      modelName: modelNames.modelName,
+      modelFallbacks: modelNames.modelFallbacks,
+      modelSource:
+        so.modelSource === "custom" || so.modelSource === "ark"
+          ? so.modelSource
+          : undefined,
+      modelProvider: asString(so.modelProvider),
+      modelApiBase: asString(so.modelApiBase),
+      builtinTools: asStringArray(so.builtinTools).filter((t) => TOOL_IDS.has(t)),
+      customTools: asCustomTools(so.customTools),
+      memory: { shortTerm: asBool(mem.shortTerm), longTerm: asBool(mem.longTerm) },
+      shortTermBackend: pick(so.shortTermBackend, STM_IDS, "local"),
+      longTermBackend: pick(so.longTermBackend, LTM_IDS, "local"),
+      longTermMemoryIndex: asString(so.longTermMemoryIndex),
+      autoSaveSession: asBool(so.autoSaveSession),
+      knowledgebase: asBool(so.knowledgebase),
+      knowledgebaseBackend: pick(
+        so.knowledgebaseBackend,
+        KB_IDS,
+        DEFAULT_KB_BACKEND,
+      ),
+      knowledgebaseIndex: asString(so.knowledgebaseIndex),
+      tracing: asBool(so.tracing),
+      tracingExporters: asStringArray(so.tracingExporters).filter((e) =>
+        EXPORTER_IDS.has(e),
+      ),
+      a2aRegistry:
+        agentType === "a2a" ? { ...a2aRegistry, enabled: true } : a2aRegistry,
+      subAgents: parseSubAgents(so.subAgents, childCloudProvider),
+      selectedSkills: parseSelectedSkills(so),
+    };
+  });
+}
+
+function parseSelectedSkills(o: Record<string, unknown>): SelectedSkill[] {
+  if (!Array.isArray(o.selectedSkills)) return [];
+  const out: SelectedSkill[] = [];
+  for (const raw of o.selectedSkills as unknown[]) {
+    const so = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const src = asString(so.source);
+    const source: SelectedSkill["source"] =
+      src === "local" ||
+      src === "skillspace" ||
+      src === "skillhub" ||
+      src === "runtime"
+        ? src
+        : "skillhub";
+    const name =
+      asString(so.name) ||
+      asString(so.slug) ||
+      asString(so.skillName) ||
+      asString(so.skillId) ||
+      "skill";
+    const folder = asString(so.folder) || name;
+    const description = asString(so.description);
+    if (source === "runtime") {
+      if (!name || folder !== name) continue;
+      out.push({ source, folder, name, description });
+      continue;
+    }
+    if (source === "skillhub") {
+      const slug = asString(so.slug);
+      if (!slug) continue;
+      out.push({
+        source,
+        folder,
+        name,
+        description,
+        slug,
+        namespace: asString(so.namespace) || "public",
+      });
+      continue;
+    }
+    if (source === "local") {
+      const files = Array.isArray(so.localFiles) ? so.localFiles : [];
+      const localFiles = files
+        .map((f) => {
+          const fo = (f && typeof f === "object" ? f : {}) as Record<string, unknown>;
+          const path = asString(fo.path);
+          const content = asString(fo.content);
+          if (!path) return null;
+          return { path, content };
+        })
+        .filter((x): x is { path: string; content: string } => x !== null);
+      if (localFiles.length === 0) continue;
+      out.push({ source, folder, name, description, localFiles });
+      continue;
+    }
+    const skillSpaceId = asString(so.skillSpaceId);
+    const skillId = asString(so.skillId);
+    if (!skillSpaceId || !skillId) continue;
+    out.push({
+      source,
+      folder,
+      name,
+      description,
+      skillSpaceId,
+      skillSpaceName: asString(so.skillSpaceName),
+      skillId,
+      version: asString(so.version),
+    });
+  }
+  return out;
+}
+
+export function normalizeDraft(raw: unknown): AgentDraft {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const mem = (o.memory && typeof o.memory === "object" ? o.memory : {}) as Record<
+    string,
+    unknown
+  >;
+  const deployment = (
+    o.deployment && typeof o.deployment === "object" ? o.deployment : {}
+  ) as Record<string, unknown>;
+  const deploymentEnvValues = asStringRecord(deployment.envValues);
+  const cloudEnvironment = (
+    o.cloudEnvironment && typeof o.cloudEnvironment === "object"
+      ? o.cloudEnvironment
+      : {}
+  ) as Record<string, unknown>;
+  const a2aRegistry = asA2aRegistry(o.a2aRegistry);
+  const parsedType = asAgentType(o.agentType);
+  const agentType =
+    a2aRegistry.enabled && parsedType === "llm" ? "a2a" : parsedType;
+  const cloudProvider = asCloudProvider(o.cloudProvider);
+  const modelNames = normalizeDraftModelNames(o.modelName, o.modelFallbacks);
+
+  const mcpTools = Array.isArray(o.mcpTools)
+    ? (o.mcpTools as unknown[])
+        .map((m) => {
+          const mo = (m && typeof m === "object" ? m : {}) as Record<string, unknown>;
+          const transport = mo.transport === "stdio" ? "stdio" : "http";
+          return {
+            name: asString(mo.name),
+            transport: transport as "http" | "stdio",
+            url: asString(mo.url),
+            authToken: asString(mo.authToken),
+            authTokenEnv: asString(mo.authTokenEnv),
+            credentialConfigured: mo.credentialConfigured === true,
+            command: asString(mo.command),
+            args: asStringArray(mo.args),
+          };
+        })
+        .filter((m) => (m.transport === "http" ? !!m.url : !!m.command))
+    : [];
+
+  return {
+    ...emptyDraft(cloudProvider),
+    cloudProvider,
+    name: asString(o.name) || "my_agent",
+    description: asString(o.description),
+    instruction: asString(o.instruction) || "You are a helpful assistant.",
+    dynamicAgentDelegation: asBool(o.dynamicAgentDelegation),
+    agentType,
+    maxIterations: asMaxIterations(o.maxIterations),
+    a2aUrl: asString(o.a2aUrl),
+    modelName: modelNames.modelName,
+    modelFallbacks: modelNames.modelFallbacks,
+    modelSource:
+      o.modelSource === "custom" || o.modelSource === "ark"
+        ? o.modelSource
+        : undefined,
+    modelProvider: asString(o.modelProvider),
+    modelApiBase: asString(o.modelApiBase),
+    builtinTools: asStringArray(o.builtinTools).filter((t) => TOOL_IDS.has(t)),
+    customTools: asCustomTools(o.customTools),
+    mcpTools,
+    a2aRegistry:
+      agentType === "a2a" ? { ...a2aRegistry, enabled: true } : a2aRegistry,
+    memory: { shortTerm: asBool(mem.shortTerm), longTerm: asBool(mem.longTerm) },
+    shortTermBackend: pick(o.shortTermBackend, STM_IDS, "local"),
+    longTermBackend: pick(o.longTermBackend, LTM_IDS, "local"),
+    longTermMemoryIndex: asString(o.longTermMemoryIndex),
+    autoSaveSession: asBool(o.autoSaveSession),
+    knowledgebase: asBool(o.knowledgebase),
+    knowledgebaseBackend: pick(o.knowledgebaseBackend, KB_IDS, DEFAULT_KB_BACKEND),
+    knowledgebaseIndex: asString(o.knowledgebaseIndex),
+    tracing: asBool(o.tracing),
+    tracingExporters: asStringArray(o.tracingExporters).filter((e) =>
+      EXPORTER_IDS.has(e),
+    ),
+    deployment: {
+      feishuEnabled: asBool(deployment.feishuEnabled),
+      runtimeName: asString(deployment.runtimeName),
+      runtimeNameCustomized:
+        asBool(deployment.runtimeNameCustomized) ||
+        !!asString(deployment.runtimeName).trim(),
+      modelApiKeyId: asString(deployment.modelApiKeyId),
+      modelApiKeyName: asString(deployment.modelApiKeyName),
+      ...(Object.keys(deploymentEnvValues).length > 0
+        ? { envValues: deploymentEnvValues }
+        : {}),
+    },
+    cloudEnvironment: {
+      environmentId: asString(cloudEnvironment.environmentId),
+      environmentVersionId: asString(cloudEnvironment.environmentVersionId),
+      cliTools: asCloudCliTools(cloudEnvironment.cliTools),
+      ...(typeof cloudEnvironment.dockerfile === "string"
+        ? { dockerfile: cloudEnvironment.dockerfile }
+        : {}),
+    },
+    harnessSidecar: asHarnessSidecarIntent(o.harnessSidecar),
+    subAgents: parseSubAgents(o.subAgents, cloudProvider),
+    selectedSkills: parseSelectedSkills(o),
+  };
+}
+
+export function sanitizeGeneratedDraftCapabilities(
+  draft: AgentDraft,
+  inheritedCloudProvider: CloudProvider = draft.cloudProvider ?? "volcengine",
+): AgentDraft {
+  const cloudProvider = draft.cloudProvider ?? inheritedCloudProvider;
+  const generatedToolIds = new Set(
+    createBuiltinToolsForProvider(cloudProvider).map((tool) => tool.id),
+  );
+  return {
+    ...draft,
+    builtinTools: (draft.builtinTools ?? []).filter((toolId) =>
+      generatedToolIds.has(toolId),
+    ),
+    tracing: false,
+    tracingExporters: [],
+    memory: { shortTerm: false, longTerm: false },
+    shortTermBackend: "local",
+    longTermBackend: "local",
+    longTermMemoryIndex: "",
+    autoSaveSession: false,
+    knowledgebase: false,
+    knowledgebaseBackend: DEFAULT_KB_BACKEND,
+    knowledgebaseIndex: "",
+    subAgents: draft.subAgents.map((child) =>
+      sanitizeGeneratedDraftCapabilities(child, cloudProvider),
+    ),
+  };
+}

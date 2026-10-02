@@ -1,0 +1,240 @@
+# Copyright (c) 2025 Beijing Volcano Engine Technology Co., Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Provider-native model defaults used by Studio provisioning and codegen."""
+
+from __future__ import annotations
+
+from urllib.parse import urlparse
+
+VOLCENGINE_MODELARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+BYTEPLUS_MODELARK_BASE_URL = "https://ark.ap-southeast.bytepluses.com/api/v3"
+
+SUPPORTED_CLOUD_PROVIDERS = frozenset({"volcengine", "byteplus"})
+
+VOLCENGINE_STUDIO_AGENT_MODEL_NAME = "doubao-seed-2-1-pro-260628"
+BYTEPLUS_STUDIO_AGENT_MODEL_NAME = "dola-seed-2-1-turbo-260628"
+
+VOLCENGINE_GENERATED_AGENT_MODEL_NAME = "doubao-seed-1-6-250615"
+BYTEPLUS_GENERATED_AGENT_MODEL_NAME = BYTEPLUS_STUDIO_AGENT_MODEL_NAME
+
+VOLCENGINE_EMBEDDING_MODEL_NAME = "doubao-embedding-vision-250615"
+BYTEPLUS_EMBEDDING_MODEL_NAME = "skylark-embedding-vision-250615"
+
+VOLCENGINE_IMAGE_GENERATE_MODEL_NAME = "doubao-seedream-5-0-260128"
+BYTEPLUS_IMAGE_GENERATE_MODEL_NAME = "dola-seedream-5-0-pro-260628"
+
+VOLCENGINE_IMAGE_EDIT_MODEL_NAME = "doubao-seededit-3-0-i2i-250628"
+BYTEPLUS_IMAGE_EDIT_MODEL_NAME = "seededit-3-0-i2i-250628"
+
+VOLCENGINE_VIDEO_MODEL_NAME = "doubao-seedance-2-0-260128"
+BYTEPLUS_VIDEO_MODEL_NAME = "dreamina-seedance-2-0-260128"
+
+BYTEPLUS_MODELARK_MODEL_IDS = frozenset(
+    {
+        "dola-seed-2-1-turbo-260628",
+        "seed-2-0-lite-260428",
+        "seed-2-0-mini-260428",
+        "seed-2-0-pro-260328",
+        "seed-2-0-lite-260228",
+        "seed-2-0-lite-260215",
+        "seed-2-0-mini-260215",
+        "seed-2-0-code-preview-260328",
+        "seed-1-8-251228",
+        "glm-5-2-260617",
+        "glm-4-7-251222",
+        "deepseek-v4-flash-ga-260731",
+        "deepseek-v4-pro-260425",
+        "deepseek-v4-flash-260425",
+        "deepseek-v3-2-251201",
+        "gpt-oss-120b-250805",
+        "seed-1-6-250915",
+        "seed-1-6-250615",
+        "seed-1-6-flash-250715",
+        "seed-1-6-flash-250615",
+        "dreamina-seedance-2-5-260628",
+        "dreamina-seedance-2-0-260128",
+        "dreamina-seedance-2-0-fast-260128",
+        "dreamina-seedance-2-0-mini-260615",
+        "seedance-1-5-pro-251215",
+        "seedance-1-0-pro-250528",
+        "seedance-1-0-pro-fast-251015",
+        "dola-seedream-5-0-pro-260628",
+        "seedream-5-0-260128",
+        "seedream-5-0-lite-260128",
+        "seedream-4-5-251128",
+        "seedream-4-0-250828",
+        "Hyper3d-Rodin-Gen2",
+        "Hitem3d-2.0",
+        "skylark-embedding-vision-251215",
+        "skylark-embedding-vision-250615",
+        BYTEPLUS_IMAGE_EDIT_MODEL_NAME,
+    }
+)
+
+VOLCENGINE_STUDIO_DEVELOPMENT_MODEL_IDS = frozenset(
+    {
+        "doubao-seed-2-1-pro-260628",
+        "deepseek-v4-pro-ga-260813",
+        "doubao-seed-evolving",
+    }
+)
+BYTEPLUS_STUDIO_DEVELOPMENT_MODEL_IDS = frozenset(
+    {
+        "dola-seed-2-1-turbo-260628",
+        "deepseek-v4-pro-ga-260813",
+    }
+)
+
+BYTEPLUS_SKILL_CREATOR_MODELS = (
+    ("a", BYTEPLUS_STUDIO_AGENT_MODEL_NAME, "Dola Seed 2.1 Turbo"),
+    ("b", "deepseek-v4-flash-260425", "DeepSeek V4 Flash"),
+)
+
+
+def _provider_id(provider: str) -> str:
+    return provider.strip().lower()
+
+
+def studio_agent_model_name(provider: str) -> str:
+    return (
+        BYTEPLUS_STUDIO_AGENT_MODEL_NAME
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_STUDIO_AGENT_MODEL_NAME
+    )
+
+
+def modelark_base_url(provider: str) -> str:
+    return (
+        BYTEPLUS_MODELARK_BASE_URL
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_MODELARK_BASE_URL
+    )
+
+
+def normalize_modelark_base_url(raw_url: str) -> str:
+    """Normalize a strict HTTPS ModelArk endpoint for exact comparison."""
+    try:
+        parsed = urlparse((raw_url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    path = "/" + parsed.path.strip("/")
+    if path != "/api/v3":
+        return ""
+    return f"https://{parsed.hostname.lower()}{path}"
+
+
+def is_provider_modelark_base_url(provider: str, raw_url: str) -> bool:
+    """Return whether ``raw_url`` is exactly the provider's official endpoint."""
+    normalized_provider = _provider_id(provider)
+    if normalized_provider not in SUPPORTED_CLOUD_PROVIDERS:
+        return False
+    return normalize_modelark_base_url(raw_url) == normalize_modelark_base_url(
+        modelark_base_url(normalized_provider)
+    )
+
+
+def generated_agent_model_name(provider: str) -> str:
+    return (
+        BYTEPLUS_GENERATED_AGENT_MODEL_NAME
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_GENERATED_AGENT_MODEL_NAME
+    )
+
+
+def embedding_model_name(provider: str) -> str:
+    return (
+        BYTEPLUS_EMBEDDING_MODEL_NAME
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_EMBEDDING_MODEL_NAME
+    )
+
+
+def image_generate_model_name(provider: str) -> str:
+    return (
+        BYTEPLUS_IMAGE_GENERATE_MODEL_NAME
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_IMAGE_GENERATE_MODEL_NAME
+    )
+
+
+def image_edit_model_name(provider: str) -> str:
+    return (
+        BYTEPLUS_IMAGE_EDIT_MODEL_NAME
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_IMAGE_EDIT_MODEL_NAME
+    )
+
+
+def video_model_name(provider: str) -> str:
+    return (
+        BYTEPLUS_VIDEO_MODEL_NAME
+        if _provider_id(provider) == "byteplus"
+        else VOLCENGINE_VIDEO_MODEL_NAME
+    )
+
+
+def is_byteplus_model(model_id: str) -> bool:
+    return model_id.strip() in BYTEPLUS_MODELARK_MODEL_IDS
+
+
+def provider_allows_model(provider: str, model_id: str) -> bool:
+    normalized = model_id.strip()
+    if not normalized:
+        return False
+    if _provider_id(provider) == "byteplus":
+        return is_byteplus_model(normalized)
+    return True
+
+
+def studio_development_model_ids(provider: str) -> frozenset[str]:
+    """Return the provider-specific allowlist for Studio build and migration."""
+    normalized_provider = _provider_id(provider)
+    if normalized_provider == "volcengine":
+        return VOLCENGINE_STUDIO_DEVELOPMENT_MODEL_IDS
+    if normalized_provider == "byteplus":
+        return BYTEPLUS_STUDIO_DEVELOPMENT_MODEL_IDS
+    return frozenset()
+
+
+def provider_allows_studio_development_model(provider: str, model_id: str) -> bool:
+    """Return whether a model can power Studio intelligent development flows."""
+    return model_id.strip() in studio_development_model_ids(provider)
+
+
+def provider_env_placeholders(provider: str) -> dict[str, str]:
+    return {
+        "MODEL_AGENT_NAME": generated_agent_model_name(provider),
+        "MODEL_AGENT_API_BASE": modelark_base_url(provider),
+        "MODEL_EMBEDDING_NAME": embedding_model_name(provider),
+        "MODEL_EMBEDDING_API_BASE": modelark_base_url(provider),
+        "MODEL_IMAGE_NAME": image_generate_model_name(provider),
+        "MODEL_IMAGE_API_BASE": modelark_base_url(provider),
+        "MODEL_EDIT_NAME": image_edit_model_name(provider),
+        "MODEL_EDIT_API_BASE": modelark_base_url(provider),
+        "MODEL_VIDEO_NAME": video_model_name(provider),
+        "MODEL_VIDEO_API_BASE": modelark_base_url(provider),
+    }

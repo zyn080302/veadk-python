@@ -33,7 +33,7 @@ from volcenginesdkcore.rest import ApiException
 
 Service = "apig"
 Version = "2021-03-03"
-Region = "cn-beijing"
+Region = os.getenv("REGION") or "cn-beijing"
 Host = "iam.volcengineapi.com"
 ContentType = "application/x-www-form-urlencoded"
 
@@ -204,12 +204,24 @@ def norm_query(params):
     return query.replace("+", "%20")
 
 
-def request(method, date, query, header, ak, sk, token, action, body):
+def request(
+    method,
+    date,
+    query,
+    header,
+    ak,
+    sk,
+    token,
+    action,
+    body,
+    region=Region,
+    host=Host,
+):
     credential = {
         "access_key_id": ak,
         "secret_access_key": sk,
         "service": Service,
-        "region": Region,
+        "region": region,
     }
 
     if token is not None:
@@ -233,7 +245,7 @@ def request(method, date, query, header, ak, sk, token, action, body):
 
     request_param = {
         "body": body,
-        "host": Host,
+        "host": host,
         "path": "/",
         "method": method,
         "content_type": content_type,
@@ -310,7 +322,15 @@ def request(method, date, query, header, ak, sk, token, action, body):
     return r.json()
 
 
-def signed_request(ak: str, sk: str, target: str, body: dict):
+def signed_request(
+    ak: str,
+    sk: str,
+    target: str,
+    body: dict,
+    region: str = Region,
+    session_token: str = "",
+    host: str = Host,
+):
     now = datetime.datetime.utcnow()
 
     try:
@@ -321,9 +341,11 @@ def signed_request(ak: str, sk: str, target: str, body: dict):
             {},
             ak,
             sk,
-            "",
+            session_token,
             target,
             json.dumps(body),
+            region=region,
+            host=host,
         )
         return response_body
     except Exception as e:
@@ -378,7 +400,7 @@ def create_api_gateway_trigger(
         "UpstreamList": [{"Type": "VeFaas", "UpstreamId": upstream_id, "Weight": 100}],
         "ServiceId": service_id,
         "MatchRule": {
-            "Method": ["POST", "GET", "PUT", "DELETE", "HEAD", "OPTIONS"],
+            "Method": ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             "Path": {"MatchType": "Prefix", "MatchContent": "/"},
         },
         "AdvancedSetting": {

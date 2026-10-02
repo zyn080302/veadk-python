@@ -1,0 +1,53 @@
+import { codingAgentsAutomation } from "./codingAgents";
+import { feishuBotAutomation } from "./feishuBot";
+import { gitLabMergeRequestReviewAutomation } from "./gitlabMergeRequestReview";
+import { pullRequestReviewAutomation } from "./pullRequestReview";
+import { runtimeDeliveryAutomation } from "./runtimeDelivery";
+import { templateProjectAutomation } from "./templateProject";
+import { websiteIntegrationAutomation } from "./websiteIntegration";
+import type {
+  AutomationCategoryId,
+  AutomationDefinition,
+  AutomationId,
+  GitHubAutomationDefinition,
+} from "./types";
+
+export const AUTOMATION_CATEGORIES: readonly {
+  id: AutomationCategoryId;
+  label: string;
+}[] = [
+  { id: "development", label: "Development" },
+  { id: "channels", label: "Messaging channels" },
+];
+
+export const AUTOMATIONS: readonly AutomationDefinition[] = [
+  codingAgentsAutomation,
+  templateProjectAutomation,
+  runtimeDeliveryAutomation,
+  pullRequestReviewAutomation,
+  gitLabMergeRequestReviewAutomation,
+  feishuBotAutomation,
+  websiteIntegrationAutomation,
+];
+
+const AUTOMATION_BY_ID = new Map(
+  AUTOMATIONS.map((automation) => [automation.id, automation]),
+);
+
+export function getAutomation(id: AutomationId): AutomationDefinition {
+  const automation = AUTOMATION_BY_ID.get(id);
+  if (!automation) throw new Error(`Unknown automation: ${id}`);
+  return automation;
+}
+
+export function getGitHubAutomation(
+  id: AutomationId,
+): GitHubAutomationDefinition {
+  const automation = getAutomation(id);
+  if (automation.kind !== "github") {
+    throw new Error(`Automation is not backed by GitHub: ${id}`);
+  }
+  return automation;
+}
+
+export type { AutomationId, GitHubAutomationId } from "./types";

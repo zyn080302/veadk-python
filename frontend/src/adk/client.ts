@@ -3,7 +3,86 @@
 // the Vite dev proxy in development.
 
 import { withAuth } from "./auth";
+import { adkT, withLocaleHeaders } from "./i18n";
+import { isOAuthLoginRequired, withLocalUser } from "./identity";
+import {
+  isAuthenticationRedirect,
+  waitForAuthentication,
+} from "./authSession";
+import { parseJsonResponse } from "./jsonResponse";
+import { formatRunSseError } from "./runSseError";
+import {
+  runtimeContextFromResponse,
+  type RuntimeLogTarget,
+} from "./runtimeLogs";
 import { parseSSE } from "./sse";
+import { normalizeRuntimeDescription } from "./runtimeDescription";
+import {
+  DeploymentStatusUnconfirmedError,
+  isDeploymentAbortError,
+  isDeploymentStatusUnconfirmedError,
+  pollDeploymentRecovery,
+} from "./deploymentStatus";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  requestSignal,
+  TRANSFER_REQUEST_TIMEOUT_MS,
+} from "./timeout";
+import type { AgentProject } from "../create/project";
+import type {
+  AgentDraft,
+  McpCredentialValue,
+  NetworkConfig,
+  SelectedSkill,
+} from "../create/types";
+import type { IssueFeedbackReport } from "./issueFeedback";
+import {
+  BYTEPLUS_DEFAULT_REGION,
+  VOLCENGINE_DEFAULT_REGION,
+  type CloudProvider,
+} from "./cloudProvider";
+
+export interface ModelOption {
+  id: string;
+  name: string;
+  displayName: string;
+  vendorName: string;
+  activationState: string;
+  lifecycleStatus: string;
+  available: boolean;
+  apiKeyAllowed?: boolean;
+  unavailableReason?: ModelApiKeyModelPermission["state"];
+}
+
+export interface ModelOptionsResponse {
+  provider: CloudProvider;
+  selectedApiKeyId?: string;
+  models: ModelOption[];
+  apiKeyModelPermissions?: ModelApiKeyModelPermission[];
+}
+
+export interface ModelApiKeyModelPermission {
+  name: string;
+  modelId?: string;
+  state: "Available" | "Shutdown" | "VideoGeneration" | "Unsupported" | "NotActivated" | "Unknown";
+}
+
+export interface ModelApiKeyOption {
+  id: string;
+  name: string;
+  status?: string;
+  allowAll?: boolean;
+}
+
+export interface ModelApiKeysResponse {
+  provider: CloudProvider;
+  keys: ModelApiKeyOption[];
+  defaultKeyId?: string;
+}
+
+export interface ModelApiKeyValueResponse {
+  value: string;
+}
 
 /** An ADK event as serialised over `/run_sse` (camelCase, by_alias=True). */
 export interface AdkUsage {
@@ -15,6 +94,11 @@ export interface AdkUsage {
 }
 
 export interface AdkEvent {
+  id?: string;
+  invocationId?: string;
+  invocation_id?: string;
+  modelVersion?: string;
+  model_version?: string;
   author?: string;
   partial?: boolean;
   timestamp?: number;
@@ -29,25 +113,212 @@ export interface AdkEvent {
     role?: string;
     parts?: AdkPart[];
   };
+  // Control-flow signals from ADK EventActions. `transfer_to_agent` names the
+  // delegation target when an LLM hands off; end_of_agent / escalate mark an
+  // agent finishing or a loop exiting. (API may send camel or snake case.)
+  actions?: {
+    transferToAgent?: string;
+    transfer_to_agent?: string;
+    endOfAgent?: boolean;
+    end_of_agent?: boolean;
+    escalate?: boolean;
+    artifactDelta?: Record<string, number>;
+    artifact_delta?: Record<string, number>;
+  };
   [k: string]: unknown;
 }
 
 /** A single OpenTelemetry span as returned by /debug/trace/session/{id}. */
 export interface TraceSpan {
   name: string;
-  span_id: number;
-  trace_id: number;
+  span_id: string | number;
+  trace_id: string | number;
   start_time: number; // nanoseconds
   end_time: number; // nanoseconds
   attributes: Record<string, unknown>;
-  parent_span_id: number | null;
+  parent_span_id: string | number | null;
 }
 
 export interface AdkSession {
   id: string;
   lastUpdateTime?: number;
   events?: AdkEvent[];
+  state?: Record<string, unknown>;
   [k: string]: unknown;
+}
+
+export type MessageFeedbackRating = "good" | "bad";
+export type AgentFeedbackSource = "user" | "auto";
+
+export interface MessageFeedbackState {
+  rating: MessageFeedbackRating | null;
+  comment?: string;
+  evaluationSetId?: string | null;
+  evaluationSetName?: string | null;
+  workspaceId?: string | null;
+  evaluationItemId?: string | null;
+  syncStatus: "syncing" | "synced";
+  statePersistence?: "runtime" | "browser";
+  updatedAt: number;
+}
+
+export interface AgentFeedbackSetSummary {
+  kind: MessageFeedbackRating;
+  evaluationSetId: string | null;
+  evaluationSetName: string | null;
+  workspaceId: string | null;
+  itemCount: number;
+}
+
+export interface AgentFeedbackCase {
+  id: string;
+  itemKey: string;
+  kind: MessageFeedbackRating;
+  input: string;
+  output: string;
+  referenceOutput: string;
+  comment: string;
+  agentName: string;
+  sessionId: string;
+  messageId: string;
+  runtimeId: string;
+  invocationId: string;
+  userId: string;
+  createdAt: string;
+  evaluationSetId: string;
+  evaluationSetName: string;
+  workspaceId: string;
+  source?: AgentFeedbackSource;
+  score?: number | null;
+  reason?: string;
+}
+
+export interface AgentFeedbackCasesResponse {
+  agentName: string;
+  runtimeId: string;
+  region: string;
+  projectName: string;
+  sets: AgentFeedbackSetSummary[];
+  items: AgentFeedbackCase[];
+  unsupported?: boolean;
+  unsupportedMessage?: string;
+}
+
+export type AutomaticEvaluationState = "pending" | "running";
+
+export interface AutomaticEvaluationStatus {
+  runtimeId: string;
+  appName: string;
+  userId: string;
+  sessionId: string;
+  state: AutomaticEvaluationState;
+  scheduledAt: string;
+  dueAt: string;
+  startedAt: string | null;
+}
+
+export interface AutomaticEvaluationStatusesResponse {
+  runtimeId: string;
+  appName: string;
+  userId: string;
+  items: AutomaticEvaluationStatus[];
+}
+
+export type AgentOptimizationPriority = "high" | "medium" | "low";
+export type AgentOptimizationModule =
+  | "agent_structure"
+  | "prompt"
+  | "tool"
+  | "knowledge"
+  | "memory"
+  | "workflow"
+  | "other";
+
+export interface AgentOptimizationSuggestion {
+  suggestion: string;
+  reason: string;
+}
+
+export interface AgentOptimizationGroup {
+  priority: AgentOptimizationPriority;
+  module: AgentOptimizationModule;
+  customModule: string | null;
+  items: AgentOptimizationSuggestion[];
+}
+
+export interface AgentOptimizationsResponse {
+  runtimeId: string;
+  appName: string;
+  generatedAt: string | null;
+  optimizerVersion: string | null;
+  sourceItemKeys: string[];
+  groups: AgentOptimizationGroup[];
+}
+
+const MESSAGE_FEEDBACK_CACHE_KEY = "veadk.messageFeedback.v1";
+
+function feedbackCacheScope(
+  runtimeId: string,
+  appName: string,
+  userId: string,
+  sessionId: string,
+): string {
+  return [runtimeId, appName, userId, sessionId].join(":");
+}
+
+function readMessageFeedbackCache(): Record<
+  string,
+  Record<string, MessageFeedbackState>
+> {
+  if (typeof window === "undefined") return {};
+  try {
+    const value = JSON.parse(localStorage.getItem(MESSAGE_FEEDBACK_CACHE_KEY) ?? "{}");
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function storeMessageFeedback(
+  scope: string,
+  eventId: string,
+  feedback: MessageFeedbackState,
+): void {
+  if (typeof window === "undefined") return;
+  const cache = readMessageFeedbackCache();
+  cache[scope] = {
+    ...(cache[scope] ?? {}),
+    [`veadk_feedback:${eventId}`]: feedback,
+  };
+  localStorage.setItem(MESSAGE_FEEDBACK_CACHE_KEY, JSON.stringify(cache));
+}
+
+export function clearMessageFeedbackCache(args: {
+  runtimeId: string;
+  appName: string;
+  userId: string;
+  sessionId: string;
+  eventIds: string[];
+}): void {
+  if (typeof window === "undefined") return;
+  const scope = feedbackCacheScope(
+    args.runtimeId,
+    args.appName,
+    args.userId,
+    args.sessionId,
+  );
+  const cache = readMessageFeedbackCache();
+  const scoped = cache[scope];
+  if (!scoped) return;
+  for (const eventId of args.eventIds) {
+    delete scoped[`veadk_feedback:${eventId}`];
+  }
+  if (Object.keys(scoped).length === 0) {
+    delete cache[scope];
+  } else {
+    cache[scope] = scoped;
+  }
+  localStorage.setItem(MESSAGE_FEEDBACK_CACHE_KEY, JSON.stringify(cache));
 }
 
 export interface AdkInlineData {
@@ -59,40 +330,74 @@ export interface AdkInlineData {
   display_name?: string;
 }
 
+export interface AdkFileData {
+  fileUri?: string;
+  mimeType?: string;
+  displayName?: string;
+  file_uri?: string;
+  mime_type?: string;
+  display_name?: string;
+}
+
 export interface AdkPart {
   text?: string;
   thought?: boolean;
   inlineData?: AdkInlineData;
   inline_data?: AdkInlineData; // snake_case fallback (defensive)
-  functionCall?: { name?: string; args?: Record<string, unknown> };
-  functionResponse?: { name?: string; response?: Record<string, unknown> };
+  fileData?: AdkFileData;
+  file_data?: AdkFileData;
+  partMetadata?: Record<string, unknown>;
+  part_metadata?: Record<string, unknown>;
+  functionCall?: { id?: string; name?: string; args?: Record<string, unknown> };
+  functionResponse?: { id?: string; name?: string; response?: Record<string, unknown> };
   // snake_case fallbacks (defensive)
-  function_call?: { name?: string; args?: Record<string, unknown> };
-  function_response?: { name?: string; response?: Record<string, unknown> };
+  function_call?: { id?: string; name?: string; args?: Record<string, unknown> };
+  function_response?: { id?: string; name?: string; response?: Record<string, unknown> };
 }
 
-/** A file the user attached in the composer, encoded for `/run_sse`. */
+/** A file attached in the composer or reconstructed from message history. */
 export interface Attachment {
+  id: string;
   mimeType: string;
-  data: string; // base64 (no data: prefix)
+  uri?: string;
+  data?: string; // legacy inline base64 (no data: prefix)
   name?: string;
+  sizeBytes?: number;
+  status?: "uploading" | "ready" | "error";
+  error?: string;
+  previewUrl?: string;
 }
 
 const API_BASE = ""; // same origin (prod) / proxied (dev)
 
-/** A resolved ADK endpoint. Empty `base` = the local same-origin server. */
+/** A resolved ADK endpoint. Empty = the local same-origin server. `runtimeId`
+ *  routes through the server-side runtime proxy; `base`+`apiKey` is the legacy
+ *  browser-direct AgentKit path. */
 export interface AdkEndpoint {
   base?: string;
   apiKey?: string;
+  runtimeId?: string;
+  region?: string;
+  runtimeVersion?: number | null;
+  retryProbe?: boolean;
 }
 
 // Routing table for remote AgentKit apps: maps a dropdown id (see
 // adk/connections.ts) to its real ADK app name + endpoint. Local apps are not
 // registered and fall through to the same-origin server.
+//
+// Two remote flavours:
+//  - `runtimeId` (preferred): route through the same-origin `/web/runtime-proxy`,
+//    which resolves the runtime's endpoint + apikey server-side. The browser
+//    never sees the apikey.
+//  - `base` + `apiKey` (legacy): the browser holds the key and talks to the
+//    backend `/agentkit-proxy` forwarding it in headers.
 interface RemoteApp {
   app: string;
-  base: string;
-  apiKey: string;
+  base?: string;
+  apiKey?: string;
+  runtimeId?: string;
+  region?: string;
 }
 const remoteApps = new Map<string, RemoteApp>();
 
@@ -106,20 +411,194 @@ export function clearRemoteApps(): void {
 /** Resolve a dropdown id to its real ADK app name + endpoint. */
 function resolve(appName: string): { app: string; ep: AdkEndpoint } {
   const r = remoteApps.get(appName);
-  return r ? { app: r.app, ep: { base: r.base, apiKey: r.apiKey } } : { app: appName, ep: {} };
+  if (!r) return { app: appName, ep: {} };
+  return {
+    app: r.app,
+    ep: { base: r.base, apiKey: r.apiKey, runtimeId: r.runtimeId, region: r.region },
+  };
 }
 
-/** fetch wrapper: same-origin (forwarding the gateway auth querystring) for the
- *  local server, or a remote AgentKit base URL with a Bearer API key. */
-function apiFetch(path: string, init: RequestInit = {}, ep: AdkEndpoint = {}): Promise<Response> {
-  if (ep.base) {
-    // Use backend proxy to avoid CORS issues with remote AgentKit
-    const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
-    headers["X-AgentKit-Base"] = ep.base;
-    if (ep.apiKey) headers["X-AgentKit-Key"] = ep.apiKey;
-    return fetch(withAuth(`${API_BASE}/agentkit-proxy${path}`), { ...init, headers });
+/** fetch wrapper. Routing, in priority order:
+ *  1. `runtimeId` → same-origin `/web/runtime-proxy/{id}{path}` (server injects
+ *     the apikey; apikey never reaches the browser).
+ *  2. `base` + `apiKey` → backend `/agentkit-proxy` (legacy, key in header).
+ *  3. neither → the local same-origin server. */
+async function apiFetch(
+  path: string,
+  init: RequestInit = {},
+  ep: AdkEndpoint = {},
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const operationSignal = requestSignal(init.signal, timeoutMs);
+  const runtimeMethodOverride =
+    Boolean(ep.runtimeId) && String(init.method ?? "GET").toUpperCase() === "DELETE";
+  const baseOpts = {
+    ...init,
+    ...(runtimeMethodOverride ? { method: "POST" } : {}),
+    headers: withLocaleHeaders(withLocalUser(init.headers)),
+  };
+  const send = () => {
+    const opts = {
+      ...baseOpts,
+      signal: operationSignal,
+    };
+    if (ep.runtimeId) {
+      const runtimeParams = new URLSearchParams();
+      // Keep the proxy's control-plane region separate from API query params.
+      // Skill Catalog endpoints also use `region` for their own filtering.
+      if (ep.region) runtimeParams.set("_runtime_region", ep.region);
+      if (ep.retryProbe) runtimeParams.set("probe_retry", "connect");
+      if (runtimeMethodOverride) runtimeParams.set("_method", "DELETE");
+      const rq = runtimeParams.toString()
+        ? `${path.includes("?") ? "&" : "?"}${runtimeParams.toString()}`
+        : "";
+      return fetch(
+        withAuth(`${API_BASE}/web/runtime-proxy/${ep.runtimeId}${path}${rq}`),
+        opts,
+      );
+    }
+    if (ep.base) {
+      // Use backend proxy to avoid CORS issues with remote AgentKit
+      const headers = new Headers(opts.headers);
+      headers.set("X-AgentKit-Base", ep.base);
+      if (ep.apiKey) headers.set("X-AgentKit-Key", ep.apiKey);
+      return fetch(withAuth(`${API_BASE}/agentkit-proxy${path}`), {
+        ...opts,
+        headers,
+      });
+    }
+    return fetch(withAuth(`${API_BASE}${path}`), opts);
+  };
+
+  const requiresLogin = async (response: Response) => {
+    if (response.headers.get("X-Studio-Error-Source") === "upstream") return false;
+    if (isAuthenticationRedirect(response)) return true;
+    if (response.status !== 401) return false;
+    try {
+      return await isOAuthLoginRequired();
+    } catch {
+      return false;
+    }
+  };
+
+  let response = await send();
+  while (await requiresLogin(response)) {
+    await waitForAuthentication(operationSignal);
+    response = await send();
   }
-  return fetch(withAuth(`${API_BASE}${path}`), init);
+  return response;
+}
+
+/** Same-origin Studio request with the active local or OAuth identity attached. */
+export function studioFetch(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  return apiFetch(path, init, {}, timeoutMs);
+}
+
+function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          const loc = Array.isArray((item as { loc?: unknown }).loc)
+            ? (item as { loc?: unknown[] }).loc?.join(".")
+            : "";
+          const msg = String((item as { msg?: unknown }).msg ?? "");
+          return loc ? `${loc}: ${msg}` : msg;
+        }
+        return String(item);
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  return "";
+}
+
+export async function httpErrorMessage(
+  res: Response,
+  fallback: string,
+): Promise<string> {
+  const source = res.headers.get("X-Studio-Error-Source");
+  const status = source === "upstream"
+    ? res.headers.get("X-Studio-Upstream-Status") ?? res.status
+    : res.status;
+  const context = adkT("common.fallbackWithHttpStatus", { fallback, status });
+  const text = await res.text().catch(() => "");
+  if (source === "upstream") {
+    return adkT("client.errorWithCloudResponse", {
+      context,
+      action: res.headers.get("X-Studio-Upstream-Action") ?? "",
+      response: text || adkT("client.emptyCloudResponse"),
+    });
+  }
+  if (!text) return context;
+  try {
+    const data = JSON.parse(text) as { detail?: unknown; error?: unknown };
+    const detail = formatErrorDetail(data.detail ?? data.error);
+    if (source === "transport" || source === "studio") {
+      return detail ? `${context}\n${detail}` : context;
+    }
+    return detail
+      ? adkT("client.errorWithDetailAndRawResponse", { context, detail, response: text })
+      : adkT("client.errorWithRawResponse", { context, response: text });
+  } catch {
+    return adkT("client.errorWithRawResponse", { context, response: text });
+  }
+}
+
+export async function listModelApiKeys(
+  signal?: AbortSignal,
+  refresh = false,
+): Promise<ModelApiKeysResponse> {
+  const res = await apiFetch(
+    `/web/model-api-keys${refresh ? "?refresh=true" : ""}`,
+    { signal, cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadArkApiKeysFailed")));
+  }
+  return (await res.json()) as ModelApiKeysResponse;
+}
+
+/** Reveal one server-managed ModelArk API Key only for the current request. */
+export async function revealModelApiKey(
+  apiKeyId: string,
+  signal?: AbortSignal,
+): Promise<ModelApiKeyValueResponse> {
+  const res = await apiFetch(
+    `/web/model-api-keys/${encodeURIComponent(apiKeyId)}/value`,
+    { method: "POST", signal, cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadArkApiKeysFailed")));
+  }
+  return (await res.json()) as ModelApiKeyValueResponse;
+}
+
+export async function listModelOptions(options?: {
+  signal?: AbortSignal;
+  apiKeyId?: string;
+  refresh?: boolean;
+  scope?: "development";
+}): Promise<ModelOptionsResponse> {
+  const params = new URLSearchParams();
+  if (options?.apiKeyId) params.set("apiKeyId", options.apiKeyId);
+  if (options?.refresh) params.set("refresh", "true");
+  if (options?.scope) params.set("scope", options.scope);
+  const query = params.toString();
+  const res = await apiFetch(`/web/model-options${query ? `?${query}` : ""}`, {
+    signal: options?.signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadModelsFailed")));
+  }
+  return (await res.json()) as ModelOptionsResponse;
 }
 
 export async function listApps(): Promise<string[]> {
@@ -128,11 +607,235 @@ export async function listApps(): Promise<string[]> {
   return res.json();
 }
 
-/** List the apps a remote AgentKit server exposes (also validates URL + key). */
-export async function fetchRemoteApps(base: string, apiKey: string): Promise<string[]> {
-  const res = await apiFetch(`/list-apps`, {}, { base, apiKey });
-  if (!res.ok) throw new Error(`list-apps failed: ${res.status}`);
-  return res.json();
+/** A runtime exists but the current identity is not allowed to use it. */
+export class RuntimeAccessDeniedError extends Error {
+  constructor() {
+    super(adkT("client.runtimeAccessDenied"));
+    this.name = "RuntimeAccessDeniedError";
+  }
+}
+
+/** The Runtime is visible to Studio, but its Agent Server cannot be probed. */
+export class RuntimeProbeError extends Error {
+  constructor(
+    message: string,
+    readonly unsupported = false,
+    readonly retryable = false,
+  ) {
+    super(message);
+    this.name = "RuntimeProbeError";
+  }
+}
+
+const privateRuntimeUnreachableMessage = () => adkT("client.privateRuntimeUnavailable");
+const runtimeEndpointUnreachableMessage = () => adkT("client.runtimeTemporarilyUnavailable");
+const VOLCENGINE_RUNTIME_REGION_FALLBACKS = ["cn-beijing", "cn-shanghai"] as const;
+const RUNTIME_APPS_CACHE_TTL_MS = 30_000;
+const RUNTIME_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
+const FEEDBACK_CASES_CACHE_TTL_MS = 60 * 1000;
+let activeCloudProvider: CloudProvider = "volcengine";
+
+interface ClientCacheEntry<T> {
+  value?: T;
+  promise?: Promise<T>;
+  updatedAt: number;
+}
+
+interface ClientCacheOptions {
+  force?: boolean;
+}
+
+const runtimeAppsCache = new Map<
+  string,
+  { apps: string[]; expiresAt: number }
+>();
+const runtimeAgentInfoCache = new Map<string, ClientCacheEntry<AgentInfo>>();
+const runtimeDetailCache = new Map<string, ClientCacheEntry<RuntimeDetail>>();
+const feedbackCasesCache =
+  new Map<string, ClientCacheEntry<AgentFeedbackCasesResponse>>();
+const runtimeUpdateCapabilityCache =
+  new Map<string, ClientCacheEntry<RuntimeUpdateCapability>>();
+
+function runtimeAppsCacheKey(
+  runtimeId: string,
+  region: string,
+  runtimeVersion?: number | null,
+): string {
+  return `${region}:${runtimeId}:${runtimeVersion ?? ""}`;
+}
+
+export function setClientCloudProvider(provider: CloudProvider): void {
+  if (provider !== activeCloudProvider) runtimeUpdateCapabilityCache.clear();
+  activeCloudProvider = provider;
+}
+
+export function runtimeRegionCandidates(region?: string): string[] {
+  const raw = (region || "").trim();
+  if (activeCloudProvider === "byteplus") {
+    return [raw && !raw.startsWith("cn-") ? raw : BYTEPLUS_DEFAULT_REGION];
+  }
+  const primary =
+    raw && !raw.startsWith("ap-") ? raw : VOLCENGINE_DEFAULT_REGION;
+  if (
+    !VOLCENGINE_RUNTIME_REGION_FALLBACKS.includes(
+      primary as (typeof VOLCENGINE_RUNTIME_REGION_FALLBACKS)[number],
+    )
+  ) {
+    return [primary];
+  }
+  return [
+    primary,
+    ...VOLCENGINE_RUNTIME_REGION_FALLBACKS.filter(
+      (candidate) => candidate !== primary,
+    ),
+  ];
+}
+
+function selectedRuntimeRegionCandidates(region?: string): string[] {
+  const explicit = (region || "").trim();
+  return explicit ? [explicit] : runtimeRegionCandidates();
+}
+
+function cacheKey(...parts: Array<string | number | undefined>): string {
+  return parts.map((part) => String(part ?? "")).join("\u0001");
+}
+
+function freshCacheValue<T>(
+  cache: Map<string, ClientCacheEntry<T>>,
+  key: string,
+  ttlMs: number,
+): T | null {
+  const entry = cache.get(key);
+  if (!entry?.value) return null;
+  return Date.now() - entry.updatedAt <= ttlMs ? entry.value : null;
+}
+
+function rememberClientCache<T>(
+  cache: Map<string, ClientCacheEntry<T>>,
+  key: string,
+  value: T,
+): T {
+  cache.set(key, { value, updatedAt: Date.now() });
+  return value;
+}
+
+function waitForSharedRequest<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function runtimeProxyErrorCode(response: Response): Promise<string> {
+  try {
+    const payload = (await response.clone().json()) as {
+      detail?: unknown;
+    };
+    return typeof payload.detail === "string" ? payload.detail : "";
+  } catch {
+    return "";
+  }
+}
+
+/** List the apps a remote AgentKit server exposes (also validates URL + key).
+ *  Pass `ep` to probe via the runtime proxy instead of a raw base+key. */
+export async function fetchRemoteApps(
+  base: string,
+  apiKey: string,
+  ep?: AdkEndpoint,
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<string[]> {
+  const res = await apiFetch(
+    `/list-apps`,
+    { signal },
+    ep ?? { base, apiKey },
+    timeoutMs,
+  );
+  const runtimeErrorCode = ep?.runtimeId
+    ? await runtimeProxyErrorCode(res)
+    : "";
+  if (ep?.runtimeId && runtimeErrorCode === "runtime_access_denied") {
+    throw new RuntimeAccessDeniedError();
+  }
+  if (
+    ep?.runtimeId &&
+    runtimeErrorCode === "runtime_private_endpoint_unreachable"
+  ) {
+    throw new RuntimeProbeError(privateRuntimeUnreachableMessage());
+  }
+  if (
+    ep?.runtimeId &&
+    [
+      "runtime_proxy_connect_error",
+      "runtime_proxy_timeout",
+      "runtime_json_connect_error",
+      "runtime_json_timeout",
+    ].includes(runtimeErrorCode)
+  ) {
+    throw new RuntimeProbeError(runtimeEndpointUnreachableMessage(), false, true);
+  }
+  if (ep?.runtimeId && res.status === 404) {
+    throw new RuntimeProbeError(
+      adkT("client.runtimeConnectionUnsupported"),
+      true,
+      true,
+    );
+  }
+  if (ep?.runtimeId && (res.status === 401 || res.status === 403)) {
+    throw new RuntimeProbeError(
+      adkT("client.runtimeConnectionDenied"),
+    );
+  }
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.listAgentsFailed")));
+  }
+  let payload: unknown;
+  try {
+    payload = await res.json();
+  } catch {
+    throw new RuntimeProbeError(
+      adkT("client.invalidListAppsJson"),
+    );
+  }
+  if (
+    !Array.isArray(payload) ||
+    payload.some((app) => typeof app !== "string" || !app.trim())
+  ) {
+    throw new RuntimeProbeError(
+      adkT("client.invalidListAppsFormat"),
+    );
+  }
+  const apps = payload.map((app) => app.trim());
+  if (ep?.runtimeId) {
+    runtimeAppsCache.set(
+      runtimeAppsCacheKey(ep.runtimeId, ep.region ?? "", ep.runtimeVersion),
+      {
+        apps,
+        expiresAt: Date.now() + RUNTIME_APPS_CACHE_TTL_MS,
+      },
+    );
+  }
+  return apps;
 }
 
 export async function createSession(
@@ -145,7 +848,11 @@ export async function createSession(
     { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
     ep,
   );
-  if (!res.ok) throw new Error(`create session failed: ${res.status}`);
+  if (!res.ok) {
+    const fallback = adkT("client.createSessionFailedWithStatus", { status: res.status });
+    const detail = await httpErrorMessage(res, adkT("client.createSessionFailed"));
+    throw new Error(detail === fallback ? fallback : adkT("common.fallbackWithDetail", { fallback, detail }));
+  }
   const session = await res.json();
   return session.id;
 }
@@ -167,12 +874,338 @@ export async function getSession(
 ): Promise<AdkSession> {
   const { app, ep } = resolve(appName);
   const res = await apiFetch(
-    `/apps/${app}/users/${encodeURIComponent(userId)}/sessions/${sessionId}`,
+    `/apps/${app}/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
     {},
     ep,
   );
-  if (!res.ok) throw new Error(`get session failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const detail = await httpErrorMessage(res, adkT("client.getSessionFailed"));
+    throw new Error(adkT("client.getSessionFailedWithDetail", { status: res.status, detail }));
+  }
+  const session = (await res.json()) as AdkSession;
+  if (ep.runtimeId) {
+    const scope = feedbackCacheScope(ep.runtimeId, app, userId, sessionId);
+    session.state = {
+      ...(readMessageFeedbackCache()[scope] ?? {}),
+      ...(session.state ?? {}),
+    };
+  }
+  return session;
+}
+
+export async function submitMessageFeedback(args: {
+  appName: string;
+  userId: string;
+  sessionId: string;
+  eventId: string;
+  rating: MessageFeedbackRating | null;
+  comment?: string;
+}): Promise<MessageFeedbackState> {
+  const { app, ep } = resolve(args.appName);
+  if (!ep.runtimeId) {
+    throw new Error(adkT("client.feedbackRuntimeOnly"));
+  }
+  if (!ep.region) throw new Error(adkT("client.feedbackRegionMissing"));
+  const res = await apiFetch(
+    "/web/evaluation/feedback",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runtimeId: ep.runtimeId,
+        region: ep.region,
+        appName: app,
+        userId: args.userId,
+        sessionId: args.sessionId,
+        eventId: args.eventId,
+        rating: args.rating,
+        comment: args.comment ?? "",
+      }),
+    },
+    {},
+    TRANSFER_REQUEST_TIMEOUT_MS,
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.submitFeedbackFailed")));
+  }
+  const feedback = (await res.json()) as MessageFeedbackState;
+  const scope = feedbackCacheScope(
+    ep.runtimeId,
+    app,
+    args.userId,
+    args.sessionId,
+  );
+  storeMessageFeedback(scope, args.eventId, feedback);
+  return feedback;
+}
+
+export async function getAgentFeedbackCases(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+  pageSize?: number;
+}, options: ClientCacheOptions = {}): Promise<AgentFeedbackCasesResponse> {
+  const key = cacheKey(
+    args.runtimeId,
+    args.region || "cn-beijing",
+    args.appName,
+    args.pageSize ?? 100,
+  );
+  const cached = freshCacheValue(
+    feedbackCasesCache,
+    key,
+    FEEDBACK_CASES_CACHE_TTL_MS,
+  );
+  if (!options.force && cached) return cached;
+  const existing = feedbackCasesCache.get(key);
+  if (!options.force && existing?.promise) return existing.promise;
+  let lastError: Error | null = null;
+  const promise = (async () => {
+    for (const region of selectedRuntimeRegionCandidates(args.region)) {
+      const query = new URLSearchParams({
+        runtimeId: args.runtimeId,
+        region,
+        appName: args.appName,
+        page_size: String(args.pageSize ?? 100),
+      });
+      const res = await apiFetch(`/web/evaluation/feedback-cases?${query.toString()}`);
+      if (res.ok) {
+        return rememberClientCache(
+          feedbackCasesCache,
+          key,
+          await res.json() as AgentFeedbackCasesResponse,
+        );
+      }
+      lastError = new Error(await httpErrorMessage(res, adkT("client.loadEvaluationSetsFailed")));
+    }
+    throw lastError ?? new Error(adkT("client.loadEvaluationSetsFailed"));
+  })();
+  feedbackCasesCache.set(key, {
+    ...existing,
+    promise,
+    updatedAt: existing?.updatedAt ?? 0,
+  });
+  try {
+    return await promise;
+  } finally {
+    const current = feedbackCasesCache.get(key);
+    if (current?.promise === promise) {
+      feedbackCasesCache.set(key, {
+        value: current.value,
+        updatedAt: current.updatedAt,
+      });
+    }
+  }
+}
+
+export async function getAutomaticEvaluationStatuses(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+  userId: string;
+}): Promise<AutomaticEvaluationStatusesResponse> {
+  let lastError: Error | null = null;
+  for (const region of selectedRuntimeRegionCandidates(args.region)) {
+    const query = new URLSearchParams({
+      runtimeId: args.runtimeId,
+      region,
+      appName: args.appName,
+      userId: args.userId,
+    });
+    const res = await apiFetch(`/web/evaluation/statuses?${query.toString()}`);
+    if (res.ok) {
+      return res.json() as Promise<AutomaticEvaluationStatusesResponse>;
+    }
+    lastError = new Error(await httpErrorMessage(res, adkT("client.loadAutoEvaluationStatusFailed")));
+  }
+  throw lastError ?? new Error(adkT("client.loadAutoEvaluationStatusFailed"));
+}
+
+export async function getAgentOptimizations(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+}): Promise<AgentOptimizationsResponse> {
+  let lastError: Error | null = null;
+  for (const region of selectedRuntimeRegionCandidates(args.region)) {
+    const query = new URLSearchParams({
+      runtimeId: args.runtimeId,
+      region,
+      appName: args.appName,
+    });
+    const res = await apiFetch(`/web/evaluation/optimizations?${query.toString()}`);
+    if (res.ok) return res.json() as Promise<AgentOptimizationsResponse>;
+    lastError = new Error(await httpErrorMessage(res, adkT("client.loadOptimizationsFailed")));
+  }
+  throw lastError ?? new Error(adkT("client.loadOptimizationsFailed"));
+}
+
+export function getCachedAgentFeedbackCases(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+  pageSize?: number;
+}): AgentFeedbackCasesResponse | null {
+  return freshCacheValue(
+    feedbackCasesCache,
+    cacheKey(
+      args.runtimeId,
+      args.region || "cn-beijing",
+      args.appName,
+      args.pageSize ?? 100,
+    ),
+    FEEDBACK_CASES_CACHE_TTL_MS,
+  );
+}
+
+export function prefetchAgentFeedbackCases(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+  pageSize?: number;
+}): void {
+  void getAgentFeedbackCases(args).catch(() => {});
+}
+
+export function refreshAgentFeedbackCases(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+  pageSize?: number;
+}): void {
+  void getAgentFeedbackCases(args, { force: true }).catch(() => {});
+}
+
+function feedbackSetsWithCounts(
+  sets: AgentFeedbackSetSummary[],
+  items: AgentFeedbackCase[],
+): AgentFeedbackSetSummary[] {
+  return (["good", "bad"] as const).map((kind) => {
+    const current = sets.find((set) => set.kind === kind);
+    return {
+      kind,
+      evaluationSetId: current?.evaluationSetId ?? null,
+      evaluationSetName: current?.evaluationSetName ?? null,
+      workspaceId: current?.workspaceId ?? null,
+      itemCount: items.filter((item) => item.kind === kind).length,
+    };
+  });
+}
+
+export function upsertCachedAgentFeedbackCase(args: {
+  runtimeId: string;
+  region?: string;
+  appName: string;
+  userId: string;
+  sessionId: string;
+  messageId: string;
+  invocationId?: string;
+  rating: MessageFeedbackRating | null;
+  input: string;
+  output: string;
+  comment?: string;
+  referenceOutput?: string;
+  createdAt?: string;
+}): void {
+  const comment = args.comment ?? "";
+  const isAnnotatedBadCase = args.rating === "bad" && Boolean(comment.trim());
+  for (const [key, entry] of feedbackCasesCache.entries()) {
+    const value = entry.value;
+    if (
+      !value ||
+      value.runtimeId !== args.runtimeId ||
+      value.agentName !== args.appName
+    ) continue;
+    const withoutCurrent = value.items.filter((item) =>
+      item.sessionId !== args.sessionId || item.messageId !== args.messageId
+    );
+    const items: AgentFeedbackCase[] = args.rating
+      ? [
+          {
+            id: `local:${args.runtimeId}:${args.sessionId}:${args.messageId}`,
+            itemKey: `local:${args.messageId}`,
+            kind: args.rating,
+            input: args.input,
+            output: args.output,
+            referenceOutput: args.referenceOutput ?? args.output,
+            comment,
+            agentName: args.appName,
+            sessionId: args.sessionId,
+            messageId: args.messageId,
+            runtimeId: args.runtimeId,
+            invocationId: args.invocationId ?? "",
+            userId: args.userId,
+            createdAt: args.createdAt ?? new Date().toISOString(),
+            evaluationSetId: "",
+            evaluationSetName: "",
+            workspaceId: "",
+            source: "user",
+            score: isAnnotatedBadCase ? 0 : null,
+            reason: isAnnotatedBadCase ? comment : "",
+          },
+          ...withoutCurrent,
+        ]
+      : withoutCurrent;
+    feedbackCasesCache.set(key, {
+      value: {
+        ...value,
+        sets: feedbackSetsWithCounts(value.sets, items),
+        items,
+      },
+      updatedAt: Date.now(),
+      promise: entry.promise,
+    });
+  }
+}
+
+export async function deleteAgentFeedbackCases(args: {
+  runtimeId: string;
+  region: string;
+  appName: string;
+  itemIds: string[];
+}): Promise<{ deletedCount: number }> {
+  let lastError: Error | null = null;
+  for (const region of selectedRuntimeRegionCandidates(args.region)) {
+    const res = await apiFetch(
+      "/web/evaluation/feedback-cases/delete",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runtimeId: args.runtimeId,
+          region,
+          appName: args.appName,
+          itemIds: args.itemIds,
+        }),
+      },
+      {},
+      TRANSFER_REQUEST_TIMEOUT_MS,
+    );
+    if (res.ok) {
+      const response = await res.json() as { deletedCount: number };
+      const deletedIds = new Set(args.itemIds);
+      for (const [key, entry] of feedbackCasesCache.entries()) {
+        const value = entry.value;
+        if (
+          !value ||
+          value.runtimeId !== args.runtimeId ||
+          value.agentName !== args.appName
+        ) continue;
+        const items = value.items.filter((item) => !deletedIds.has(item.id));
+        feedbackCasesCache.set(key, {
+          value: {
+            ...value,
+            sets: feedbackSetsWithCounts(value.sets, items),
+            items,
+          },
+          updatedAt: Date.now(),
+        });
+      }
+      return response;
+    }
+    lastError = new Error(await httpErrorMessage(res, adkT("client.deleteEvaluationCaseFailed")));
+  }
+  throw lastError ?? new Error(adkT("client.deleteEvaluationCaseFailed"));
 }
 
 export async function deleteSession(
@@ -189,28 +1222,444 @@ export async function deleteSession(
   if (!res.ok && res.status !== 404) throw new Error(`delete session failed: ${res.status}`);
 }
 
-export async function getSessionTrace(sessionId: string): Promise<TraceSpan[]> {
-  const res = await apiFetch(`/debug/trace/session/${sessionId}`);
-  if (!res.ok) throw new Error(`trace failed: ${res.status}`);
+function decodeArtifactData(value: string): Uint8Array {
+  const standard = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = standard.padEnd(Math.ceil(standard.length / 4) * 4, "=");
+  const binary = window.atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+export async function downloadArtifact(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  filename: string,
+  version?: number,
+): Promise<void> {
+  const { blob, downloadName } = await fetchArtifactBlob(
+    appName,
+    userId,
+    sessionId,
+    filename,
+    version,
+  );
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = downloadName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function fetchArtifactBlob(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  filename: string,
+  version?: number,
+): Promise<{ blob: Blob; downloadName: string }> {
+  const { app, ep } = resolve(appName);
+  const params = version == null ? "" : `?version=${encodeURIComponent(version)}`;
+  const path = `/apps/${encodeURIComponent(app)}/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(filename)}${params}`;
+  const res = await apiFetch(path, {}, ep, TRANSFER_REQUEST_TIMEOUT_MS);
+  if (!res.ok) throw new Error(await httpErrorMessage(res, adkT("client.downloadFileFailed")));
+  const part = (await res.json()) as AdkPart;
+  const inline = part.inlineData ?? part.inline_data;
+  if (!inline?.data) throw new Error(adkT("client.fileUnavailable"));
+  const bytes = decodeArtifactData(inline.data);
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const blob = new Blob([buffer], {
+    type: inline.mimeType ?? inline.mime_type ?? "application/octet-stream",
+  });
+  return {
+    blob,
+    downloadName: inline.displayName ?? inline.display_name ?? filename,
+  };
+}
+
+export async function previewArtifact(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  filename: string,
+  version?: number,
+): Promise<string> {
+  const { blob } = await fetchArtifactBlob(
+    appName,
+    userId,
+    sessionId,
+    filename,
+    version,
+  );
+  return URL.createObjectURL(blob);
+}
+
+export interface MediaCapabilities {
+  maxFileBytes: number;
+  mimeTypes: string[];
+  storage: "local" | "tos" | string;
+}
+
+export async function getMediaCapabilities(appName: string): Promise<MediaCapabilities> {
+  void appName;
+  const res = await apiFetch("/web/media/capabilities");
+  if (!res.ok) throw new Error(await httpErrorMessage(res, "media capabilities failed"));
   return res.json();
 }
 
-/** Introspected metadata for an agent app (model, tools), for the picker.
- *  Only the local server implements `/web/agent-info`; remote AgentKit apps
- *  will reject this and the caller falls back to a basic flyout. */
-export interface AgentInfo {
+export async function uploadMedia(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  file: File,
+): Promise<Attachment> {
+  const { app } = resolve(appName);
+  const body = new FormData();
+  body.set("app_name", app);
+  body.set("user_id", userId);
+  body.set("session_id", sessionId);
+  body.set("file", file);
+  const res = await apiFetch(
+    "/web/media",
+    { method: "POST", body },
+    {},
+    TRANSFER_REQUEST_TIMEOUT_MS,
+  );
+  if (!res.ok) throw new Error(await httpErrorMessage(res, adkT("client.uploadFileFailed")));
+  const media = (await res.json()) as {
+    id: string;
+    uri: string;
+    name: string;
+    mimeType: string;
+    sizeBytes: number;
+  };
+  return { ...media, status: "ready" };
+}
+
+export async function deleteSessionMedia(
+  appName: string,
+  userId: string,
+  sessionId: string,
+): Promise<void> {
+  const { app } = resolve(appName);
+  const path = `/web/media/${encodeURIComponent(app)}/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}/delete`;
+  const res = await apiFetch(path, { method: "POST" });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(await httpErrorMessage(res, "media cleanup failed"));
+  }
+}
+
+function mediaApiPath(uri: string): string | undefined {
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== "veadk-media:" || parsed.hostname !== "apps") return undefined;
+    const segments = parsed.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (
+      segments.length !== 7 ||
+      segments[1] !== "users" ||
+      segments[3] !== "sessions" ||
+      segments[5] !== "media"
+    ) return undefined;
+    return `/web/media/${segments.map(encodeURIComponent).filter((_, i) => ![1, 3, 5].includes(i)).join("/")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Delete one uploaded media object that has not been sent in a message. */
+export async function deleteMedia(appName: string, uri: string): Promise<void> {
+  const path = mediaApiPath(uri);
+  if (!path) throw new Error("Invalid VeADK media URI");
+  void appName;
+  const res = await apiFetch(`${path}/delete`, { method: "POST" });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(await httpErrorMessage(res, "media cleanup failed"));
+  }
+}
+
+/** Resolve a stable media URI to an authenticated same-origin delivery URL. */
+export function mediaContentUrl(appName: string, uri: string): string {
+  if (uri.startsWith("data:") || uri.startsWith("blob:") || /^https?:/.test(uri)) return uri;
+  const basePath = mediaApiPath(uri);
+  if (!basePath) return uri;
+  const path = `${basePath}/content`;
+  void appName;
+  return withAuth(`${API_BASE}${path}`);
+}
+
+export async function getSessionTrace(
+  appName: string,
+  sessionId: string,
+  endTimeMs?: number,
+): Promise<TraceSpan[]> {
+  const { app, ep } = resolve(appName);
+  let res: Response;
+  if (ep.runtimeId) {
+    const params = new URLSearchParams({
+      runtimeId: ep.runtimeId,
+      sessionId,
+      region: ep.region ?? "cn-beijing",
+    });
+    if (endTimeMs) params.set("endTimeMs", String(Math.round(endTimeMs)));
+    res = await apiFetch(`/web/runtime-trace?${params.toString()}`);
+    if (res.status === 404) {
+      throw new Error(adkT("client.traceDisabled"));
+    }
+  } else {
+    res = await apiFetch(
+      `/dev/apps/${encodeURIComponent(app)}/debug/trace/session/${encodeURIComponent(sessionId)}`,
+      {},
+      ep,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadTraceFailed")));
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    const responseType = contentType.split(";", 1)[0] || adkT("client.contentTypeMissing");
+    throw new Error(
+      adkT("client.traceNonJson", { contentType: responseType }),
+    );
+  }
+  const spans = (await res.json()) as unknown;
+  if (!Array.isArray(spans)) throw new Error(adkT("client.invalidTraceFormat"));
+  return spans as TraceSpan[];
+}
+
+export async function submitIssueFeedback(
+  report: IssueFeedbackReport,
+): Promise<{ submitted: true }> {
+  const res = await apiFetch("/web/issue-feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(report),
+  });
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.submitIssueFeedbackFailed")));
+  }
+  const result = (await res.json()) as { submitted?: unknown };
+  if (result.submitted !== true) {
+    throw new Error(adkT("client.issueFeedbackNotConfirmed"));
+  }
+  return { submitted: true };
+}
+
+/** The agent-type vocabulary shared with the create wizard. */
+export type AgentNodeType = "llm" | "sequential" | "parallel" | "loop" | "a2a";
+
+/** One node of the recursive agent topology returned by `/web/agent-info`. */
+export interface AgentNode {
+  /** Stable ADK agent identifier used by event.author and transfer actions. */
+  id?: string;
   name: string;
   description: string;
+  instruction?: string;
+  type: AgentNodeType;
   model: string;
   tools: string[];
+  skills: AgentSkill[];
+  path: string[];
+  mentionable: boolean;
+  children: AgentNode[];
+}
+
+export interface AgentSkill {
+  name: string;
+  description: string;
+}
+
+/** One runtime component mounted on an Agent. Unknown kinds are intentionally
+ *  preserved so newer Agent Server versions remain visible to older clients. */
+export interface AgentComponent {
+  kind: string;
+  name: string;
+  description?: string;
+  backend?: string;
+  source?: string;
+}
+
+export interface AgentTarget {
+  name: string;
+  description: string;
+  type: AgentNodeType;
+  path: string[];
+}
+
+export interface FrontendInvocation {
+  skills: AgentSkill[];
+  targetAgent?: AgentTarget;
+}
+
+/** Introspected metadata for an agent app, served locally or by Agent Server. */
+export interface AgentInfo {
+  /** Real ADK app id used in runtime proxy paths; display names may differ. */
+  appName?: string;
+  name: string;
+  description: string;
+  type?: AgentNodeType;
+  model: string;
+  tools: string[];
+  skills: AgentSkill[];
+  /** False when an older Agent Server omits Skill introspection entirely. */
+  skillsPreviewSupported: boolean;
   subAgents: string[];
+  /** Optional for compatibility with Agent Servers released before this field. */
+  components?: AgentComponent[];
+  /** Search sources that are actually mounted on this Agent. */
+  searchSources?: AgentSearchCapability[];
+  /** Recursive typed tree; only the local server provides it. */
+  graph?: AgentNode;
+  /** Complete sanitized builder state exposed by newly generated Agents. */
+  draft?: AgentDraft;
+}
+
+async function fetchAgentInfo(
+  app: string,
+  ep: AdkEndpoint,
+  loadDraft = true,
+): Promise<AgentInfo> {
+  const res = await apiFetch(`/web/agent-info/${app}`, {}, ep);
+  if (!res.ok) throw new Error(`agent-info failed: ${res.status}`);
+  const info = (await res.json()) as Partial<AgentInfo>;
+  if (loadDraft && !info.draft) {
+    try {
+      const draftRes = await apiFetch(`/web/agent-draft/${app}`, {}, ep);
+      if (draftRes.ok) {
+        const payload = (await draftRes.json()) as { draft?: AgentDraft };
+        info.draft = payload.draft;
+      }
+    } catch {
+      // Older or non-Studio Agents do not expose editable builder metadata.
+    }
+  }
+  return {
+    appName: app,
+    name: info.name ?? app,
+    description: info.description ?? "",
+    type: info.type,
+    model: info.model ?? "",
+    tools: info.tools ?? [],
+    skillsPreviewSupported: Array.isArray(info.skills),
+    skills: info.skills ?? [],
+    subAgents: info.subAgents ?? [],
+    components: info.components ?? [],
+    searchSources: info.searchSources ?? [],
+    graph: info.graph,
+    draft: info.draft,
+  };
 }
 
 export async function getAgentInfo(appName: string): Promise<AgentInfo> {
   const { app, ep } = resolve(appName);
-  const res = await apiFetch(`/web/agent-info/${app}`, {}, ep);
-  if (!res.ok) throw new Error(`agent-info failed: ${res.status}`);
-  return res.json();
+  return fetchAgentInfo(app, ep, false);
+}
+
+/** Read Agent metadata for a Runtime without connecting or persisting it. */
+async function fetchRuntimeAgentInfo(
+  runtimeId: string,
+  region: string,
+  knownApp?: string,
+): Promise<AgentInfo> {
+  let lastError: Error | null = null;
+  for (const candidate of runtimeRegionCandidates(region)) {
+    const ep = { runtimeId, region: candidate };
+    try {
+      const appCacheKey = runtimeAppsCacheKey(runtimeId, candidate);
+      const cached = runtimeAppsCache.get(appCacheKey);
+      if (cached && cached.expiresAt <= Date.now()) {
+        runtimeAppsCache.delete(appCacheKey);
+      }
+      const freshCached = runtimeAppsCache.get(appCacheKey);
+      const app =
+        knownApp ||
+        freshCached?.apps[0] ||
+        (await fetchRemoteApps("", "", ep))[0];
+      if (!app) throw new Error(adkT("client.noPreviewableAgent"));
+      return fetchAgentInfo(app, ep);
+    } catch (error) {
+      if (
+        error instanceof RuntimeAccessDeniedError ||
+        (error instanceof RuntimeProbeError && !error.unsupported)
+      ) {
+        throw error;
+      }
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  throw lastError ?? new Error(adkT("client.noPreviewableAgent"));
+}
+
+/** Read Agent metadata for a Runtime without connecting or persisting it. */
+export async function getRuntimeAgentInfo(
+  runtimeId: string,
+  region: string,
+  knownAppOrOptions: string | ClientCacheOptions = {},
+  maybeOptions: ClientCacheOptions = {},
+): Promise<AgentInfo> {
+  const knownApp = typeof knownAppOrOptions === "string"
+    ? knownAppOrOptions
+    : undefined;
+  const options = typeof knownAppOrOptions === "string"
+    ? maybeOptions
+    : knownAppOrOptions;
+  const key = cacheKey(runtimeId, region || "cn-beijing", knownApp ?? "");
+  const cached = freshCacheValue(
+    runtimeAgentInfoCache,
+    key,
+    RUNTIME_METADATA_CACHE_TTL_MS,
+  );
+  if (!options.force && cached) return cached;
+  const existing = runtimeAgentInfoCache.get(key);
+  if (!options.force && existing?.promise) return existing.promise;
+  const promise = fetchRuntimeAgentInfo(runtimeId, region, knownApp).then((info) =>
+    rememberClientCache(runtimeAgentInfoCache, key, info),
+  );
+  runtimeAgentInfoCache.set(key, {
+    ...existing,
+    promise,
+    updatedAt: existing?.updatedAt ?? 0,
+  });
+  try {
+    return await promise;
+  } finally {
+    const current = runtimeAgentInfoCache.get(key);
+    if (current?.promise === promise) {
+      runtimeAgentInfoCache.set(key, {
+        value: current.value,
+        updatedAt: current.updatedAt,
+      });
+    }
+  }
+}
+
+export function getCachedRuntimeAgentInfo(
+  runtimeId: string,
+  region: string,
+  knownApp = "",
+): AgentInfo | null {
+  return freshCacheValue(
+    runtimeAgentInfoCache,
+    cacheKey(runtimeId, region || "cn-beijing", knownApp),
+    RUNTIME_METADATA_CACHE_TTL_MS,
+  );
+}
+
+export function prefetchRuntimeAgentInfo(
+  runtimeId: string,
+  region: string,
+  knownApp = "",
+): void {
+  void getRuntimeAgentInfo(runtimeId, region, knownApp).catch(() => {});
 }
 
 /** One web-search hit (Volcengine WebSearch WebItem, trimmed for the UI). */
@@ -219,6 +1668,44 @@ export interface WebHit {
   url: string;
   siteName: string;
   summary: string;
+}
+
+export type AgentSearchSource = "knowledge" | "memory";
+export type AgentSearchCapability = AgentSearchSource | "web";
+
+export interface AgentSearchHit {
+  content: string;
+  author?: string;
+  timestamp?: number;
+}
+
+export interface AgentSearchResponse {
+  mounted: boolean;
+  sourceName?: string;
+  sourceType?: string;
+  results: AgentSearchHit[];
+  error?: string;
+}
+
+/** Search a KnowledgeBase or long-term memory mounted inside the Agent process. */
+export async function componentSearch(
+  appName: string,
+  source: AgentSearchSource,
+  query: string,
+  userId: string,
+): Promise<AgentSearchResponse> {
+  const { app, ep } = resolve(appName);
+  const params = new URLSearchParams({
+    source,
+    app_name: app,
+    q: query,
+    user_id: userId,
+  });
+  const res = await apiFetch(`/web/search?${params.toString()}`, {}, ep);
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.agentSearchFailed")));
+  }
+  return res.json();
 }
 
 /** Run an agent's web-search tool on the local server (which holds the env
@@ -242,6 +1729,83 @@ export interface RunArgs {
   sessionId: string;
   text: string;
   attachments?: Attachment[];
+  invocation?: FrontendInvocation;
+  /** Complete set of local BFF tool IDs selected for this run. */
+  platformTools?: readonly string[];
+  /** Studio-only immutable environment selections for this session. */
+  environmentMounts?: readonly SessionEnvironmentMountSelection[];
+  /** @deprecated Compatibility with older Studio BFF versions. */
+  environmentMount?: SessionEnvironmentMountSelection;
+  /** Function responses to send instead of/alongside text — used to resume a
+   *  long-running call (e.g. answering ADK's `adk_request_credential`). */
+  functionResponses?: { id: string; name: string; response: unknown }[];
+  /** Abort the stream (e.g. when the user switches to another session). */
+  signal?: AbortSignal;
+  /** Receives trusted instance metadata exposed by the same-origin Studio BFF. */
+  onRuntimeContext?: (context: RuntimeLogTarget) => void;
+}
+
+export function runSseEmptyResponseError(): string {
+  return formatRunSseError(adkT("client.emptySseBody"));
+}
+
+export function runSseIncompleteResponseError(): string {
+  return formatRunSseError(adkT("client.noDisplayableSseReply"));
+}
+
+const RUN_SSE_FIRST_EVENT_TIMEOUT_MS = 60_000;
+export function runSseFirstEventTimeoutError(): string {
+  return adkT("client.firstSseEventTimeout");
+}
+
+interface RunSseFirstEventDeadline {
+  signal?: AbortSignal;
+  clearDeadline: () => void;
+  cleanup: () => void;
+  timedOut: () => boolean;
+}
+
+function runSseFirstEventDeadline(
+  signal: AbortSignal | undefined,
+): RunSseFirstEventDeadline {
+  if (signal?.aborted) {
+    return {
+      signal,
+      clearDeadline: () => {},
+      cleanup: () => {},
+      timedOut: () => false,
+    };
+  }
+
+  const controller = new AbortController();
+  let didTimeout = false;
+  let deadlineCleared = false;
+  const clearDeadline = () => {
+    if (deadlineCleared) return;
+    deadlineCleared = true;
+    clearTimeout(timer);
+  };
+  const onAbort = () => {
+    if (controller.signal.aborted) return;
+    controller.abort(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+  };
+  const timer = setTimeout(() => {
+    if (deadlineCleared || controller.signal.aborted) return;
+    didTimeout = true;
+    deadlineCleared = true;
+    controller.abort(new Error(runSseFirstEventTimeoutError()));
+  }, RUN_SSE_FIRST_EVENT_TIMEOUT_MS);
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  return {
+    signal: controller.signal,
+    clearDeadline,
+    cleanup: () => {
+      clearDeadline();
+      signal?.removeEventListener("abort", onAbort);
+    },
+    timedOut: () => didTimeout,
+  };
 }
 
 /** Stream agent events for one user turn. */
@@ -251,59 +1815,3474 @@ export async function* runSSE({
   sessionId,
   text,
   attachments = [],
+  invocation,
+  platformTools,
+  environmentMounts,
+  environmentMount,
+  functionResponses = [],
+  signal,
+  onRuntimeContext,
 }: RunArgs): AsyncGenerator<AdkEvent, void, unknown> {
   const { app, ep } = resolve(appName);
-  const parts: AdkPart[] = [
-    ...attachments.map((a) => ({
-      inlineData: { mimeType: a.mimeType, data: a.data, displayName: a.name },
+  const attachmentParts = attachments.flatMap<Record<string, unknown>>((a) => {
+      if (a.status && a.status !== "ready") return [];
+      if (a.uri) {
+        return [{
+          fileData: { mimeType: a.mimeType, fileUri: a.uri, displayName: a.name },
+          partMetadata: {
+            veadkMedia: {
+              id: a.id,
+              uri: a.uri,
+              name: a.name,
+              mimeType: a.mimeType,
+              sizeBytes: a.sizeBytes,
+            },
+          },
+        }];
+      }
+      return a.data ? [{
+        inlineData: { mimeType: a.mimeType, data: a.data, displayName: a.name },
+      }] : [];
+    });
+  const invocationMetadata = invocation &&
+    (invocation.skills.length > 0 || invocation.targetAgent)
+    ? invocation
+    : undefined;
+  const parts: Record<string, unknown>[] = [
+    ...attachmentParts,
+    ...functionResponses.map((fr) => ({
+      functionResponse: { id: fr.id, name: fr.name, response: fr.response },
     })),
     ...(text.trim() ? [{ text }] : []),
   ];
+  if (invocationMetadata && parts.length > 0) {
+    const firstPart = parts[0];
+    const partMetadata = firstPart.partMetadata as Record<string, unknown> | undefined;
+    parts[0] = {
+      ...firstPart,
+      partMetadata: {
+        ...partMetadata,
+        veadkInvocation: invocationMetadata,
+      },
+    };
+  }
+  let res: Response;
+  const firstEventDeadline = runSseFirstEventDeadline(signal);
+  try {
+    res = await apiFetch(
+      "/run_sse",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          app_name: app,
+          user_id: userId,
+          session_id: sessionId,
+          new_message: { role: "user", parts },
+          streaming: true,
+          ...(platformTools !== undefined
+            ? { platform_tools: [...platformTools] }
+            : {}),
+          ...(environmentMounts !== undefined
+            ? { environment_mounts: [...environmentMounts] }
+            : environmentMount
+              ? { environment_mount: environmentMount }
+              : {}),
+          custom_metadata: invocationMetadata
+            ? { veadkInvocation: invocationMetadata }
+            : undefined,
+        }),
+        signal: firstEventDeadline.signal,
+      },
+      ep,
+      0,
+    );
+  } catch (error) {
+    firstEventDeadline.cleanup();
+    if (firstEventDeadline.timedOut()) throw new Error(runSseFirstEventTimeoutError());
+    if (signal?.aborted || (error as Error)?.name === "AbortError") throw error;
+    throw new Error(formatRunSseError(error));
+  }
+  const runtimeContext = runtimeContextFromResponse(
+    res,
+    ep.runtimeId ?? "",
+    ep.region ?? "",
+  );
+  if (runtimeContext) onRuntimeContext?.(runtimeContext);
+  if (!res.ok) {
+    firstEventDeadline.cleanup();
+    const detail = await httpErrorMessage(res, adkT("client.runSessionFailed"));
+    throw new Error(
+      formatRunSseError(adkT("client.runSseFailedWithDetail", { status: res.status, detail })),
+    );
+  }
+  let receivedEvent = false;
+  try {
+    for await (const evt of parseSSE(res)) {
+      receivedEvent = true;
+      firstEventDeadline.clearDeadline();
+      const event = evt as AdkEvent;
+      if (typeof event.error === "string") event.error = formatRunSseError(event.error);
+      if (typeof event.errorMessage === "string") {
+        event.errorMessage = formatRunSseError(event.errorMessage);
+      }
+      if (typeof event.error_message === "string") {
+        event.error_message = formatRunSseError(event.error_message);
+      }
+      yield event;
+    }
+  } catch (error) {
+    if (firstEventDeadline.timedOut()) throw new Error(runSseFirstEventTimeoutError());
+    if (signal?.aborted || (error as Error)?.name === "AbortError") throw error;
+    throw new Error(formatRunSseError(error));
+  } finally {
+    firstEventDeadline.cleanup();
+  }
+  if (!receivedEvent) throw new Error(runSseEmptyResponseError());
+}
+
+export interface DeployAgentkitResult {
+  apikey: string;
+  url: string;
+  agentName: string;
+  runtimeName: string;
+  runtimeId?: string;
+  consoleUrl?: string;
+  region?: string;
+  version?: number | null;
+  warnings?: string[];
+  feishuChannel?: {
+    enabled: boolean;
+    transport: string;
+    runtimeId?: string;
+  };
+}
+
+export async function checkRuntimeNameAvailability(
+  name: string,
+  region: string,
+): Promise<{ available: boolean }> {
+  const params = new URLSearchParams({ name, region });
+  const res = await apiFetch(`/web/runtime-name-availability?${params.toString()}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.checkRuntimeNameFailed")));
+  }
+  const value = (await res.json()) as { available?: unknown };
+  if (typeof value.available !== "boolean") {
+    throw new Error(adkT("client.invalidRuntimeNameCheck"));
+  }
+  return { available: value.available };
+}
+
+export interface IntelligentDevelopmentDeploymentSource {
+  kind: "intelligentDevelopment";
+  sessionId: string;
+  projectId?: string;
+  versionId?: string;
+  artifactSha256: string;
+  validationReportSha256: string;
+  acknowledgeUnverified?: true;
+}
+
+export type DeploymentSource =
+  | { kind: "inlineFiles" }
+  | { kind: "migration"; migrationId: string }
+  | IntelligentDevelopmentDeploymentSource;
+
+export type DeployAuthentication =
+  | { type: "api_key" }
+  | { type: "user_pool"; userPoolUid: string };
+
+export type DeploymentResourceMode = "auto" | "create" | "existing";
+
+export interface DeployResources {
+  tos: {
+    mode: DeploymentResourceMode;
+    bucket?: string;
+  };
+  cr: {
+    mode: DeploymentResourceMode;
+    instance?: string;
+    namespace?: string;
+    repository?: string;
+  };
+  codePipeline: {
+    mode: DeploymentResourceMode;
+    workspaceId?: string;
+    workspaceName?: string;
+    pipelineId?: string;
+    pipelineName?: string;
+  };
+}
+
+export type DeploymentResourceKind =
+  | "tos-bucket"
+  | "cr-registry"
+  | "cr-namespace"
+  | "cr-repository"
+  | "cp-workspace"
+  | "cp-pipeline";
+
+export interface DeploymentResource {
+  id: string;
+  name: string;
+  region: string;
+  status: string;
+  compatible?: boolean;
+}
+
+export interface DeploymentResourceQuery {
+  kind: DeploymentResourceKind;
+  region: string;
+  registry?: string;
+  namespace?: string;
+  workspaceId?: string;
+  search?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export async function listDeploymentResources(
+  query: DeploymentResourceQuery,
+  signal?: AbortSignal,
+): Promise<{
+  serviceRegion: string;
+  items: DeploymentResource[];
+  pageNumber: number;
+  pageSize: number;
+  totalCount: number;
+  hasMore: boolean;
+}> {
+  const params = new URLSearchParams({ kind: query.kind, region: query.region });
+  if (query.registry) params.set("registry", query.registry);
+  if (query.namespace) params.set("namespace", query.namespace);
+  if (query.workspaceId) params.set("workspaceId", query.workspaceId);
+  if (query.search) params.set("search", query.search);
+  if (query.pageNumber) params.set("pageNumber", String(query.pageNumber));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  const response = await apiFetch(
+    `/web/deployment-resources?${params.toString()}`,
+    { signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadCloudResourcesFailed")));
+  }
+  const payload = (await response.json()) as {
+    serviceRegion?: unknown;
+    items?: unknown;
+    pageNumber?: unknown;
+    pageSize?: unknown;
+    totalCount?: unknown;
+    hasMore?: unknown;
+  };
+  if (
+    typeof payload.serviceRegion !== "string" ||
+    !Array.isArray(payload.items) ||
+    typeof payload.pageNumber !== "number" ||
+    typeof payload.pageSize !== "number" ||
+    typeof payload.totalCount !== "number" ||
+    typeof payload.hasMore !== "boolean"
+  ) {
+    throw new Error(adkT("client.invalidCloudResources"));
+  }
+  const items = payload.items.map((item) => {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      typeof (item as DeploymentResource).id !== "string" ||
+      typeof (item as DeploymentResource).name !== "string" ||
+      typeof (item as DeploymentResource).region !== "string" ||
+      typeof (item as DeploymentResource).status !== "string"
+    ) {
+      throw new Error(adkT("client.invalidCloudResources"));
+    }
+    return item as DeploymentResource;
+  });
+  return {
+    serviceRegion: payload.serviceRegion,
+    items,
+    pageNumber: payload.pageNumber,
+    pageSize: payload.pageSize,
+    totalCount: payload.totalCount,
+    hasMore: payload.hasMore,
+  };
+}
+
+export type SandboxToolKind =
+  | "codex"
+  | "codex_snapshot"
+  | "deepseek_harness"
+  | "deepseek_harness_snapshot"
+  | "openclaw"
+  | "openclaw_snapshot"
+  | "hermes"
+  | "hermes_snapshot"
+  | "studio_workspace"
+  | "dev";
+export type CodexSandboxToolKind = Extract<
+  SandboxToolKind,
+  "codex" | "codex_snapshot"
+>;
+
+export interface SandboxToolInfo {
+  kind: SandboxToolKind;
+  label: string;
+  toolId: string;
+  snapshot: boolean;
+  needsModelEnvUpdate: boolean;
+  canUpdateModelEnv: boolean;
+  modelEnvError: string;
+  modelEnvErrorCode: string;
+}
+
+export interface SystemInfoResponse {
+  storage: {
+    tosAddress: string;
+  };
+  sandboxTools: SandboxToolInfo[];
+}
+
+export type EnvironmentOperatingSystem = "ubuntu-22.04" | "ubuntu-24.04";
+export type EnvironmentBaseEnvironment = "ubuntu" | "aio-sandbox" | "codex-sandbox";
+export type EnvironmentLanguage = "python-3.10" | "python-3.12";
+export interface SessionEnvironmentMountSelection {
+  environment_id: string;
+  environment_version_id: string;
+  /** Identifies one continuous attachment; absent for legacy Studio clients. */
+  mount_instance_id?: string;
+}
+
+export interface PreparedSessionEnvironmentMount {
+  environment_id: string;
+  environment_version_id: string;
+  mount_instance_id: string;
+  sandbox_session_id: string;
+}
+
+export function parsePreparedSessionEnvironmentMounts(
+  value: unknown,
+  expectedMounts: readonly SessionEnvironmentMountSelection[],
+): PreparedSessionEnvironmentMount[] {
+  const payload = value as { mounts?: unknown };
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.mounts)) {
+    throw new Error(adkT("client.invalidEnvironmentMount"));
+  }
+  if (payload.mounts.length !== expectedMounts.length) {
+    throw new Error(adkT("client.environmentMountMismatch"));
+  }
+  return payload.mounts.map((item, index) => {
+    const expected = expectedMounts[index];
+    if (
+      !item ||
+      typeof item !== "object" ||
+      typeof item.environment_id !== "string" ||
+      typeof item.environment_version_id !== "string" ||
+      typeof item.mount_instance_id !== "string" ||
+      typeof item.sandbox_session_id !== "string" ||
+      !item.environment_id ||
+      !item.environment_version_id ||
+      !item.mount_instance_id ||
+      !item.sandbox_session_id
+    ) {
+      throw new Error(adkT("client.invalidEnvironmentMount"));
+    }
+    if (
+      item.environment_id !== expected.environment_id ||
+      item.environment_version_id !== expected.environment_version_id ||
+      (expected.mount_instance_id !== undefined &&
+        item.mount_instance_id !== expected.mount_instance_id)
+    ) {
+      throw new Error(adkT("client.environmentMountMismatch"));
+    }
+    return item as PreparedSessionEnvironmentMount;
+  });
+}
+
+export async function prepareSessionEnvironmentMounts({
+  runtimeId,
+  appName,
+  userId,
+  sessionId,
+  environmentMounts,
+}: {
+  runtimeId: string;
+  appName: string;
+  userId: string;
+  sessionId: string;
+  environmentMounts: readonly SessionEnvironmentMountSelection[];
+}): Promise<PreparedSessionEnvironmentMount[]> {
+  const { app } = resolve(appName);
+  let response: Response;
+  try {
+    response = await apiFetch("/web/v3/session-environment-mounts/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runtime_id: runtimeId,
+        app_name: app,
+        user_id: userId,
+        session_id: sessionId,
+        environment_mounts: [...environmentMounts],
+      }),
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(adkT("client.environmentMountNetworkFailed"));
+    }
+    throw error;
+  }
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.environmentMountFailed")));
+  }
+  return parsePreparedSessionEnvironmentMounts(
+    await response.json(),
+    environmentMounts,
+  );
+}
+export type EnvironmentBuildStatus =
+  | "preparing"
+  | "queued"
+  | "building"
+  | "scanning"
+  | "available"
+  | "failed";
+export type EnvironmentSandboxToolStatus = "" | "creating" | "ready" | "failed";
+
+export interface EnvironmentBuildResource {
+  source: "provided" | "managed";
+  workspaceId?: string;
+  workspaceName?: string;
+  pipelineId?: string;
+  pipelineName?: string;
+  registry?: string;
+  namespace?: string;
+  repository?: string;
+  region?: string;
+  imageRepository?: string;
+  consoleUrl: string;
+}
+
+export type EnvironmentBuildStepStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed";
+
+export interface EnvironmentBuildStep {
+  key: string;
+  label: string;
+  status: EnvironmentBuildStepStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface EnvironmentBuildVersion {
+  versionId: string;
+  status: EnvironmentBuildStatus;
+  image: string;
+  toolId: string;
+  toolStatus: EnvironmentSandboxToolStatus;
+  sourceCommitSha: string;
+  error: string;
+  runId: string;
+  currentStep: string;
+  steps: EnvironmentBuildStep[];
+  progressError: string;
+  logTail: string;
+  logTruncated: boolean;
+  logUpdatedAt: string | null;
+  logError: string;
+  createdAt: string;
+  updatedAt: string;
+  resources: {
+    codePipeline?: EnvironmentBuildResource;
+    containerRegistry?: EnvironmentBuildResource;
+  } | null;
+}
+
+export interface EnvironmentManifestSkill {
+  name: string;
+  folder: string;
+  source: "skillhub" | "local" | "skillspace";
+  version: string;
+  digest: string;
+}
+
+export interface EnvironmentManifest {
+  apiVersion: "agentkit.studio/v3" | "agentkit.studio/v1alpha1";
+  kind: "Environment";
+  metadata: {
+    id: string;
+    name: string;
+    version: string;
+    description: string;
+  };
+  spec: {
+    image: string;
+    baseEnvironment: EnvironmentBaseEnvironment;
+    baseImage: string;
+    operatingSystem: EnvironmentOperatingSystem;
+    language: EnvironmentLanguage;
+    executionRuntime: "veadk";
+    packages: string[];
+    capabilities: string[];
+    skills: EnvironmentManifestSkill[];
+  };
+  status: {
+    phase: EnvironmentBuildStatus;
+    toolId: string;
+    toolStatus: EnvironmentSandboxToolStatus;
+    createdAt: string;
+    updatedAt: string;
+  };
+}
+
+export interface StudioEnvironment {
+  id: string;
+  name: string;
+  description: string;
+  baseEnvironment: EnvironmentBaseEnvironment;
+  operatingSystem: EnvironmentOperatingSystem;
+  language: EnvironmentLanguage;
+  optionIds: string[];
+  selectedSkills: SelectedSkill[];
+  dockerfile: string;
+  gitSource?: EnvironmentGitSource | null;
+  containerRepository?: EnvironmentContainerRepository | null;
+  imageSource?: EnvironmentImageSource | null;
+  createdAt: string;
+  updatedAt: string;
+  latestVersion: EnvironmentBuildVersion | null;
+}
+
+export interface StudioWorkspace {
+  id: string;
+  name: string;
+  description: string;
+  environmentIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceInput {
+  name: string;
+  description: string;
+  environmentIds: string[];
+}
+
+export interface EnvironmentInput {
+  name: string;
+  description: string;
+  baseEnvironment: EnvironmentBaseEnvironment;
+  operatingSystem: EnvironmentOperatingSystem;
+  language: EnvironmentLanguage;
+  optionIds: string[];
+  selectedSkills: SelectedSkill[];
+  dockerfile: string;
+  gitSource?: EnvironmentGitSource | null;
+  containerRepository?: EnvironmentContainerRepository | null;
+  imageSource?: EnvironmentImageSource | null;
+}
+
+export interface EnvironmentGitSource {
+  repositoryUrl: string;
+  ref?: string;
+  dockerfilePath: string;
+}
+
+export interface EnvironmentContainerRepository {
+  region: string;
+  registry: string;
+  namespace: string;
+  repository: string;
+}
+
+export interface EnvironmentImageSource extends EnvironmentContainerRepository {
+  reference: string;
+}
+
+export interface EnvironmentRepositoryInspection {
+  repositoryUrl: string;
+  ref: string;
+  commitSha: string;
+  dockerfiles: string[];
+}
+
+export interface EnvironmentShareCodeExport {
+  shareCode: string;
+  name: string;
+}
+
+export interface EnvironmentShareCodeInspection {
+  index: number;
+  status: "valid" | "invalid";
+  name: string;
+  error: string;
+}
+
+export interface EnvironmentShareCodeImportItem {
+  index: number;
+  status: "created" | "duplicate" | "failed";
+  name: string;
+  environment?: StudioEnvironment;
+  error: string;
+}
+
+export function parseEnvironmentShareCodes(value: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value.split(/[,，\n\r]+/)) {
+    const code = item.trim();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    result.push(code);
+  }
+  return result;
+}
+
+export async function writeEnvironmentShareCode(
+  shareCode: string,
+  clipboard: Pick<Clipboard, "writeText"> | undefined =
+    typeof navigator === "undefined" ? undefined : navigator.clipboard,
+): Promise<void> {
+  if (!clipboard?.writeText) {
+    throw new Error(adkT("client.clipboardUnsupported"));
+  }
+  try {
+    await clipboard.writeText(shareCode);
+  } catch {
+    throw new Error(adkT("client.clipboardWriteFailed"));
+  }
+}
+
+export interface EnvironmentResourcesResponse {
+  provider: CloudProvider;
+  region: string;
+  codePipeline: EnvironmentBuildResource;
+  containerRegistry: EnvironmentBuildResource;
+}
+
+export interface SandboxToolModelEnvUpdateResponse {
+  kind: CodexSandboxToolKind;
+  toolId: string;
+  updated: boolean;
+}
+
+const SANDBOX_TOOL_DISPLAY_ORDER: Record<string, number> = {
+  codex: 0,
+  codex_snapshot: 1,
+  deepseek_harness: 2,
+  deepseek_harness_snapshot: 3,
+  openclaw: 4,
+  openclaw_snapshot: 5,
+  hermes: 6,
+  hermes_snapshot: 7,
+  dev: 8,
+};
+
+export async function getSystemInfo(
+  signal?: AbortSignal,
+): Promise<SystemInfoResponse> {
+  const response = await apiFetch("/web/system-info", { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadSystemInfoFailed")));
+  }
+  const payload = (await response.json()) as {
+    storage?: { tosAddress?: unknown };
+    sandboxTools?: unknown;
+  };
+  if (
+    typeof payload.storage?.tosAddress !== "string" ||
+    !Array.isArray(payload.sandboxTools)
+  ) {
+    throw new Error(adkT("client.invalidSystemInfo"));
+  }
+  const sandboxTools = payload.sandboxTools
+    .map((item) => {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof (item as SandboxToolInfo).kind !== "string" ||
+        typeof (item as SandboxToolInfo).label !== "string" ||
+        typeof (item as SandboxToolInfo).toolId !== "string" ||
+        typeof (item as SandboxToolInfo).snapshot !== "boolean" ||
+        typeof (item as SandboxToolInfo).needsModelEnvUpdate !== "boolean" ||
+        typeof (item as SandboxToolInfo).canUpdateModelEnv !== "boolean" ||
+        typeof (item as SandboxToolInfo).modelEnvError !== "string" ||
+        typeof (item as SandboxToolInfo).modelEnvErrorCode !== "string"
+      ) {
+        throw new Error(adkT("client.invalidSystemInfo"));
+      }
+      return item as SandboxToolInfo;
+    })
+    .sort((left, right) => (
+      (SANDBOX_TOOL_DISPLAY_ORDER[left.kind] ?? Number.MAX_SAFE_INTEGER) -
+      (SANDBOX_TOOL_DISPLAY_ORDER[right.kind] ?? Number.MAX_SAFE_INTEGER)
+    ));
+  return {
+    storage: { tosAddress: payload.storage.tosAddress },
+    sandboxTools,
+  };
+}
+
+const ENVIRONMENT_BUILD_STATUSES = new Set<EnvironmentBuildStatus>([
+  "preparing",
+  "queued",
+  "building",
+  "scanning",
+  "available",
+  "failed",
+]);
+
+function environmentBuildVersion(value: unknown): EnvironmentBuildVersion | null {
+  if (value === null) return null;
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidEnvironmentBuild"));
+  }
+  const candidate = value as EnvironmentBuildVersion;
+  if (
+    typeof candidate.versionId !== "string" ||
+    !ENVIRONMENT_BUILD_STATUSES.has(candidate.status) ||
+    typeof candidate.image !== "string" ||
+    typeof candidate.error !== "string" ||
+    typeof candidate.createdAt !== "string" ||
+    typeof candidate.updatedAt !== "string" ||
+    (candidate.resources !== null && typeof candidate.resources !== "object")
+  ) {
+    throw new Error(adkT("client.invalidEnvironmentBuild"));
+  }
+  const steps = Array.isArray(candidate.steps)
+    ? candidate.steps.map((step) => {
+      if (
+        !step ||
+        typeof step !== "object" ||
+        typeof step.key !== "string" ||
+        typeof step.label !== "string" ||
+        !["pending", "running", "succeeded", "failed"].includes(step.status) ||
+        (step.startedAt !== null && typeof step.startedAt !== "string") ||
+        (step.finishedAt !== null && typeof step.finishedAt !== "string")
+      ) {
+        throw new Error(adkT("client.invalidEnvironmentBuildStep"));
+      }
+      return step;
+    })
+    : [];
+  return {
+    ...candidate,
+    toolId: typeof candidate.toolId === "string" ? candidate.toolId : "",
+    toolStatus: ["creating", "ready", "failed"].includes(candidate.toolStatus)
+      ? candidate.toolStatus
+      : "",
+    runId: typeof candidate.runId === "string" ? candidate.runId : "",
+    currentStep: typeof candidate.currentStep === "string" ? candidate.currentStep : "",
+    sourceCommitSha: typeof candidate.sourceCommitSha === "string" ? candidate.sourceCommitSha : "",
+    steps,
+    progressError: typeof candidate.progressError === "string" ? candidate.progressError : "",
+    logTail: typeof candidate.logTail === "string" ? candidate.logTail : "",
+    logTruncated: candidate.logTruncated === true,
+    logUpdatedAt: typeof candidate.logUpdatedAt === "string" ? candidate.logUpdatedAt : null,
+    logError: typeof candidate.logError === "string" ? candidate.logError : "",
+  };
+}
+
+export function parseEnvironmentManifest(value: unknown): EnvironmentManifest {
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidEnvironmentManifest"));
+  }
+  const candidate = value as EnvironmentManifest;
+  if (
+    !["agentkit.studio/v3", "agentkit.studio/v1alpha1"].includes(
+      candidate.apiVersion,
+    ) ||
+    candidate.kind !== "Environment" ||
+    !candidate.metadata ||
+    typeof candidate.metadata.id !== "string" ||
+    typeof candidate.metadata.name !== "string" ||
+    typeof candidate.metadata.version !== "string" ||
+    typeof candidate.metadata.description !== "string" ||
+    !candidate.spec ||
+    typeof candidate.spec.image !== "string" ||
+    !["ubuntu", "aio-sandbox", "codex-sandbox"].includes(
+      candidate.spec.baseEnvironment,
+    ) ||
+    typeof candidate.spec.baseImage !== "string" ||
+    !["ubuntu-22.04", "ubuntu-24.04"].includes(candidate.spec.operatingSystem) ||
+    !["python-3.10", "python-3.12"].includes(candidate.spec.language) ||
+    candidate.spec.executionRuntime !== "veadk" ||
+    !Array.isArray(candidate.spec.packages) ||
+    !candidate.spec.packages.every((item) => typeof item === "string") ||
+    !Array.isArray(candidate.spec.capabilities) ||
+    !candidate.spec.capabilities.every((item) => typeof item === "string") ||
+    !Array.isArray(candidate.spec.skills) ||
+    !candidate.status ||
+    !ENVIRONMENT_BUILD_STATUSES.has(candidate.status.phase) ||
+    typeof candidate.status.createdAt !== "string" ||
+    typeof candidate.status.updatedAt !== "string"
+  ) {
+    throw new Error(adkT("client.invalidEnvironmentManifest"));
+  }
+  return candidate;
+}
+
+function environmentContainerRepository(
+  value: unknown,
+): EnvironmentContainerRepository | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidImageRepository"));
+  }
+  const candidate = value as Partial<EnvironmentContainerRepository>;
+  if (
+    typeof candidate.region !== "string" ||
+    typeof candidate.registry !== "string" ||
+    typeof candidate.namespace !== "string" ||
+    typeof candidate.repository !== "string"
+  ) {
+    throw new Error(adkT("client.invalidImageRepository"));
+  }
+  return candidate as EnvironmentContainerRepository;
+}
+
+function environmentGitSource(value: unknown): EnvironmentGitSource | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidCodeRepository"));
+  }
+  const candidate = value as Partial<EnvironmentGitSource>;
+  if (
+    typeof candidate.repositoryUrl !== "string" ||
+    (candidate.ref !== undefined && typeof candidate.ref !== "string") ||
+    typeof candidate.dockerfilePath !== "string"
+  ) {
+    throw new Error(adkT("client.invalidCodeRepository"));
+  }
+  return candidate as EnvironmentGitSource;
+}
+
+function environmentImageSource(value: unknown): EnvironmentImageSource | undefined {
+  const repository = environmentContainerRepository(value);
+  if (!repository) return undefined;
+  const candidate = value as Partial<EnvironmentImageSource>;
+  if (typeof candidate.reference !== "string") {
+    throw new Error(adkT("client.invalidImageSource"));
+  }
+  return { ...repository, reference: candidate.reference };
+}
+
+function studioEnvironment(value: unknown): StudioEnvironment {
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidEnvironment"));
+  }
+  const candidate = value as StudioEnvironment & { baseEnvironment?: unknown };
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.description !== "string" ||
+    (candidate.baseEnvironment !== undefined &&
+      candidate.baseEnvironment !== "ubuntu" &&
+      candidate.baseEnvironment !== "aio-sandbox" &&
+      candidate.baseEnvironment !== "codex-sandbox") ||
+    (candidate.operatingSystem !== "ubuntu-22.04" &&
+      candidate.operatingSystem !== "ubuntu-24.04") ||
+    (candidate.language !== "python-3.10" && candidate.language !== "python-3.12") ||
+    !Array.isArray(candidate.optionIds) ||
+    !candidate.optionIds.every((item) => typeof item === "string") ||
+    (candidate.selectedSkills !== undefined && !Array.isArray(candidate.selectedSkills)) ||
+    typeof candidate.dockerfile !== "string" ||
+    typeof candidate.createdAt !== "string" ||
+    typeof candidate.updatedAt !== "string"
+  ) {
+    throw new Error(adkT("client.invalidEnvironment"));
+  }
+  return {
+    ...candidate,
+    baseEnvironment: candidate.baseEnvironment === "aio-sandbox"
+      ? "aio-sandbox"
+      : candidate.baseEnvironment === "codex-sandbox"
+        ? "codex-sandbox"
+        : "ubuntu",
+    selectedSkills: candidate.selectedSkills ?? [],
+    gitSource: environmentGitSource(candidate.gitSource),
+    containerRepository: environmentContainerRepository(candidate.containerRepository),
+    imageSource: environmentImageSource(candidate.imageSource),
+    latestVersion: environmentBuildVersion(candidate.latestVersion),
+  };
+}
+
+function studioWorkspace(value: unknown): StudioWorkspace {
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidWorkspace"));
+  }
+  const candidate = value as StudioWorkspace;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.description !== "string" ||
+    !Array.isArray(candidate.environmentIds) ||
+    !candidate.environmentIds.every((item) => typeof item === "string") ||
+    typeof candidate.createdAt !== "string" ||
+    typeof candidate.updatedAt !== "string"
+  ) {
+    throw new Error(adkT("client.invalidWorkspace"));
+  }
+  return candidate;
+}
+
+export async function listWorkspaces(signal?: AbortSignal): Promise<StudioWorkspace[]> {
+  const response = await apiFetch("/web/workspaces", { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadWorkspacesFailed")));
+  }
+  const payload = (await response.json()) as { items?: unknown };
+  if (!Array.isArray(payload.items)) throw new Error(adkT("client.invalidWorkspaceList"));
+  return payload.items.map(studioWorkspace);
+}
+
+async function writeWorkspace(
+  path: string,
+  method: "POST" | "PATCH",
+  input: WorkspaceInput,
+  signal?: AbortSignal,
+): Promise<StudioWorkspace> {
+  const response = await apiFetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.saveWorkspaceFailed")));
+  }
+  return studioWorkspace(await response.json());
+}
+
+export function createWorkspace(
+  input: WorkspaceInput,
+  signal?: AbortSignal,
+): Promise<StudioWorkspace> {
+  return writeWorkspace("/web/workspaces", "POST", input, signal);
+}
+
+export function updateWorkspace(
+  workspaceId: string,
+  input: WorkspaceInput,
+  signal?: AbortSignal,
+): Promise<StudioWorkspace> {
+  return writeWorkspace(
+    `/web/workspaces/${encodeURIComponent(workspaceId)}`,
+    "PATCH",
+    input,
+    signal,
+  );
+}
+
+export async function deleteWorkspace(
+  workspaceId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await apiFetch(
+    `/web/workspaces/${encodeURIComponent(workspaceId)}`,
+    { method: "DELETE", signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.deleteWorkspaceFailed")));
+  }
+}
+
+export async function listEnvironments(signal?: AbortSignal): Promise<StudioEnvironment[]> {
+  const response = await apiFetch("/web/v3/environments", { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadEnvironmentsFailed")));
+  }
+  const payload = (await response.json()) as { items?: unknown };
+  if (!Array.isArray(payload.items)) throw new Error(adkT("client.invalidEnvironmentList"));
+  return payload.items.map(studioEnvironment);
+}
+
+export async function inspectEnvironmentRepository(
+  input: { repositoryUrl: string; ref?: string },
+  signal?: AbortSignal,
+): Promise<EnvironmentRepositoryInspection> {
+  const response = await apiFetch("/web/v3/environment-repositories/inspect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.probeRepositoryFailed")));
+  }
+  const payload = (await response.json()) as Partial<EnvironmentRepositoryInspection>;
+  if (
+    typeof payload.repositoryUrl !== "string" ||
+    typeof payload.ref !== "string" ||
+    typeof payload.commitSha !== "string" ||
+    !Array.isArray(payload.dockerfiles) ||
+    !payload.dockerfiles.every((item) => typeof item === "string")
+  ) {
+    throw new Error(adkT("client.invalidRepositoryProbe"));
+  }
+  return payload as EnvironmentRepositoryInspection;
+}
+
+export async function exportEnvironmentShareCode(
+  environmentId: string,
+  signal?: AbortSignal,
+): Promise<EnvironmentShareCodeExport> {
+  const response = await apiFetch(
+    `/web/v3/environments/${encodeURIComponent(environmentId)}/share-code`,
+    { method: "POST", signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.exportEnvironmentCodeFailed")));
+  }
+  const payload = (await response.json()) as Partial<EnvironmentShareCodeExport>;
+  if (typeof payload.shareCode !== "string" || typeof payload.name !== "string") {
+    throw new Error(adkT("client.invalidEnvironmentCode"));
+  }
+  return payload as EnvironmentShareCodeExport;
+}
+
+export async function inspectEnvironmentShareCodes(
+  shareCodes: string[],
+  signal?: AbortSignal,
+): Promise<EnvironmentShareCodeInspection[]> {
+  const response = await apiFetch("/web/v3/environment-share-codes/inspect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ shareCodes }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.inspectEnvironmentCodeFailed")));
+  }
+  const payload = (await response.json()) as { items?: unknown };
+  if (!Array.isArray(payload.items)) {
+    throw new Error(adkT("client.invalidEnvironmentCodeInspection"));
+  }
+  return payload.items.map((value) => {
+    if (!value || typeof value !== "object") {
+      throw new Error(adkT("client.invalidEnvironmentCodeInspection"));
+    }
+    const candidate = value as {
+      index?: unknown;
+      status?: unknown;
+      valid?: unknown;
+      name?: unknown;
+      error?: unknown;
+    };
+    const status = candidate.status === "valid" || candidate.valid === true
+      ? "valid"
+      : candidate.status === "invalid" || candidate.valid === false
+        ? "invalid"
+        : null;
+    if (
+      !Number.isInteger(candidate.index) ||
+      status === null ||
+      (candidate.name !== undefined && typeof candidate.name !== "string") ||
+      (candidate.error !== undefined && typeof candidate.error !== "string")
+    ) {
+      throw new Error(adkT("client.invalidEnvironmentCodeInspection"));
+    }
+    return {
+      index: candidate.index as number,
+      status,
+      name: candidate.name ?? "",
+      error: candidate.error ?? "",
+    };
+  });
+}
+
+export async function importEnvironmentShareCodes(
+  shareCodes: string[],
+  signal?: AbortSignal,
+): Promise<EnvironmentShareCodeImportItem[]> {
+  const response = await apiFetch("/web/v3/environment-share-codes/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ shareCodes }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.importEnvironmentCodeFailed")));
+  }
+  const payload = (await response.json()) as { items?: unknown };
+  if (!Array.isArray(payload.items)) {
+    throw new Error(adkT("client.invalidEnvironmentCodeImport"));
+  }
+  return payload.items.map((value) => {
+    if (!value || typeof value !== "object") {
+      throw new Error(adkT("client.invalidEnvironmentCodeImport"));
+    }
+    const candidate = value as {
+      index?: unknown;
+      status?: unknown;
+      name?: unknown;
+      environment?: unknown;
+      error?: unknown;
+    };
+    if (
+      !Number.isInteger(candidate.index) ||
+      !(candidate.status === "created" || candidate.status === "duplicate" || candidate.status === "failed") ||
+      (candidate.name !== undefined && typeof candidate.name !== "string") ||
+      (candidate.error !== undefined && typeof candidate.error !== "string")
+    ) {
+      throw new Error(adkT("client.invalidEnvironmentCodeImport"));
+    }
+    return {
+      index: candidate.index as number,
+      status: candidate.status,
+      name: candidate.name ?? "",
+      environment: candidate.environment === undefined || candidate.environment === null
+        ? undefined
+        : studioEnvironment(candidate.environment),
+      error: candidate.error ?? "",
+    };
+  });
+}
+
+async function writeEnvironment(
+  path: string,
+  method: "POST" | "PATCH",
+  input: EnvironmentInput,
+  signal?: AbortSignal,
+): Promise<StudioEnvironment> {
+  let response: Response;
+  try {
+    response = await apiFetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (error instanceof TypeError) {
+      throw new Error(adkT("client.studioUnavailable"));
+    }
+    throw error;
+  }
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.saveEnvironmentFailed")));
+  }
+  return studioEnvironment(await response.json());
+}
+
+export function createEnvironment(
+  input: EnvironmentInput,
+  signal?: AbortSignal,
+): Promise<StudioEnvironment> {
+  return writeEnvironment("/web/v3/environments", "POST", input, signal);
+}
+
+export function updateEnvironment(
+  environmentId: string,
+  input: EnvironmentInput,
+  signal?: AbortSignal,
+): Promise<StudioEnvironment> {
+  return writeEnvironment(
+    `/web/v3/environments/${encodeURIComponent(environmentId)}`,
+    "PATCH",
+    input,
+    signal,
+  );
+}
+
+export async function deleteEnvironment(
+  environmentId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await apiFetch(
+    `/web/v3/environments/${encodeURIComponent(environmentId)}`,
+    { method: "DELETE", signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.deleteEnvironmentFailed")));
+  }
+}
+
+export async function buildEnvironment(
+  environmentId: string,
+  signal?: AbortSignal,
+): Promise<EnvironmentBuildVersion> {
+  const response = await apiFetch(
+    `/web/v3/environments/${encodeURIComponent(environmentId)}/build`,
+    { method: "POST", signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.startEnvironmentBuildFailed")));
+  }
+  const result = environmentBuildVersion(await response.json());
+  if (!result) throw new Error(adkT("client.invalidEnvironmentBuild"));
+  return result;
+}
+
+export async function getEnvironmentBuild(
+  environmentId: string,
+  versionId: string,
+  options: { includeLogs?: boolean; signal?: AbortSignal } = {},
+): Promise<EnvironmentBuildVersion> {
+  const query = options.includeLogs ? "?includeLogs=true" : "";
+  const response = await apiFetch(
+    `/web/v3/environments/${encodeURIComponent(environmentId)}/builds/${encodeURIComponent(versionId)}${query}`,
+    { signal: options.signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadEnvironmentBuildFailed")));
+  }
+  const result = environmentBuildVersion(await response.json());
+  if (!result) throw new Error(adkT("client.invalidEnvironmentBuild"));
+  return result;
+}
+
+export async function getEnvironmentManifest(
+  environmentId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<EnvironmentManifest> {
+  const response = await apiFetch(
+    `/web/v3/environments/${encodeURIComponent(environmentId)}/builds/${encodeURIComponent(versionId)}/manifest`,
+    { signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadEnvironmentManifestFailed")));
+  }
+  return parseEnvironmentManifest(await response.json());
+}
+
+function environmentBuildResource(value: unknown): EnvironmentBuildResource {
+  if (!value || typeof value !== "object") {
+    throw new Error(adkT("client.invalidEnvironmentResource"));
+  }
+  const candidate = value as EnvironmentBuildResource;
+  if (
+    (candidate.source !== "provided" && candidate.source !== "managed") ||
+    typeof candidate.consoleUrl !== "string"
+  ) {
+    throw new Error(adkT("client.invalidEnvironmentResource"));
+  }
+  return candidate;
+}
+
+export async function getEnvironmentResources(
+  signal?: AbortSignal,
+): Promise<EnvironmentResourcesResponse> {
+  const response = await apiFetch("/web/v3/environment-resources", { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadEnvironmentResourcesFailed")));
+  }
+  const payload = (await response.json()) as Partial<EnvironmentResourcesResponse>;
+  if (
+    (payload.provider !== "volcengine" && payload.provider !== "byteplus") ||
+    typeof payload.region !== "string"
+  ) {
+    throw new Error(adkT("client.invalidEnvironmentResource"));
+  }
+  return {
+    provider: payload.provider,
+    region: payload.region,
+    codePipeline: environmentBuildResource(payload.codePipeline),
+    containerRegistry: environmentBuildResource(payload.containerRegistry),
+  };
+}
+
+export async function updateCodexSandboxToolModelEnv(
+  kind: CodexSandboxToolKind,
+  signal?: AbortSignal,
+): Promise<SandboxToolModelEnvUpdateResponse> {
+  const response = await apiFetch(
+    `/web/system-info/sandbox-tools/${encodeURIComponent(kind)}/model-env`,
+    { method: "POST", signal },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.updateCodexSandboxFailed")));
+  }
+  const payload = (await response.json()) as {
+    kind?: unknown;
+    toolId?: unknown;
+    updated?: unknown;
+  };
+  if (
+    (payload.kind !== "codex" && payload.kind !== "codex_snapshot") ||
+    typeof payload.toolId !== "string" ||
+    typeof payload.updated !== "boolean"
+  ) {
+    throw new Error(adkT("client.invalidCodexSandboxUpdate"));
+  }
+  return payload as SandboxToolModelEnvUpdateResponse;
+}
+
+export interface IdentityUserPool {
+  uid: string;
+  name: string;
+  domain: string;
+  region: string;
+  isCurrent: boolean;
+}
+
+export async function listIdentityUserPools(
+  signal?: AbortSignal,
+): Promise<IdentityUserPool[]> {
+  const response = await apiFetch("/web/identity/user-pools", { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadUserPoolsFailed")));
+  }
+  const payload = (await response.json()) as { items?: unknown };
+  if (!Array.isArray(payload.items)) {
+    throw new Error(adkT("client.invalidUserPoolList"));
+  }
+  return payload.items.map((item) => {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      typeof (item as IdentityUserPool).uid !== "string" ||
+      typeof (item as IdentityUserPool).name !== "string" ||
+      typeof (item as IdentityUserPool).domain !== "string" ||
+      typeof (item as IdentityUserPool).region !== "string" ||
+      typeof (item as IdentityUserPool).isCurrent !== "boolean"
+    ) {
+      throw new Error(adkT("client.invalidUserPoolList"));
+    }
+    return item as IdentityUserPool;
+  });
+}
+
+export interface GithubCicdPipelineResult {
+  pipelineId?: string;
+  status?: string;
+  phase?: string;
+  updatedAt?: string;
+  runtimeId?: string;
+  region?: string;
+  cloudProvider?: CloudProvider;
+  github?: {
+    owner?: string;
+    repo?: string;
+    baseBranch?: string;
+    branch?: string;
+    commitSha?: string;
+    pullRequestUrl?: string;
+    pullRequestNumber?: number;
+  };
+  cicd?: {
+    enabled?: boolean;
+    workflowPath?: string;
+    projectPath?: string;
+  };
+}
+
+export interface GithubDeliveryVersion {
+  version: string;
+  createdAt?: string;
+  source?: string;
+  changeType?: "source" | "rollback" | string;
+  description?: string;
+  commitSha?: string;
+  targetCommitSha?: string;
+  rollbackTargetCommitSha?: string;
+  branch?: string;
+  pullRequestUrl?: string;
+  pullRequestNumber?: number;
+  author?: string;
+  status?: string;
+  runtimeStatus?: "published" | "publishing" | "failed" | "unknown" | string;
+  workflowRunUrl?: string;
+}
+
+export interface GithubDeliveryVersionsResult {
+  runtimeId: string;
+  currentCommitSha?: string;
+  runtimeStatus?: string;
+  latestSourceRuntimeStatus?: string;
+  github?: GithubCicdPipelineResult["github"];
+  cicd?: GithubCicdPipelineResult["cicd"];
+  githubSyncError?: string;
+  versions: GithubDeliveryVersion[];
+}
+
+export interface GithubDeliveryRollbackResult {
+  runtimeId: string;
+  status: string;
+  github?: GithubCicdPipelineResult["github"];
+  version?: GithubDeliveryVersion;
+}
+
+export interface GithubCicdPipelineErrorDetail {
+  message: string;
+  phase?: string;
+  runtimeId?: string;
+  logPath?: string;
+}
+
+export interface DeployBuildLogSnapshot {
+  source: "code-pipeline" | "github-delivery";
+  status: "running" | "complete" | "error";
+  text: string;
+  lineCount: number;
+  truncated: boolean;
+  omittedEarly?: boolean;
+  snapshotTruncated?: boolean;
+  updatedAt: number;
+  pipelineId?: string;
+  pipelineName?: string;
+  pipelineRunId?: string;
+  workspaceId?: string;
+  workspaceName?: string;
+  error?: string;
+  pendingMessage?: string;
+}
+
+/** One live progress frame streamed during a deployment. */
+export interface DeployStage {
+  level: "info" | "success" | "warning" | "error";
+  phase: "build" | "deploy" | "publish" | string;
+  message: string;
+  /** Stable server progress code used to localize provider-generated prose. */
+  messageCode?: string;
+  pct?: number;
+  runtimeName?: string;
+  buildLog?: DeployBuildLogSnapshot;
+}
+
+interface DeployFrame extends Partial<DeployAgentkitResult> {
+  done?: boolean;
+  success?: boolean;
+  error?: string;
+  phase?: string;
+}
+
+class DeploymentRecoveryHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DeploymentRecoveryHttpError";
+  }
+}
+
+const deploymentControllers = new Map<string, AbortController>();
+
+function parseGithubCicdErrorDetail(detail: unknown): GithubCicdPipelineErrorDetail | null {
+  if (typeof detail === "string") return detail ? { message: detail } : null;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const record = detail as Record<string, unknown>;
+  const message =
+    typeof record.message === "string"
+      ? record.message
+      : typeof record.error === "string"
+        ? record.error
+        : "";
+  if (!message) return null;
+  return {
+    message,
+    phase: typeof record.phase === "string" ? record.phase : undefined,
+    runtimeId: typeof record.runtimeId === "string" ? record.runtimeId : undefined,
+    logPath: typeof record.logPath === "string" ? record.logPath : undefined,
+  };
+}
+
+export class GithubCicdPipelineError extends Error {
+  constructor(readonly detail: GithubCicdPipelineErrorDetail) {
+    super(detail.message);
+    this.name = "GithubCicdPipelineError";
+  }
+}
+
+async function githubCicdErrorFromResponse(
+  res: Response,
+): Promise<GithubCicdPipelineError> {
+  const text = await res.text().catch(() => "");
+  if (text) {
+    try {
+      const data = JSON.parse(text) as { detail?: unknown; error?: unknown };
+      const detail = parseGithubCicdErrorDetail(data.detail ?? data.error);
+      if (detail) return new GithubCicdPipelineError(detail);
+    } catch {
+      return new GithubCicdPipelineError({ message: text });
+    }
+  }
+  return new GithubCicdPipelineError({ message: adkT("client.syncGithubFailed", { status: res.status }) });
+}
+
+export async function createGithubCicdPipeline(params: {
+  project: { name: string; files: { path: string; content: string }[] };
+  githubUrl: string;
+  githubToken: string;
+  baseBranch: string;
+  region: string;
+  cloudProvider: CloudProvider;
+}): Promise<GithubCicdPipelineResult> {
   const res = await apiFetch(
-    `/run_sse`,
+    "/web/github-delivery/source-sync",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        app_name: app,
-        user_id: userId,
-        session_id: sessionId,
-        new_message: { role: "user", parts },
-        streaming: true,
+        project: params.project,
+        githubUrl: params.githubUrl,
+        githubToken: params.githubToken,
+        baseBranch: params.baseBranch,
+        region: params.region,
+        cloudProvider: params.cloudProvider,
       }),
     },
-    ep,
+    {},
+    0,
   );
-  if (!res.ok) throw new Error(`run_sse failed: ${res.status}`);
-  for await (const evt of parseSSE(res)) {
-    yield evt as AdkEvent;
-  }
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubCicdPipelineResult>;
 }
 
-/** Deploy a temporary agent for testing. */
-export async function deployTempAgent(
-  name: string,
-  files: { path: string; content: string }[],
-): Promise<string> {
-  const res = await apiFetch("/web/deploy-temp-agent", {
+export async function createGithubDeliveryCicdPipeline(params: {
+  githubUrl: string;
+  githubToken: string;
+  baseBranch: string;
+  runtimeName: string;
+  runtimeId: string;
+  region: string;
+  cloudProvider: CloudProvider;
+  projectPath?: string;
+  volcengineAccessKey: string;
+  volcengineSecretKey: string;
+  volcengineSessionToken?: string;
+}): Promise<GithubCicdPipelineResult> {
+  const res = await apiFetch(
+    "/web/github-delivery/cicd-pipeline",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        githubUrl: params.githubUrl,
+        githubToken: params.githubToken,
+        baseBranch: params.baseBranch,
+        runtimeName: params.runtimeName,
+        runtimeId: params.runtimeId,
+        region: params.region,
+        cloudProvider: params.cloudProvider,
+        projectPath: params.projectPath ?? ".",
+        volcengineAccessKey: params.volcengineAccessKey,
+        volcengineSecretKey: params.volcengineSecretKey,
+        volcengineSessionToken: params.volcengineSessionToken ?? "",
+      }),
+    },
+    {},
+    0,
+  );
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubCicdPipelineResult>;
+}
+
+export async function initializeGithubDeliveryMain(params: {
+  project: { name: string; files: { path: string; content: string }[] };
+  githubUrl: string;
+  githubToken: string;
+  baseBranch: string;
+  runtimeName: string;
+  runtimeId: string;
+  region: string;
+  cloudProvider: CloudProvider;
+  projectPath?: string;
+  volcengineAccessKey: string;
+  volcengineSecretKey: string;
+  volcengineSessionToken?: string;
+}): Promise<GithubCicdPipelineResult> {
+  const res = await apiFetch(
+    "/web/github-delivery/init-main",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project: params.project,
+        githubUrl: params.githubUrl,
+        githubToken: params.githubToken,
+        baseBranch: params.baseBranch,
+        runtimeName: params.runtimeName,
+        runtimeId: params.runtimeId,
+        region: params.region,
+        cloudProvider: params.cloudProvider,
+        projectPath: params.projectPath ?? ".",
+        volcengineAccessKey: params.volcengineAccessKey,
+        volcengineSecretKey: params.volcengineSecretKey,
+        volcengineSessionToken: params.volcengineSessionToken ?? "",
+      }),
+    },
+    {},
+    0,
+  );
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubCicdPipelineResult>;
+}
+
+export async function attachGithubDeliveryCicdToSourceSync(params: {
+  pipelineId: string;
+  runtimeName: string;
+  runtimeId: string;
+  region: string;
+  cloudProvider: CloudProvider;
+  projectPath?: string;
+  volcengineAccessKey: string;
+  volcengineSecretKey: string;
+  volcengineSessionToken?: string;
+}): Promise<GithubCicdPipelineResult> {
+  const res = await apiFetch(
+    "/web/github-delivery/source-sync/cicd",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pipelineId: params.pipelineId,
+        runtimeName: params.runtimeName,
+        runtimeId: params.runtimeId,
+        region: params.region,
+        cloudProvider: params.cloudProvider,
+        projectPath: params.projectPath ?? ".",
+        volcengineAccessKey: params.volcengineAccessKey,
+        volcengineSecretKey: params.volcengineSecretKey,
+        volcengineSessionToken: params.volcengineSessionToken ?? "",
+      }),
+    },
+    {},
+    0,
+  );
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubCicdPipelineResult>;
+}
+
+export async function getGithubCicdRuntimeBinding(
+  runtimeId: string,
+): Promise<GithubCicdPipelineResult | null> {
+  const res = await apiFetch(
+    `/web/github-cicd/runtime-binding?runtimeId=${encodeURIComponent(runtimeId)}`,
+  );
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  const data = (await res.json()) as GithubCicdPipelineResult;
+  return data.pipelineId ? data : null;
+}
+
+export async function getGithubDeliveryVersions(
+  runtimeId: string,
+): Promise<GithubDeliveryVersionsResult> {
+  const res = await apiFetch(
+    `/web/github-delivery/versions?runtimeId=${encodeURIComponent(runtimeId)}`,
+  );
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubDeliveryVersionsResult>;
+}
+
+export async function createGithubDeliveryRollbackPr(params: {
+  runtimeId: string;
+  targetCommitSha: string;
+}): Promise<GithubDeliveryRollbackResult> {
+  const res = await apiFetch("/web/github-delivery/rollback-pr", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, files }),
+    body: JSON.stringify(params),
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Deploy failed: ${err}`);
-  }
-  const data = await res.json();
-  return data.appName;
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubDeliveryRollbackResult>;
 }
 
-/** Delete a temporary agent. */
-export async function deleteTempAgent(appName: string): Promise<void> {
-  const res = await apiFetch(`/web/deploy-temp-agent/${appName}`, {
+export async function bindGithubCicdRuntime(params: {
+  pipelineId: string;
+  runtimeId: string;
+  region: string;
+  cloudProvider: CloudProvider;
+}): Promise<GithubCicdPipelineResult> {
+  const res = await apiFetch("/web/github-cicd/runtime-binding", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubCicdPipelineResult>;
+}
+
+export async function syncGithubCicdRuntime(params: {
+  runtimeId: string;
+  project: { name: string; files: { path: string; content: string }[] };
+}): Promise<GithubCicdPipelineResult> {
+  const res = await apiFetch(
+    "/web/github-cicd/runtime-sync",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runtimeId: params.runtimeId,
+        project: params.project,
+      }),
+    },
+    {},
+    0,
+  );
+  if (!res.ok) throw await githubCicdErrorFromResponse(res);
+  return res.json() as Promise<GithubCicdPipelineResult>;
+}
+
+/** Deploy to AgentKit, consuming the server's SSE progress stream. `onStage`
+ *  is called for each build/deploy/publish step; resolves with the connection
+ *  info once the terminal frame arrives. */
+export async function deployAgentkitProject(
+  name: string,
+  files: { path: string; content: string }[],
+  config: {
+    region: string;
+    projectName: string;
+    network?: {
+      mode: string;
+      vpc_id?: string;
+      subnet_ids?: string;
+      enable_shared_internet_access?: boolean;
+    };
+  },
+  opts?: {
+    taskId?: string;
+    migrationTaskId?: string;
+    runtimeId?: string;
+    runtimeName?: string;
+    appName?: string;
+    editMode?: "source-preserving" | "regenerate";
+    draft?: AgentDraft;
+    updateEtag?: string;
+    baseRuntimeVersion?: number | null;
+    removeRuntimeEnvKeys?: string[];
+    mcpSecretValues?: Array<{
+      agentName: string;
+      name: string;
+      url: string;
+      value: string;
+    }>;
+    mcpCredentialReuses?: Array<{
+      agentName: string;
+      name: string;
+      url: string;
+      sourceAuthTokenEnv: string;
+    }>;
+    sessionStorage?: "in-memory" | "persistent";
+    minInstance?: number;
+    maxInstance?: number;
+    createEvaluationSets?: boolean;
+    description?: string;
+    authentication?: DeployAuthentication;
+    onStage?: (s: DeployStage) => void;
+    im?: {
+      feishu?: {
+        enabled: boolean;
+      };
+    };
+    envs?: { key: string; value: string }[];
+    resources?: DeployResources;
+    source?: DeploymentSource;
+    harnessSidecar?: AgentDraft["harnessSidecar"];
+    environment?: {
+      environmentId: string;
+      environmentVersionId: string;
+    };
+  },
+): Promise<DeployAgentkitResult> {
+  const taskId = opts?.taskId;
+  const controller = taskId ? new AbortController() : undefined;
+  if (taskId && controller) deploymentControllers.set(taskId, controller);
+  const clearController = () => {
+    if (taskId && deploymentControllers.get(taskId) === controller) {
+      deploymentControllers.delete(taskId);
+    }
+  };
+  const recoverFinal = async (cause?: unknown): Promise<DeployFrame> => {
+    if (isDeploymentAbortError(cause)) throw cause;
+    if (
+      !taskId ||
+      !opts?.runtimeId ||
+      typeof opts.baseRuntimeVersion !== "number"
+    ) {
+      throw new DeploymentStatusUnconfirmedError({ taskId, cause });
+    }
+    const recovered = await pollDeploymentRecovery<DeployFrame>({
+      signal: controller?.signal,
+      shouldRetry: (error) =>
+        !(error instanceof DeploymentRecoveryHttpError) ||
+        error.status === 404 ||
+        error.status === 408 ||
+        error.status === 429 ||
+        error.status >= 500,
+      load: async (signal) => {
+        const statusResponse = await apiFetch(
+          "/web/deploy-agentkit/status",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal,
+            body: JSON.stringify({
+              taskId,
+              runtimeId: opts.runtimeId,
+              runtimeName: opts.runtimeName,
+              appName: opts.appName ?? name,
+              region: config.region,
+              projectName: config.projectName,
+              baseRuntimeVersion: opts.baseRuntimeVersion,
+            }),
+          },
+          {},
+          30_000,
+        );
+        if (!statusResponse.ok) {
+          throw new DeploymentRecoveryHttpError(
+            statusResponse.status,
+            await httpErrorMessage(statusResponse, adkT("client.deploymentFailed")),
+          );
+        }
+        return statusResponse.json() as Promise<DeployFrame>;
+      },
+    });
+    if (!recovered) {
+      throw new DeploymentStatusUnconfirmedError({ taskId, cause });
+    }
+    return recovered;
+  };
+
+  let res: Response | null = null;
+  let final: DeployFrame | null = null;
+  try {
+    const migrationSource = Boolean(opts?.migrationTaskId);
+    opts?.onStage?.({
+      level: "info",
+      phase: "upload",
+      message: migrationSource ? adkT("client.validatingMigrationArtifact") : adkT("client.uploadingCodePackage"),
+      pct: 0,
+    });
+    res = await apiFetch(
+      "/web/deploy-agentkit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller?.signal,
+        body: JSON.stringify({
+          name,
+          files: migrationSource ? [] : files,
+          config,
+          taskId,
+          migrationTaskId: opts?.migrationTaskId,
+          runtimeId: opts?.runtimeId,
+          runtimeName: opts?.runtimeName,
+          appName: opts?.appName,
+          editMode: opts?.editMode,
+          draft: opts?.draft,
+          updateEtag: opts?.updateEtag,
+          baseRuntimeVersion: opts?.baseRuntimeVersion,
+          removeRuntimeEnvKeys: opts?.removeRuntimeEnvKeys,
+          mcpSecretValues: opts?.mcpSecretValues,
+          mcpCredentialReuses: opts?.mcpCredentialReuses,
+          sessionStorage: opts?.sessionStorage,
+          minInstance: opts?.minInstance,
+          maxInstance: opts?.maxInstance,
+          createEvaluationSets: opts?.createEvaluationSets,
+          description: normalizeRuntimeDescription(opts?.description ?? ""),
+          authentication: opts?.authentication,
+          im: opts?.im,
+          envs: opts?.envs,
+          resources: opts?.resources,
+          source: opts?.source ?? (
+            opts?.migrationTaskId
+              ? { kind: "migration", migrationId: opts.migrationTaskId }
+              : { kind: "inlineFiles" }
+          ),
+          harnessSidecar: opts?.harnessSidecar,
+          environment: opts?.environment,
+        }),
+      },
+      {},
+      0,
+    );
+    opts?.onStage?.({
+      level: "success",
+      phase: "upload",
+      message: migrationSource ? adkT("client.migrationArtifactValidated") : adkT("client.codePackageUploaded"),
+      pct: 100,
+    });
+  } catch (error) {
+    try {
+      final = await recoverFinal(error);
+    } finally {
+      clearController();
+    }
+  }
+  if (res && !res.ok) {
+    const detail = await httpErrorMessage(res, adkT("client.deploymentFailed"));
+    clearController();
+    throw new Error(detail);
+  }
+
+  if (res) {
+    try {
+      for await (const raw of parseSSE(res)) {
+        const ev = raw as DeployFrame & DeployStage;
+        if (ev && ev.done) {
+          final = ev;
+          break;
+        }
+        if (ev && ev.message) opts?.onStage?.(ev);
+      }
+    } catch (error) {
+      try {
+        final = await recoverFinal(error);
+      } finally {
+        clearController();
+      }
+    }
+  }
+  if (!final) {
+    try {
+      final = await recoverFinal();
+    } finally {
+      clearController();
+    }
+  } else {
+    clearController();
+  }
+  if (!final.success) {
+    const error = new Error(final.error || adkT("client.deploymentFailed"));
+    if (isDeploymentStatusUnconfirmedError(error)) {
+      throw new DeploymentStatusUnconfirmedError({ taskId, cause: error });
+    }
+    throw error;
+  }
+  if (!final.agentName) {
+    throw new Error(adkT("client.deploymentMissingAgentName"));
+  }
+  if (!final.runtimeId && !final.url) {
+    throw new Error(adkT("client.deploymentMissingConnection"));
+  }
+  // Older Studio servers returned the platform Runtime resource name in
+  // `agentName` and did not send `runtimeName`. The request name is the stable
+  // ADK app name, so normalize both response generations into one contract.
+  const deployedAgentName = final.runtimeName?.trim() ? final.agentName : name;
+  const deployedRuntimeName = final.runtimeName?.trim() || final.agentName;
+  // Note: the runtime's data-plane apikey is intentionally NOT persisted in the
+  // browser (it's a secret; clear-text localStorage would be XSS-exposed). The
+  // "管理 Agent" view shows control-plane detail instead.
+  return {
+    apikey: final.apikey ?? "",
+    url: final.url ?? "",
+    agentName: deployedAgentName,
+    runtimeName: deployedRuntimeName,
+    runtimeId: final.runtimeId,
+    consoleUrl: final.consoleUrl,
+    region: final.region,
+    version: final.version,
+    warnings: final.warnings,
+    feishuChannel: final.feishuChannel,
+  };
+}
+
+/** Cancel an in-flight deployment and ask the backend to destroy its Runtime. */
+export async function cancelAgentkitDeployment(taskId: string): Promise<void> {
+  const res = await apiFetch("/web/cancel-deploy-agentkit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ taskId }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || adkT("client.cancelDeploymentFailed", { status: res.status }));
+  }
+  deploymentControllers.get(taskId)?.abort();
+  deploymentControllers.delete(taskId);
+}
+
+/** A deployed runtime owned by the current user (for the "管理 Agent" view). */
+export interface ManagedRuntime {
+  name: string;
+  runtimeId: string;
+  status: string;
+  createdAt: string;
+  author?: string;
+  region: string;
+  currentVersion?: number | null;
+}
+
+/** List AgentKit runtimes the server authorizes this user to manage. */
+export async function getMyRuntimes(
+  region = VOLCENGINE_DEFAULT_REGION,
+): Promise<ManagedRuntime[]> {
+  const res = await apiFetch(`/web/my-runtimes?region=${encodeURIComponent(region)}`);
+  if (!res.ok) throw new Error(adkT("client.loadFailed", { status: res.status }));
+  const d = (await res.json()) as { runtimes?: ManagedRuntime[] };
+  return d.runtimes ?? [];
+}
+
+/** Per-module feature gates the SPA reads at startup (studio mode disables
+ *  the chat-centric modules). Unknown/failed fetch falls back to all-enabled. */
+export interface UiFeatures {
+  newChat: boolean;
+  search: boolean;
+  skillCenter: boolean;
+  history: boolean;
+  addAgent: boolean;
+  manageAgents: boolean;
+  agentUsage: boolean;
+  addAgentkit: boolean;
+  generatedAgentTestRun?: boolean;
+  generatedAgentTestRunDisabledReason?: string;
+}
+
+export interface SiteBranding {
+  title: string;
+  logoUrl: string;
+}
+
+export interface StudioTelemetryContext {
+  deployId: string;
+  userPoolId: string;
+  applicationId: string;
+  functionId: string;
+  region: string;
+  project: string;
+  version: string;
+  accountId?: string;
+  accountIdResolutionError?: string;
+}
+
+export interface StudioTelemetryConfig {
+  enabled: boolean;
+  studio?: StudioTelemetryContext;
+}
+
+export interface UiConfig {
+  studio: boolean;
+  version: string;
+  provider: "volcengine" | "byteplus";
+  branding: SiteBranding;
+  features: UiFeatures;
+  defaultView: "chat" | "addAgent";
+  /** Where the agent picker sources agents: local apps (`--dev`) or the user's
+   *  cloud AgentKit runtimes (default). */
+  agentsSource: "local" | "cloud";
+  telemetry: StudioTelemetryConfig;
+}
+
+export const DEFAULT_SITE_BRANDING: SiteBranding = {
+  title: "AgentKit Studio",
+  logoUrl: "",
+};
+
+const DISABLED_STUDIO_TELEMETRY: StudioTelemetryConfig = {
+  enabled: false,
+};
+
+const DEFAULT_UI_CONFIG: UiConfig = {
+  studio: false,
+  version: "",
+  provider: "volcengine",
+  branding: DEFAULT_SITE_BRANDING,
+  features: {
+    newChat: true,
+    search: true,
+    skillCenter: true,
+    history: true,
+    addAgent: true,
+    manageAgents: true,
+    agentUsage: false,
+    addAgentkit: true,
+    generatedAgentTestRun: true,
+  },
+  defaultView: "chat",
+  agentsSource: "local",
+  telemetry: DISABLED_STUDIO_TELEMETRY,
+};
+
+function normalizeStudioTelemetryConfig(value: unknown): StudioTelemetryConfig {
+  if (!value || typeof value !== "object") return DISABLED_STUDIO_TELEMETRY;
+  const config = value as Partial<StudioTelemetryConfig>;
+  if (
+    config.enabled !== true ||
+    !config.studio ||
+    typeof config.studio !== "object"
+  ) {
+    return DISABLED_STUDIO_TELEMETRY;
+  }
+  const studio = config.studio as Partial<StudioTelemetryContext>;
+  return {
+    enabled: true,
+    studio: {
+      deployId: typeof studio.deployId === "string" ? studio.deployId : "",
+      userPoolId: typeof studio.userPoolId === "string"
+        ? studio.userPoolId
+        : "",
+      applicationId: typeof studio.applicationId === "string"
+        ? studio.applicationId
+        : "",
+      functionId: typeof studio.functionId === "string"
+        ? studio.functionId
+        : "",
+      region: typeof studio.region === "string" ? studio.region : "",
+      project: typeof studio.project === "string" ? studio.project : "",
+      version: typeof studio.version === "string" ? studio.version : "",
+      accountId: typeof studio.accountId === "string" ? studio.accountId : "",
+      accountIdResolutionError:
+        typeof studio.accountIdResolutionError === "string"
+          ? studio.accountIdResolutionError
+          : "",
+    },
+  };
+}
+
+/** Fetch the UI feature gates; falls back to all-enabled on any error. */
+export async function getUiConfig(): Promise<UiConfig> {
+  try {
+    const res = await apiFetch("/web/ui-config");
+    if (!res.ok) return DEFAULT_UI_CONFIG;
+    const d = (await res.json()) as Partial<Omit<UiConfig, "branding">> & {
+      branding?: Partial<SiteBranding>;
+    };
+    const logoUrl = typeof d.branding?.logoUrl === "string"
+      ? d.branding.logoUrl
+      : DEFAULT_SITE_BRANDING.logoUrl;
+    const provider = d.provider === "byteplus" ? "byteplus" : "volcengine";
+    setClientCloudProvider(provider);
+    return {
+      studio: d.studio ?? false,
+      version: typeof d.version === "string" ? d.version : "",
+      provider,
+      branding: {
+        title: typeof d.branding?.title === "string"
+          ? d.branding.title
+          : DEFAULT_SITE_BRANDING.title,
+        logoUrl: logoUrl ? withAuth(logoUrl) : "",
+      },
+      features: { ...DEFAULT_UI_CONFIG.features, ...(d.features ?? {}) },
+      defaultView: d.defaultView ?? "chat",
+      agentsSource: d.agentsSource === "cloud" ? "cloud" : "local",
+      telemetry: normalizeStudioTelemetryConfig(d.telemetry),
+    };
+  } catch {
+    return DEFAULT_UI_CONFIG;
+  }
+}
+
+export type StudioRole = "super_admin" | "admin" | "developer" | "user";
+export type RuntimeScope = "all" | "mine";
+
+export interface StudioAccess {
+  role: StudioRole;
+  telemetry: {
+    userId: string;
+    accountId?: string;
+  };
+  capabilities: {
+    createAgents: boolean;
+    createPersonalAgents: boolean;
+    manageAgents: boolean;
+    runtimeScope: RuntimeScope;
+    manageUsers?: boolean;
+  };
+}
+
+/** Least-privileged fallback while access is loading or unavailable. */
+export const DEFAULT_STUDIO_ACCESS: StudioAccess = {
+  role: "user",
+  telemetry: {
+    userId: "",
+    accountId: "",
+  },
+  capabilities: {
+    createAgents: false,
+    createPersonalAgents: false,
+    manageAgents: false,
+    runtimeScope: "mine",
+    manageUsers: false,
+  },
+};
+
+/** Resolve the signed-in user's Studio role and capabilities. */
+export async function getStudioAccess(): Promise<StudioAccess> {
+  const res = await apiFetch("/web/access");
+  if (!res.ok) throw new Error(adkT("client.loadPermissionsFailed", { status: res.status }));
+  const access = (await res.json()) as StudioAccess;
+  if (
+    !["super_admin", "admin", "developer", "user"].includes(access.role) ||
+    typeof access.telemetry?.userId !== "string" ||
+    (
+      access.telemetry.accountId !== undefined &&
+      typeof access.telemetry.accountId !== "string"
+    ) ||
+    typeof access.capabilities?.createAgents !== "boolean" ||
+    typeof access.capabilities?.createPersonalAgents !== "boolean" ||
+    typeof access.capabilities?.manageAgents !== "boolean" ||
+    (access.capabilities?.manageUsers !== undefined && typeof access.capabilities.manageUsers !== "boolean") ||
+    !["all", "mine"].includes(access.capabilities?.runtimeScope)
+  ) {
+    throw new Error(adkT("client.invalidPermissionResponse"));
+  }
+  return access;
+}
+
+export interface StudioReleaseOption {
+  version: string;
+  gitSha: string;
+  createdAt: string;
+  changelog: string[];
+}
+
+export type StudioUpdateProgressStage =
+  | "idle"
+  | "permissions"
+  | "resolving"
+  | "downloading"
+  | "preparing"
+  | "provisioning"
+  | "scheduler"
+  | "submitting"
+  | "publishing"
+  | "complete"
+  | "error";
+
+export interface StudioUpdateStatus {
+  enabled: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  latestGitSha: string;
+  releases: StudioReleaseOption[];
+  available: boolean;
+  state: "disabled" | "idle" | "updating" | "error";
+  message: string;
+  progressStage: StudioUpdateProgressStage;
+  progressMessage: string;
+  targetVersion: string;
+  startedAt: number;
+  errorId: string;
+  errorStage: string;
+  errorLog: string;
+  updateLogs: string[];
+  updateLogsVisible: boolean;
+  consoleUrl: string;
+  permissionConsoleUrl: string;
+}
+
+export interface StudioUpdatePermissionStatus {
+  ready: boolean;
+  missingActions: string[];
+  policyName: string;
+  authorizationUrl: string;
+  iamConsoleUrl: string;
+  principalName: string;
+}
+
+/** Check the configured immutable Studio main release channel. */
+export async function getStudioUpdateStatus(
+  targetVersion?: string,
+  startedAt?: number,
+): Promise<StudioUpdateStatus> {
+  const params = new URLSearchParams();
+  if (targetVersion) params.set("targetVersion", targetVersion);
+  if (startedAt) params.set("startedAt", String(startedAt));
+  const query = params.size ? `?${params.toString()}` : "";
+  const res = await apiFetch(`/web/studio-update${query}`);
+  if (!res.ok) throw new Error(adkT("client.checkStudioUpdateFailed", { status: res.status }));
+  return (await res.json()) as StudioUpdateStatus;
+}
+
+/** Verify every IAM Action needed by OTA before starting any cloud mutation. */
+export async function getStudioUpdatePermissions(): Promise<StudioUpdatePermissionStatus> {
+  const res = await apiFetch("/web/studio-update/permissions");
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const payload = (await res.json()) as { detail?: unknown };
+      detail = typeof payload.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || adkT("client.studioUpdatePreflightFailed", { status: res.status }));
+  }
+  return (await res.json()) as StudioUpdatePermissionStatus;
+}
+
+/** Stage the latest full Studio bundle and submit a VeFaaS release. */
+export async function startStudioUpdate(
+  version: string,
+): Promise<{ version: string }> {
+  const res = await apiFetch("/web/studio-update", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-VeADK-Studio-Update": "1",
+    },
+    body: JSON.stringify({ version }),
+  }, {}, TRANSFER_REQUEST_TIMEOUT_MS);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const payload = (await res.json()) as { detail?: unknown };
+      detail = typeof payload.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || adkT("client.submitStudioUpdateFailed", { status: res.status }));
+  }
+  return (await res.json()) as { version: string };
+}
+
+/** Per-user invocation summary returned by the Studio usage endpoint. */
+export interface AgentUsageUser {
+  userId: string;
+  displayName: string;
+  invocationCount: number;
+  lastUsedAt: string;
+}
+
+/** One server-paginated usage snapshot for a deployed Agent. */
+export interface AgentUsageResponse {
+  runtimeId: string;
+  appName: string;
+  totalInvocations: number;
+  totalUsers: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  users: AgentUsageUser[];
+}
+
+/** Load usage for one deployed Runtime app. */
+export async function getAgentUsage({
+  runtimeId,
+  region,
+  appName,
+  page = 1,
+  pageSize = 20,
+  signal,
+}: {
+  runtimeId: string;
+  region: string;
+  appName: string;
+  page?: number;
+  pageSize?: number;
+  signal?: AbortSignal;
+}): Promise<AgentUsageResponse> {
+  const params = new URLSearchParams({
+    runtimeId,
+    region,
+    appName,
+    page: String(page),
+    pageSize: String(pageSize),
+  });
+  const res = await apiFetch(`/web/agent-usage?${params.toString()}`, { signal });
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadAgentUsageFailed")));
+  }
+  const contentType = res.headers.get("content-type") || adkT("client.notProvided");
+  const normalizedContentType = contentType.toLowerCase();
+  if (
+    !normalizedContentType.includes("application/json") &&
+    !normalizedContentType.includes("+json")
+  ) {
+    throw new Error(
+      adkT("client.agentUsageNonJson", { status: res.status, contentType }) +
+      adkT("client.checkStudioGateway"),
+    );
+  }
+  try {
+    return (await res.json()) as AgentUsageResponse;
+  } catch {
+    throw new Error(
+      adkT("client.agentUsageInvalidJson", { status: res.status, contentType }) +
+      adkT("client.retryCheckGateway"),
+    );
+  }
+}
+
+/** One AgentKit runtime as listed by `/web/runtimes` (control-plane). */
+export interface CloudRuntime {
+  name: string;
+  runtimeId: string;
+  status: string;
+  region: string;
+  author: string;
+  description?: string;
+  cpuMilli?: number | null;
+  memoryMb?: number | null;
+  createdAt?: string;
+  currentVersion?: number | null;
+  /** True when this runtime was deployed by the current user (veadk:author). */
+  isMine: boolean;
+  /** Server-authorized deletion capability for this managed Runtime. */
+  canDelete: boolean;
+  canManage?: boolean;
+  canPublish?: boolean;
+  visibility?: "private" | "enterprise";
+  reviewStatus?: "pending" | "approved" | "returned" | "withdrawn" | "";
+}
+
+export type CronJobScheduleType = "once" | "daily" | "weekly" | "cron";
+
+export interface CronJobSchedule {
+  type: CronJobScheduleType;
+  timezone: string;
+  /** ISO local date-time for a one-time schedule. */
+  onceAt?: string;
+  /** HH:mm for daily and weekly schedules. */
+  time?: string;
+  /** 0 (Sunday) through 6 (Saturday), for weekly schedules. */
+  weekday?: number;
+  /** Five-field cron expression for custom schedules. */
+  cron?: string;
+}
+
+export type CronJobRunStatus =
+  | "queued"
+  | "pending"
+  | "running"
+  | "retrying"
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+export interface CronJobRun {
+  runId: string;
+  jobId: string;
+  status: CronJobRunStatus;
+  scheduledAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  cancellationRequestedAt?: string;
+  sessionId?: string;
+  runtimeVersion?: string;
+  output?: string;
+  error?: string;
+  attempt?: number;
+}
+
+export interface CronJob {
+  jobId: string;
+  name: string;
+  runtimeId: string;
+  runtimeName: string;
+  agentName: string;
+  region: string;
+  prompt: string;
+  schedule: CronJobSchedule;
+  enabled: boolean;
+  nextRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  latestRun?: CronJobRun;
+}
+
+export interface CronJobInput {
+  name: string;
+  runtimeId: string;
+  runtimeName: string;
+  agentName: string;
+  region: string;
+  prompt: string;
+  schedule: CronJobSchedule;
+  enabled: boolean;
+}
+
+export interface CronJobListResponse {
+  items: CronJob[];
+}
+
+export interface CronJobRunListResponse {
+  items: CronJobRun[];
+}
+
+function cronJobPath(jobId = ""): string {
+  return `/web/cronjobs${jobId ? `/${encodeURIComponent(jobId)}` : ""}`;
+}
+
+export async function listCronJobs(signal?: AbortSignal): Promise<CronJob[]> {
+  const response = await apiFetch(cronJobPath(), { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadCronJobsFailed")));
+  }
+  const data = (await response.json()) as CronJobListResponse | CronJob[];
+  return Array.isArray(data) ? data : data.items ?? [];
+}
+
+export async function getCronJob(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<CronJob> {
+  const response = await apiFetch(cronJobPath(jobId), { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadCronJobFailed")));
+  }
+  return (await response.json()) as CronJob;
+}
+
+export async function createCronJob(input: CronJobInput): Promise<CronJob> {
+  const response = await apiFetch(cronJobPath(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.createCronJobFailed")));
+  }
+  return (await response.json()) as CronJob;
+}
+
+export async function updateCronJob(
+  jobId: string,
+  input: CronJobInput,
+): Promise<CronJob> {
+  const response = await apiFetch(`${cronJobPath(jobId)}/update`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.updateCronJobFailed")));
+  }
+  return (await response.json()) as CronJob;
+}
+
+export async function setCronJobEnabled(
+  jobId: string,
+  enabled: boolean,
+): Promise<CronJob> {
+  const action = enabled ? "enable" : "disable";
+  const response = await apiFetch(`${cronJobPath(jobId)}/${action}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      await httpErrorMessage(response, enabled ? adkT("client.enableCronJobFailed") : adkT("client.pauseCronJobFailed")),
+    );
+  }
+  return (await response.json()) as CronJob;
+}
+
+export async function runCronJobNow(jobId: string): Promise<CronJobRun> {
+  const response = await apiFetch(`${cronJobPath(jobId)}/run`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.runCronJobFailed")));
+  }
+  return (await response.json()) as CronJobRun;
+}
+
+export async function listCronJobRuns(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<CronJobRun[]> {
+  const response = await apiFetch(`${cronJobPath(jobId)}/runs`, { signal });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.loadCronHistoryFailed")));
+  }
+  const data = (await response.json()) as CronJobRunListResponse | CronJobRun[];
+  return Array.isArray(data) ? data : data.items ?? [];
+}
+
+export async function cancelCronJobRun(
+  jobId: string,
+  runId: string,
+): Promise<CronJobRun> {
+  const response = await apiFetch(
+    `${cronJobPath(jobId)}/runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.stopCronRunFailed")));
+  }
+  return (await response.json()) as CronJobRun;
+}
+
+export async function deleteCronJob(jobId: string): Promise<void> {
+  const response = await apiFetch(cronJobPath(jobId), { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await httpErrorMessage(response, adkT("client.deleteCronJobFailed")));
+  }
+}
+
+/** One page of cloud runtimes plus the token to fetch the next page. */
+export interface RuntimePage {
+  runtimes: CloudRuntime[];
+  nextToken: string;
+}
+
+export class RuntimeListError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "RuntimeListError";
+  }
+}
+
+/** List one authorized page of AgentKit runtimes. `nextToken` from a prior
+ *  page continues pagination; the server derives ownership from identity. */
+export async function getRuntimes(
+  opts: {
+    nextToken?: string;
+    pageSize?: number;
+    region?: string;
+    scope?: "all" | "mine";
+    signal?: AbortSignal;
+  } = {},
+): Promise<RuntimePage> {
+  const p = new URLSearchParams({
+    scope: opts.scope ?? "all",
+    page_size: String(opts.pageSize ?? 30),
+    region: opts.region ?? "all",
+  });
+  if (opts.nextToken) p.set("next_token", opts.nextToken);
+  const res = await apiFetch(`/web/runtimes?${p.toString()}`, {
+    signal: opts.signal,
+  });
+  if (!res.ok) {
+    const detail = await httpErrorMessage(res, adkT("client.loadRuntimeFailed"));
+    throw new RuntimeListError(detail, res.status);
+  }
+  const d = (await res.json()) as Partial<RuntimePage>;
+  return { runtimes: d.runtimes ?? [], nextToken: d.nextToken ?? "" };
+}
+
+/** Probe whether a runtime speaks the ADK api-server protocol by calling its
+ *  `/list-apps` through the proxy. Returns the app list on success, or null when
+ *  the runtime does not support it (non-200 / not an ADK server). */
+export async function probeRuntimeApps(
+  runtimeId: string,
+  region: string,
+  options: {
+    retryProbe?: boolean;
+    signal?: AbortSignal;
+    preferCached?: boolean;
+    timeoutMs?: number;
+    currentVersion?: number | null;
+  } = {},
+): Promise<string[] | null> {
+  if (options.preferCached) {
+    const key = runtimeAppsCacheKey(runtimeId, region, options.currentVersion);
+    const cached = runtimeAppsCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return [...cached.apps];
+    if (cached) runtimeAppsCache.delete(key);
+  }
+  try {
+    const endpoint: AdkEndpoint = {
+      runtimeId,
+      region,
+      runtimeVersion: options.currentVersion,
+    };
+    if (options.retryProbe) endpoint.retryProbe = true;
+    const res = await fetchRemoteApps(
+      "",
+      "",
+      endpoint,
+      options.signal,
+      options.timeoutMs,
+    );
+    return res;
+  } catch (error) {
+    if (
+      error instanceof RuntimeAccessDeniedError ||
+      error instanceof RuntimeProbeError
+    ) {
+      throw error;
+    }
+    if (error instanceof Error) throw error;
+    return null;
+  }
+}
+
+export interface RuntimeRouteChannelStatus {
+  enabled: boolean;
+  supported: boolean;
+  connected: boolean;
+  catalogRevision: string | null;
+}
+
+export interface StudioBffTool {
+  id: string;
+  name: string;
+  description: string;
+  riskLevel: string;
+}
+
+export interface RuntimeStudioToolCapabilities {
+  enabled: boolean;
+  supported: boolean;
+  tools: StudioBffTool[];
+}
+
+/** List BFF-local tools without exposing their schemas or local executors. */
+export async function getRuntimeStudioToolCapabilities(
+  runtimeId: string,
+  region: string,
+): Promise<RuntimeStudioToolCapabilities> {
+  const params = new URLSearchParams({ region });
+  const res = await apiFetch(
+    `/web/runtime-tool-channel/${encodeURIComponent(runtimeId)}/capabilities?${params.toString()}`,
+  );
+  if (!res.ok) {
+    throw new RuntimeProbeError(
+      await httpErrorMessage(res, adkT("client.loadLocalToolsFailed")),
+      false,
+      true,
+    );
+  }
+  return (await res.json()) as RuntimeStudioToolCapabilities;
+}
+
+/** Ask the local Studio BFF to keep a persistent reverse-route channel to the
+ *  Runtime. A Runtime without the generic route host is a supported no-op. */
+export async function ensureRuntimeRouteChannel(
+  runtimeId: string,
+  region: string,
+): Promise<RuntimeRouteChannelStatus> {
+  const params = new URLSearchParams({ region });
+  const res = await apiFetch(
+    `/web/runtime-route-channel/${encodeURIComponent(runtimeId)}/connect?${params.toString()}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    throw new RuntimeProbeError(
+      await httpErrorMessage(res, adkT("client.connectDynamicRouteFailed")),
+      false,
+      true,
+    );
+  }
+  return (await res.json()) as RuntimeRouteChannelStatus;
+}
+
+export interface RuntimeA2aIntegration {
+  name: string;
+  description: string;
+  endpoint: string;
+}
+
+/** Probe the standard A2A Agent Card without exposing Runtime credentials. */
+export async function probeRuntimeA2a(
+  runtimeId: string,
+  region: string,
+  options: { retryProbe?: boolean } = {},
+): Promise<RuntimeA2aIntegration | null> {
+  const endpoint: AdkEndpoint = { runtimeId, region };
+  if (options.retryProbe) endpoint.retryProbe = true;
+  const res = await apiFetch("/.well-known/agent-card.json", {}, endpoint);
+  const runtimeErrorCode = await runtimeProxyErrorCode(res);
+  if (runtimeErrorCode === "runtime_access_denied") {
+    throw new RuntimeAccessDeniedError();
+  }
+  if (runtimeErrorCode === "runtime_private_endpoint_unreachable") {
+    throw new RuntimeProbeError(privateRuntimeUnreachableMessage());
+  }
+  if (
+    ["runtime_proxy_connect_error", "runtime_proxy_timeout"].includes(
+      runtimeErrorCode,
+    )
+  ) {
+    throw new RuntimeProbeError(runtimeEndpointUnreachableMessage());
+  }
+  if (res.status === 404) return null;
+  if (res.status === 401 || res.status === 403) {
+    throw new RuntimeProbeError(
+      adkT("client.a2aProbeDenied"),
+    );
+  }
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadA2aCardFailed")));
+  }
+  const payload = (await res.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
+  const integrationEndpoint =
+    typeof payload?.url === "string" ? payload.url.trim() : "";
+  if (!integrationEndpoint) return null;
+  return {
+    name: typeof payload?.name === "string" ? payload.name : "",
+    description:
+      typeof payload?.description === "string" ? payload.description : "",
+    endpoint: integrationEndpoint,
+  };
+}
+
+/** Reveal a Runtime API Key on demand without adding it to metadata caches. */
+export async function revealRuntimeApiKey(
+  runtimeId: string,
+  region: string,
+): Promise<string> {
+  const params = new URLSearchParams({ runtimeId, region });
+  const res = await apiFetch(
+    `/web/runtime-api-key/reveal?${params.toString()}`,
+    { method: "POST", cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadRuntimeApiKeyFailed")));
+  }
+  const payload = (await res.json()) as { apiKey?: unknown };
+  if (typeof payload.apiKey !== "string" || !payload.apiKey) {
+    throw new Error(adkT("client.runtimeApiKeyMissing"));
+  }
+  return payload.apiKey;
+}
+
+/** Delete a deployed runtime by id. */
+export async function deleteRuntime(
+  runtimeId: string,
+  region: string,
+): Promise<void> {
+  const res = await apiFetch("/web/delete-runtime", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ runtimeId, region }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(t || adkT("client.deleteFailed", { status: res.status }));
+  }
+}
+
+/** Server-authorized recovery state for one concrete Runtime app. */
+export type RuntimeUpdateRecoveryStatus =
+  | "preparing"
+  | "complete"
+  | "draft-only"
+  | "introspection-only"
+  | "missing-source"
+  | "incompatible";
+
+/** Server-authorized update compatibility for one concrete Runtime app. */
+export interface RuntimeUpdateCapability {
+  canUpdate: boolean;
+  reason: string;
+  reasonCode?: string;
+  recoveryStatus: RuntimeUpdateRecoveryStatus;
+  editMode: "source-preserving" | "regenerate" | "blocked";
+  recoverySource:
+    | "editable-spec"
+    | "agent-info"
+    | "agent-draft"
+    | "legacy-runtime"
+    | "none";
+  warnings: string[];
+  etag: string;
+  runtime: {
+    runtimeId: string;
+    name: string;
+    region: string;
+    currentVersion?: number | null;
+    environment?: {
+      environmentId: string;
+      environmentVersionId: string;
+    };
+    envs: { key: string; value: string }[];
+    configuredEnvKeys: string[];
+    network: NetworkConfig;
+  };
+  agent?: {
+    appName: string;
+    name?: string;
+    description?: string;
+    instruction?: string;
+    type?: AgentNodeType;
+    model?: string;
+    tools?: string[];
+    skills?: AgentSkill[];
+    graph?: AgentNode;
+    draft?: AgentDraft;
+    sourceImage?: string;
+  } | null;
+}
+
+/** Fetch the exact MCP credentials for one authorized update snapshot. */
+export async function getRuntimeMcpCredentials({
+  runtimeId,
+  region,
+  appName,
+  etag,
+  signal,
+}: {
+  runtimeId: string;
+  region: string;
+  appName: string;
+  etag: string;
+  signal?: AbortSignal;
+}): Promise<McpCredentialValue[]> {
+  const res = await apiFetch("/web/runtime-mcp-credentials", {
+    method: "POST",
+    cache: "no-store",
+    signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ runtimeId, region, appName, etag }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      await httpErrorMessage(res, adkT("client.loadMcpCredentialsFailed")),
+    );
+  }
+  const payload = (await res.json().catch(() => null)) as {
+    credentials?: unknown;
+  } | null;
+  if (!Array.isArray(payload?.credentials)) {
+    throw new Error(adkT("client.invalidMcpCredentials"));
+  }
+  return payload.credentials.map((item) => {
+    if (!item || typeof item !== "object") {
+      throw new Error(adkT("client.invalidMcpCredentials"));
+    }
+    const raw = item as Record<string, unknown>;
+    const credential = {
+      agentName: raw.agentName,
+      name: raw.name,
+      url: raw.url,
+      authTokenEnv: raw.authTokenEnv,
+      value: raw.value,
+    };
+    if (Object.values(credential).some((value) => typeof value !== "string")) {
+      throw new Error(adkT("client.invalidMcpCredentials"));
+    }
+    return credential as McpCredentialValue;
+  });
+}
+
+interface RuntimeUpdateCapabilityRequest {
+  runtimeId: string;
+  region: string;
+  appName?: string;
+  currentVersion?: number | null;
+  signal?: AbortSignal;
+  force?: boolean;
+}
+
+function runtimeUpdateCapabilityCacheKey({
+  runtimeId,
+  region,
+  appName,
+  currentVersion,
+}: Omit<RuntimeUpdateCapabilityRequest, "signal" | "force">): string {
+  return cacheKey(
+    activeCloudProvider,
+    region,
+    runtimeId,
+    currentVersion ?? "",
+    appName?.trim() ?? "",
+  );
+}
+
+async function fetchRuntimeUpdateCapability({
+  runtimeId,
+  region,
+  appName,
+  currentVersion,
+  force = false,
+}: Omit<RuntimeUpdateCapabilityRequest, "signal">): Promise<RuntimeUpdateCapability> {
+  const params = new URLSearchParams({ runtimeId, region });
+  if (appName) params.set("appName", appName);
+  if (currentVersion != null) params.set("currentVersion", String(currentVersion));
+  if (force) params.set("refresh", "true");
+  const res = await apiFetch(`/web/runtime-update-capability?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error(await runtimeUpdateCapabilityErrorMessage(res));
+  }
+  return (await res.json()) as RuntimeUpdateCapability;
+}
+
+export function getRuntimeUpdateCapability({
+  runtimeId,
+  region,
+  appName,
+  currentVersion,
+  signal,
+  force = false,
+}: RuntimeUpdateCapabilityRequest): Promise<RuntimeUpdateCapability> {
+  const request = { runtimeId, region, appName, currentVersion };
+  const key = runtimeUpdateCapabilityCacheKey(request);
+  if (force) runtimeUpdateCapabilityCache.delete(key);
+  if (!force) {
+    const cached = freshCacheValue(
+      runtimeUpdateCapabilityCache,
+      key,
+      RUNTIME_METADATA_CACHE_TTL_MS,
+    );
+    if (cached) return waitForSharedRequest(Promise.resolve(cached), signal);
+    const inFlight = runtimeUpdateCapabilityCache.get(key)?.promise;
+    if (inFlight) return waitForSharedRequest(inFlight, signal);
+    if (appName) {
+      const baseKey = runtimeUpdateCapabilityCacheKey({
+        ...request,
+        appName: "",
+      });
+      const baseInFlight = runtimeUpdateCapabilityCache.get(baseKey)?.promise;
+      if (baseInFlight) {
+        let aliasPromise: Promise<RuntimeUpdateCapability>;
+        aliasPromise = baseInFlight.then(
+          (value) => {
+            if (value.recoveryStatus === "preparing") {
+              if (runtimeUpdateCapabilityCache.get(key)?.promise === aliasPromise) {
+                runtimeUpdateCapabilityCache.delete(key);
+              }
+              return value;
+            }
+            const resolvedAppName = value.agent?.appName?.trim() ?? "";
+            if (resolvedAppName && resolvedAppName !== appName.trim()) {
+              if (runtimeUpdateCapabilityCache.get(key)?.promise === aliasPromise) {
+                runtimeUpdateCapabilityCache.delete(key);
+              }
+              return getRuntimeUpdateCapability(request);
+            }
+            if (runtimeUpdateCapabilityCache.get(key)?.promise === aliasPromise) {
+              runtimeUpdateCapabilityCache.set(key, {
+                value,
+                updatedAt: Date.now(),
+              });
+            }
+            return value;
+          },
+          (error: unknown) => {
+            if (runtimeUpdateCapabilityCache.get(key)?.promise === aliasPromise) {
+              runtimeUpdateCapabilityCache.delete(key);
+            }
+            throw error;
+          },
+        );
+        runtimeUpdateCapabilityCache.set(key, {
+          promise: aliasPromise,
+          updatedAt: 0,
+        });
+        return waitForSharedRequest(aliasPromise, signal);
+      }
+    }
+  }
+
+  let promise: Promise<RuntimeUpdateCapability>;
+  promise = fetchRuntimeUpdateCapability({ ...request, force }).then(
+    (value) => {
+      if (value.recoveryStatus === "preparing") {
+        if (runtimeUpdateCapabilityCache.get(key)?.promise === promise) {
+          runtimeUpdateCapabilityCache.delete(key);
+        }
+        return value;
+      }
+      if (runtimeUpdateCapabilityCache.get(key)?.promise === promise) {
+        runtimeUpdateCapabilityCache.set(key, {
+          value,
+          updatedAt: Date.now(),
+        });
+        const aliasNames = new Set(["", value.agent?.appName?.trim() ?? ""]);
+        for (const aliasName of aliasNames) {
+          const aliasKey = runtimeUpdateCapabilityCacheKey({
+            ...request,
+            appName: aliasName,
+          });
+          if (
+            aliasKey !== key &&
+            !runtimeUpdateCapabilityCache.get(aliasKey)?.promise
+          ) {
+            runtimeUpdateCapabilityCache.set(aliasKey, {
+              value,
+              updatedAt: Date.now(),
+            });
+          }
+        }
+      }
+      return value;
+    },
+    (error: unknown) => {
+      if (runtimeUpdateCapabilityCache.get(key)?.promise === promise) {
+        runtimeUpdateCapabilityCache.delete(key);
+      }
+      throw error;
+    },
+  );
+  runtimeUpdateCapabilityCache.set(key, { promise, updatedAt: 0 });
+  return waitForSharedRequest(promise, signal);
+}
+
+export function getCachedRuntimeUpdateCapability({
+  runtimeId,
+  region,
+  appName,
+  currentVersion,
+}: Omit<RuntimeUpdateCapabilityRequest, "signal" | "force">): RuntimeUpdateCapability | null {
+  return freshCacheValue(
+    runtimeUpdateCapabilityCache,
+    runtimeUpdateCapabilityCacheKey({
+      runtimeId,
+      region,
+      appName,
+      currentVersion,
+    }),
+    RUNTIME_METADATA_CACHE_TTL_MS,
+  );
+}
+
+export function prefetchRuntimeUpdateCapability(
+  request: Omit<RuntimeUpdateCapabilityRequest, "signal" | "force">,
+): Promise<void> {
+  return getRuntimeUpdateCapability(request).then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
+export function invalidateRuntimeUpdateCapabilityCache(
+  runtimeId?: string,
+  region?: string,
+): void {
+  if (!runtimeId) {
+    runtimeUpdateCapabilityCache.clear();
+    return;
+  }
+  for (const key of runtimeUpdateCapabilityCache.keys()) {
+    const [provider, keyRegion, keyRuntimeId] = key.split("\u0001");
+    if (
+      provider === activeCloudProvider &&
+      keyRuntimeId === runtimeId &&
+      (!region || keyRegion === region)
+    ) {
+      runtimeUpdateCapabilityCache.delete(key);
+    }
+  }
+}
+
+async function runtimeUpdateCapabilityErrorMessage(res: Response): Promise<string> {
+  const payload = await res.json().catch(() => null) as { detail?: unknown } | null;
+  const detail = typeof payload?.detail === "string" ? payload.detail : "";
+  if (res.status === 403) return adkT("client.runtimeManageForbidden");
+  if (res.status === 404) {
+    return detail === "runtime_not_found"
+      ? adkT("client.runtimeNotFound")
+      : adkT("client.runtimeUnavailable");
+  }
+  return adkT("client.checkRuntimeUpdateFailed", { status: res.status });
+}
+
+/** Control-plane detail for a runtime (GetRuntime), for the 管理 Agent view. */
+export interface RuntimeDetail {
+  runtimeId: string;
+  name: string;
+  description: string;
+  status: string;
+  statusMessage: string;
+  model: string;
+  project: string;
+  region: string;
+  createdAt: string;
+  updatedAt: string;
+  currentVersion?: number | null;
+  resources: {
+    cpuMilli?: number | null;
+    memoryMb?: number | null;
+    minInstance?: number | null;
+    maxInstance?: number | null;
+    maxConcurrency?: number | null;
+  };
+  envs: { key: string; value: string }[];
+  memoryId: string;
+  toolId: string;
+  knowledgeId: string;
+  mcpToolsetId: string;
+  artifactUrl: string;
+  artifactType: string;
+  networkTypes: string[];
+  endpoint: string;
+  authType: "none" | "key_auth" | "custom_jwt" | "unknown";
+}
+
+/** Fetch a runtime's control-plane detail (config/status/envs). */
+async function fetchRuntimeDetail(
+  runtimeId: string,
+  region: string,
+): Promise<RuntimeDetail> {
+  let lastError: Error | null = null;
+  for (const candidate of runtimeRegionCandidates(region)) {
+    const res = await apiFetch(
+      `/web/runtime-detail?runtimeId=${encodeURIComponent(runtimeId)}&region=${encodeURIComponent(candidate)}`,
+    );
+    if (res.ok) return res.json();
+    lastError = new Error(await httpErrorMessage(res, adkT("client.loadRuntimeDetailFailed")));
+  }
+  throw lastError ?? new Error(adkT("client.loadRuntimeDetailFailed"));
+}
+
+/** Fetch a runtime's control-plane detail (config/status/envs). */
+export async function getRuntimeDetail(
+  runtimeId: string,
+  region = "cn-beijing",
+  options: ClientCacheOptions = {},
+): Promise<RuntimeDetail> {
+  const key = cacheKey(runtimeId, region || "cn-beijing");
+  const cached = freshCacheValue(
+    runtimeDetailCache,
+    key,
+    RUNTIME_METADATA_CACHE_TTL_MS,
+  );
+  if (!options.force && cached) return cached;
+  const existing = runtimeDetailCache.get(key);
+  if (!options.force && existing?.promise) return existing.promise;
+  const promise = fetchRuntimeDetail(runtimeId, region).then((detail) =>
+    rememberClientCache(runtimeDetailCache, key, detail),
+  );
+  runtimeDetailCache.set(key, {
+    ...existing,
+    promise,
+    updatedAt: existing?.updatedAt ?? 0,
+  });
+  try {
+    return await promise;
+  } finally {
+    const current = runtimeDetailCache.get(key);
+    if (current?.promise === promise) {
+      runtimeDetailCache.set(key, {
+        value: current.value,
+        updatedAt: current.updatedAt,
+      });
+    }
+  }
+}
+
+export function getCachedRuntimeDetail(
+  runtimeId: string,
+  region = "cn-beijing",
+): RuntimeDetail | null {
+  return freshCacheValue(
+    runtimeDetailCache,
+    cacheKey(runtimeId, region || "cn-beijing"),
+    RUNTIME_METADATA_CACHE_TTL_MS,
+  );
+}
+
+export function prefetchRuntimeDetail(
+  runtimeId: string,
+  region = "cn-beijing",
+): void {
+  void getRuntimeDetail(runtimeId, region).catch(() => {});
+}
+
+export interface GeneratedAgentTestRun {
+  runId: string;
+  appName: string;
+  expiresAt: number;
+  planHash?: string;
+}
+
+export async function generateAgentProject(
+  draft: AgentDraft,
+): Promise<AgentProject> {
+  const res = await apiFetch("/web/generated-agent-projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ draft }),
+  });
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.generateProjectFailed")));
+  }
+  return res.json();
+}
+
+export interface GeneratedAgentDraftResult {
+  draft: AgentDraft;
+  summary: string;
+  unresolvedItems: string[];
+}
+
+const GENERATED_AGENT_DRAFT_TIMEOUT_MS = 190_000;
+const GENERATED_AGENT_TEST_RUN_TIMEOUT_MS = 120_000;
+
+export async function generateAgentDraftFromRequirement(
+  requirement: string,
+): Promise<GeneratedAgentDraftResult> {
+  const res = await apiFetch(
+    "/web/generated-agent-drafts",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requirement }),
+    },
+    {},
+    GENERATED_AGENT_DRAFT_TIMEOUT_MS,
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.generateAgentConfigFailed")));
+  }
+  return parseJsonResponse<GeneratedAgentDraftResult>(res, adkT("client.generateAgentConfigFailed"));
+}
+
+export async function createGeneratedAgentTestRun(
+  draft: AgentDraft,
+  runtime?: {
+    runtimeId: string;
+    region: string;
+    mcpCredentialReuses?: Array<{
+      agentName: string;
+      name: string;
+      url: string;
+      sourceAuthTokenEnv: string;
+    }>;
+  },
+): Promise<GeneratedAgentTestRun> {
+  const res = await apiFetch(
+    "/web/generated-agent-test-runs",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draft,
+        runtimeId: runtime?.runtimeId,
+        runtimeRegion: runtime?.region,
+        mcpCredentialReuses: runtime?.mcpCredentialReuses,
+      }),
+    },
+    {},
+    GENERATED_AGENT_TEST_RUN_TIMEOUT_MS,
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.createDebugRunFailed")));
+  }
+  return parseJsonResponse<GeneratedAgentTestRun>(res, adkT("client.createDebugRunFailed"));
+}
+
+export async function createGeneratedAgentTestSession(
+  runId: string,
+  userId: string,
+): Promise<string> {
+  const res = await apiFetch(`/web/generated-agent-test-runs/${runId}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId }),
+  });
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.createDebugSessionFailed")));
+  }
+  const session = await parseJsonResponse<{ id: string }>(res, adkT("client.createDebugSessionFailed"));
+  return session.id;
+}
+
+export async function getGeneratedAgentTestTrace(
+  runId: string,
+  sessionId: string,
+): Promise<TraceSpan[]> {
+  const res = await apiFetch(
+    `/web/generated-agent-test-runs/${encodeURIComponent(runId)}/trace/session/${encodeURIComponent(sessionId)}`,
+  );
+  if (!res.ok) {
+    throw new Error(await httpErrorMessage(res, adkT("client.loadDebugTraceFailed")));
+  }
+  const spans = await parseJsonResponse<unknown>(res, adkT("client.loadDebugTraceFailed"));
+  if (!Array.isArray(spans)) throw new Error(adkT("client.invalidDebugTrace"));
+  return spans as TraceSpan[];
+}
+
+export async function* runGeneratedAgentTestSSE({
+  runId,
+  userId,
+  sessionId,
+  text,
+  signal,
+}: {
+  runId: string;
+  userId: string;
+  sessionId: string;
+  text: string;
+  signal?: AbortSignal;
+}): AsyncGenerator<AdkEvent, void, unknown> {
+  const parts: Record<string, unknown>[] = text.trim() ? [{ text }] : [];
+  const firstEventDeadline = runSseFirstEventDeadline(signal);
+  let res: Response;
+  try {
+    res = await apiFetch(
+      `/web/generated-agent-test-runs/${runId}/run_sse`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: userId,
+          session_id: sessionId,
+          new_message: { role: "user", parts },
+          streaming: true,
+        }),
+        signal: firstEventDeadline.signal,
+      },
+      {},
+      0,
+    );
+  } catch (error) {
+    firstEventDeadline.cleanup();
+    if (firstEventDeadline.timedOut()) throw new Error(runSseFirstEventTimeoutError());
+    throw error;
+  }
+  if (!res.ok) {
+    firstEventDeadline.cleanup();
+    throw new Error(await httpErrorMessage(res, adkT("client.debugRunFailed")));
+  }
+  try {
+    for await (const evt of parseSSE(res)) {
+      firstEventDeadline.clearDeadline();
+      yield evt as AdkEvent;
+    }
+  } catch (error) {
+    if (firstEventDeadline.timedOut()) throw new Error(runSseFirstEventTimeoutError());
+    throw error;
+  } finally {
+    firstEventDeadline.cleanup();
+  }
+}
+
+export async function deleteGeneratedAgentTestRun(runId: string): Promise<void> {
+  const res = await apiFetch(`/web/generated-agent-test-runs/${runId}`, {
     method: "DELETE",
   });
   if (!res.ok && res.status !== 404) {
-    throw new Error(`Delete failed: ${res.status}`);
+    throw new Error(await httpErrorMessage(res, adkT("client.cleanupDebugRunFailed")));
   }
+}
+
+export interface SandboxImageState {
+  toolId: string;
+  error: string;
+  provider?: CloudProvider;
+  region?: string;
+  toolType?: string;
+  status?: string;
+  currentImage?: string;
+  latestImage?: string;
+  needsImageUpdate?: boolean;
+  needsModelEnvUpdate?: boolean;
+  canUpdateModelEnv?: boolean;
+  modelEnvError?: string;
+  canUpdate?: boolean;
+}
+
+function sandboxImageState(value: unknown): SandboxImageState {
+  if (!value || typeof value !== "object") throw new Error(adkT("client.invalidSandboxVersion"));
+  const row = value as SandboxImageState;
+  if (typeof row.toolId !== "string" || typeof row.error !== "string") {
+    throw new Error(adkT("client.invalidSandboxVersion"));
+  }
+  if (!row.error && (
+    (row.provider !== "volcengine" && row.provider !== "byteplus") ||
+    typeof row.region !== "string" || typeof row.status !== "string" ||
+    typeof row.currentImage !== "string" || typeof row.latestImage !== "string" ||
+    typeof row.needsImageUpdate !== "boolean" || typeof row.canUpdate !== "boolean" ||
+    typeof row.needsModelEnvUpdate !== "boolean" ||
+    typeof row.canUpdateModelEnv !== "boolean" || typeof row.modelEnvError !== "string"
+  )) throw new Error(adkT("client.invalidSandboxVersion"));
+  return row;
+}
+
+export async function getSandboxImageUpdates(signal?: AbortSignal): Promise<SandboxImageState[]> {
+  const response = await apiFetch("/web/system-info/sandbox-tools/updates", { signal });
+  if (!response.ok) throw new Error(await httpErrorMessage(response, adkT("client.loadSandboxVersionsFailed")));
+  const payload = await response.json() as { tools?: unknown };
+  if (!Array.isArray(payload.tools)) throw new Error(adkT("client.invalidSandboxVersion"));
+  return payload.tools.map(sandboxImageState);
+}
+
+export async function updateSandboxTool(kind: SandboxToolKind): Promise<{
+  updated: boolean;
+  state: SandboxImageState;
+}> {
+  const response = await apiFetch(
+    `/web/system-info/sandbox-tools/${encodeURIComponent(kind)}/update`,
+    { method: "POST" }, {}, 330_000,
+  );
+  if (!response.ok) throw new Error(await httpErrorMessage(response, adkT("client.updateSandboxFailed")));
+  const payload = await response.json() as { updated?: unknown; state?: unknown };
+  if (typeof payload.updated !== "boolean") throw new Error(adkT("client.invalidSandboxUpdate"));
+  return { updated: payload.updated, state: sandboxImageState(payload.state) };
 }

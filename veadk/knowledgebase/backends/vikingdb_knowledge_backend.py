@@ -22,10 +22,10 @@ from typing import Any, Literal
 import requests
 from pydantic import Field
 from typing_extensions import override
-from volcengine.viking_knowledgebase import VikingKnowledgeBaseService
 from volcengine.auth.SignerV4 import SignerV4
 from volcengine.base.Request import Request
 from volcengine.Credentials import Credentials
+from volcengine.viking_knowledgebase import VikingKnowledgeBaseService
 
 import veadk.config  # noqa E401
 from veadk.auth.veauth.utils import (
@@ -33,14 +33,58 @@ from veadk.auth.veauth.utils import (
     get_credential_from_vefaas_iam,
 )
 from veadk.configs.database_configs import NormalTOSConfig, TOSConfig
+from veadk.integrations.ve_tos.ve_tos import VeTOS
 from veadk.knowledgebase.backends.base_backend import BaseKnowledgebaseBackend
 from veadk.knowledgebase.entry import KnowledgebaseEntry
 from veadk.utils.logger import get_logger
 from veadk.utils.misc import formatted_timestamp, getenv
-from veadk.integrations.ve_tos.ve_tos import VeTOS
-
 
 logger = get_logger(__name__)
+
+
+def _viking_cloud_provider() -> str:
+    return (
+        os.getenv("AGENTKIT_CLOUD_PROVIDER")
+        or os.getenv("CLOUD_PROVIDER")
+        or "volcengine"
+    ).lower()
+
+
+def _viking_access_key_from_env() -> str | None:
+    if _viking_cloud_provider() == "byteplus":
+        return os.getenv("BYTEPLUS_ACCESS_KEY")
+    return os.getenv("VOLCENGINE_ACCESS_KEY")
+
+
+def _viking_secret_key_from_env() -> str | None:
+    if _viking_cloud_provider() == "byteplus":
+        return os.getenv("BYTEPLUS_SECRET_KEY")
+    return os.getenv("VOLCENGINE_SECRET_KEY")
+
+
+def _viking_session_token_from_env() -> str:
+    if _viking_cloud_provider() == "byteplus":
+        return os.getenv("BYTEPLUS_SESSION_TOKEN", "")
+    return os.getenv("VOLCENGINE_SESSION_TOKEN", "")
+
+
+def _clean_api_key(value: str | None) -> str | None:
+    value = (value or "").strip()
+    if not value or value.lower() in {"none", "null"}:
+        return None
+    return value
+
+
+def _viking_api_key_from_env() -> str | None:
+    return _clean_api_key(os.getenv("DATABASE_VIKING_API_KEY"))
+
+
+def _byteplus_viking_region(region: str | None) -> str:
+    """Return the supported BytePlus VikingDB Knowledge Base region."""
+    region = (region or "").strip()
+    if not region or region in {"cn-beijing", "cn-shanghai", "cn-guangzhou"}:
+        return "cn-hongkong"
+    return region
 
 
 def build_vikingdb_knowledgebase_request(
@@ -49,11 +93,12 @@ def build_vikingdb_knowledgebase_request(
     volcengine_secret_key: str,
     session_token: str = "",
     method: Literal["GET", "POST", "PUT", "DELETE"] = "POST",
-    region: str = "cn-beijing",
+    region: str = "",
     params=None,
     data=None,
     doseq=0,
 ) -> Request:
+    region = region or os.getenv("REGION") or "cn-beijing"
     if params:
         for key in params:
             if (
@@ -154,24 +199,26 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
     """
 
     volcengine_access_key: str | None = Field(
-        default_factory=lambda: os.getenv("VOLCENGINE_ACCESS_KEY")
+        default_factory=_viking_access_key_from_env
     )
     volcengine_secret_key: str | None = Field(
-        default_factory=lambda: os.getenv("VOLCENGINE_SECRET_KEY")
+        default_factory=_viking_secret_key_from_env
     )
-    session_token: str = ""
+    session_token: str = Field(default_factory=_viking_session_token_from_env)
+    api_key: str | None = Field(default_factory=_viking_api_key_from_env)
 
     volcengine_project: str = Field(
         default_factory=lambda: os.getenv("DATABASE_VIKING_PROJECT", "default")
+    )
+    resource_id: str = Field(
+        default_factory=lambda: os.getenv("DATABASE_VIKING_RESOURCE_ID", "")
     )
 
     version: str = Field(
         default_factory=lambda: os.getenv("DATABASE_VIKING_VERSION", "2")
     )
 
-    cloud_provider: str = Field(
-        default_factory=lambda: os.getenv("CLOUD_PROVIDER", "volces")
-    )
+    cloud_provider: str = Field(default_factory=_viking_cloud_provider)
 
     region: str = Field(default="")
     base_url: str = Field(default="")
@@ -183,26 +230,58 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
     _viking_sdk_client = None
 
     def model_post_init(self, __context: Any) -> None:
-        if not self.region:
-            if self.cloud_provider.lower() == "byteplus":
-                self.region = os.getenv("DATABASE_VIKING_REGION", "cn-hongkong")
-                self.base_url = (
-                    f"https://api-knowledgebase.mlp.{self.region}.bytepluses.com"
-                )
-                self.host = f"api-knowledgebase.mlp.{self.region}.bytepluses.com"
-            else:
-                self.region = os.getenv("DATABASE_VIKING_REGION", "cn-beijing")
-                self.base_url = (
-                    f"https://api-knowledgebase.mlp.{self.region}.volces.com"
-                )
-                self.host = f"api-knowledgebase.mlp.{self.region}.volces.com"
+        self.api_key = _clean_api_key(self.api_key) or _viking_api_key_from_env()
+        if self.cloud_provider.lower() == "byteplus":
+            self.region = _byteplus_viking_region(
+                self.region or os.getenv("DATABASE_VIKING_REGION")
+            )
+            self.base_url = (
+                self.base_url
+                or f"https://api-knowledgebase.mlp.{self.region}.bytepluses.com"
+            )
+            self.host = (
+                self.host or f"api-knowledgebase.mlp.{self.region}.bytepluses.com"
+            )
+            if (
+                "tos_config" not in self.model_fields_set
+                and not os.getenv("DATABASE_TOS_REGION")
+                and not os.getenv("DATABASE_TOS_ENDPOINT")
+            ):
+                self.tos_config.region = self.region
+                self.tos_config.endpoint = f"tos-{self.region}.bytepluses.com"
+        else:
+            self.region = (
+                self.region
+                or os.getenv("DATABASE_VIKING_REGION")
+                or os.getenv("REGION")
+                or "cn-beijing"
+            )
+            self.base_url = (
+                self.base_url
+                or f"https://api-knowledgebase.mlp.{self.region}.volces.com"
+            )
+            self.host = self.host or f"api-knowledgebase.mlp.{self.region}.volces.com"
 
         logger.info(f"Cloud provider: {self.cloud_provider.lower()}")
         logger.info(f"VikingDBKnowledgeBackend: region={self.region}, host={self.host}")
+        logger.info(
+            "VikingDBKnowledgeBackend auth: "
+            + (
+                "API key for knowledge search; AK/SK or IAM for management"
+                if self.api_key
+                else "AK/SK or IAM"
+            )
+        )
 
         self.precheck_index_naming()
 
         # check whether collection exist, if not, create it
+        if self.api_key and not self._has_explicit_management_credentials():
+            logger.info(
+                "Skip VikingDB knowledgebase collection management precheck: "
+                "API key is configured, but AK/SK credentials are not configured."
+            )
+            return
         if not self.collection_status()["existed"]:
             logger.warning(
                 f"VikingDB knowledgebase collection {self.index} does not exist, please create it first..."
@@ -220,15 +299,15 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
                 "it must start with an English letter, contain only letters, numbers, and underscores, and have a length of 1-128."
             )
 
+    def _has_explicit_management_credentials(self) -> bool:
+        return bool(self.volcengine_access_key and self.volcengine_secret_key)
+
     def _get_tos_client(self, tos_bucket_name: str) -> VeTOS:
         ak = None
         sk = None
         sts_token = None
         if not (self.volcengine_access_key and self.volcengine_secret_key):
-            cred = self._set_service_info()
-            ak = cred.access_key_id
-            sk = cred.secret_access_key
-            sts_token = cred.session_token
+            ak, sk, sts_token = self._get_ak_sk_sts()
 
         return VeTOS(
             ak=ak or self.volcengine_access_key,
@@ -403,10 +482,12 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         DELETE_COLLECTION_PATH = "/api/knowledge/collection/delete"
 
         response = self._do_request(
-            body={
-                "name": self.index,
-                "project": self.volcengine_project,
-            },
+            body=self._with_resource_id(
+                {
+                    "name": self.index,
+                    "project": self.volcengine_project,
+                }
+            ),
             path=DELETE_COLLECTION_PATH,
             method="POST",
         )
@@ -419,11 +500,13 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
     def delete_doc_by_id(self, id: str) -> bool:
         DELETE_DOC_PATH = "/api/knowledge/doc/delete"
         response = self._do_request(
-            body={
-                "collection_name": self.index,
-                "project": self.volcengine_project,
-                "doc_id": id,
-            },
+            body=self._with_resource_id(
+                {
+                    "collection_name": self.index,
+                    "project": self.volcengine_project,
+                    "doc_id": id,
+                }
+            ),
             path=DELETE_DOC_PATH,
             method="POST",
         )
@@ -441,12 +524,14 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         """
         LIST_DOCS_PATH = "/api/knowledge/doc/list"
         response = self._do_request(
-            body={
-                "collection_name": self.index,
-                "project": self.volcengine_project,
-                "offset": offset,
-                "limit": limit,
-            },
+            body=self._with_resource_id(
+                {
+                    "collection_name": self.index,
+                    "project": self.volcengine_project,
+                    "offset": offset,
+                    "limit": limit,
+                }
+            ),
             path=LIST_DOCS_PATH,
             method="POST",
         )
@@ -465,12 +550,14 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         """
         LIST_CHUNKS_PATH = "/api/knowledge/point/list"
         response = self._do_request(
-            body={
-                "collection_name": self.index,
-                "project": self.volcengine_project,
-                "offset": offset,
-                "limit": limit,
-            },
+            body=self._with_resource_id(
+                {
+                    "collection_name": self.index,
+                    "project": self.volcengine_project,
+                    "offset": offset,
+                    "limit": limit,
+                }
+            ),
             path=LIST_CHUNKS_PATH,
             method="POST",
         )
@@ -493,10 +580,12 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
     def collection_status(self):
         COLLECTION_INFO_PATH = "/api/knowledge/collection/info"
         response = self._do_request(
-            body={
-                "name": self.index,
-                "project": self.volcengine_project,
-            },
+            body=self._with_resource_id(
+                {
+                    "name": self.index,
+                    "project": self.volcengine_project,
+                }
+            ),
             path=COLLECTION_INFO_PATH,
             method="POST",
         )
@@ -569,12 +658,14 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         ADD_DOC_PATH = "/api/knowledge/doc/add"
 
         response = self._do_request(
-            body={
-                "collection_name": self.index,
-                "project": self.volcengine_project,
-                "add_type": "tos",
-                "tos_path": tos_url,
-            },
+            body=self._with_resource_id(
+                {
+                    "collection_name": self.index,
+                    "project": self.volcengine_project,
+                    "add_type": "tos",
+                    "tos_path": tos_url,
+                }
+            ),
             path=ADD_DOC_PATH,
             method="POST",
         )
@@ -607,31 +698,54 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
             "chunk_diffusion_count": chunk_diffusion_count,
         }
 
-        ak = None
-        sk = None
-        sts_token = None
-        if not (self.volcengine_access_key and self.volcengine_secret_key):
-            cred = self._set_service_info()
-            ak = cred.access_key_id
-            sk = cred.secret_access_key
-            sts_token = cred.session_token
+        if self.api_key:
+            logger.info(
+                "Search VikingDB knowledgebase using API key auth: "
+                f"collection={self.index}, project={self.volcengine_project}"
+            )
+            body = {
+                "name": self.index,
+                "project": self.volcengine_project,
+                "query": query,
+                "limit": top_k,
+                "dense_weight": 0.5,
+                "post_processing": post_precessing,
+            }
+            if query_param is not None:
+                body["query_param"] = query_param
+            response = self._do_request(
+                body=self._with_resource_id(body),
+                path="/api/knowledge/collection/search_knowledge",
+                method="POST",
+                auth_mode="api_key",
+            )
+            if response.get("code") not in (0, None):
+                raise ValueError(f"Error during knowledge search: {response}")
+            response = response.get("data", response)
+        else:
+            ak, sk, sts_token = self._get_ak_sk_sts()
+            logger.info(
+                "Search VikingDB knowledgebase using AK/SK or IAM auth: "
+                f"collection={self.index}, project={self.volcengine_project}"
+            )
 
-        self._viking_sdk_client = VikingKnowledgeBaseService(
-            host=self.host,
-            ak=ak or self.volcengine_access_key,
-            sk=sk or self.volcengine_secret_key,
-            sts_token=sts_token or self.session_token,
-            scheme=self.schema,
-        )
+            self._viking_sdk_client = VikingKnowledgeBaseService(
+                host=self.host,
+                ak=ak,
+                sk=sk,
+                sts_token=sts_token,
+                scheme=self.schema,
+            )
 
-        response = self._viking_sdk_client.search_knowledge(
-            collection_name=self.index,
-            project=self.volcengine_project,
-            query=query,
-            limit=top_k,
-            query_param=query_param,
-            post_processing=post_precessing,
-        )
+            response = self._viking_sdk_client.search_knowledge(
+                collection_name=self.index,
+                project=self.volcengine_project,
+                query=query,
+                limit=top_k,
+                query_param=query_param,
+                post_processing=post_precessing,
+                resource_id=self.resource_id or None,
+            )
 
         logger.debug(
             f"Search knowledge {self.index} using project {self.volcengine_project} original response: {response}"
@@ -681,40 +795,69 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         cred = get_credential_from_vefaas_iam()
         return cred
 
+    def _get_ak_sk_sts(self) -> tuple[str, str, str]:
+        if self.volcengine_access_key and self.volcengine_secret_key:
+            return (
+                self.volcengine_access_key,
+                self.volcengine_secret_key,
+                self.session_token,
+            )
+        cred = self._set_service_info()
+        return cred.access_key_id, cred.secret_access_key, cred.session_token
+
     def _do_request(
         self,
         body: dict,
         path: str,
         method: Literal["GET", "POST", "PUT", "DELETE"] = "POST",
+        auth_mode: Literal["ak_sk", "api_key"] = "ak_sk",
     ) -> dict:
         full_path = f"{self.base_url}{path}"
 
-        ak = None
-        sk = None
-        sts_token = None
-        if not (self.volcengine_access_key and self.volcengine_secret_key):
-            cred = self._set_service_info()
-            ak = cred.access_key_id
-            sk = cred.secret_access_key
-            sts_token = cred.session_token
-
-        request = build_vikingdb_knowledgebase_request(
-            path=path,
-            volcengine_access_key=ak or self.volcengine_access_key,
-            volcengine_secret_key=sk or self.volcengine_secret_key,
-            session_token=sts_token or self.session_token,
-            method=method,
-            data=body,
-            region=self.region,
-        )
-        response = requests.request(
-            method=method,
-            url=full_path,
-            headers=request.headers,
-            data=request.body,
-        )
+        if auth_mode == "api_key":
+            if not self.api_key:
+                raise ValueError("VikingDB API key is required for API key auth mode.")
+            logger.debug(
+                "VikingDB knowledgebase request uses API key auth: path=%s", path
+            )
+            response = requests.request(
+                method=method,
+                url=full_path,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                data=json.dumps(body),
+            )
+        else:
+            ak, sk, sts_token = self._get_ak_sk_sts()
+            logger.debug(
+                "VikingDB knowledgebase request uses AK/SK or IAM auth: path=%s",
+                path,
+            )
+            request = build_vikingdb_knowledgebase_request(
+                path=path,
+                volcengine_access_key=ak,
+                volcengine_secret_key=sk,
+                session_token=sts_token,
+                method=method,
+                data=body,
+                region=self.region,
+            )
+            response = requests.request(
+                method=method,
+                url=full_path,
+                headers=request.headers,
+                data=request.body,
+            )
         if not response.ok:
             logger.error(
                 f"VikingDBKnowledgeBackend error during request: {response.json()}"
             )
         return response.json()
+
+    def _with_resource_id(self, body: dict) -> dict:
+        if self.resource_id:
+            return {**body, "resource_id": self.resource_id}
+        return body
