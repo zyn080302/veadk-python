@@ -32,6 +32,7 @@ from veadk.cli.studio_artifacts import (
     StudioRuntimeManifest,
     download_studio_artifact,
 )
+from veadk.cli.studio_legacy_bundle import resolve_legacy_bundle_archive
 from veadk.utils.cloud_provider import CloudProvider, normalize_cloud_provider
 
 
@@ -124,6 +125,15 @@ def resolve_studio_managed_agentkit_cli(
                 root / "studio-artifacts" / artifact.sha256 / artifact.filename,
             )
         except (OSError, ValueError) as error:
+            raise StudioCompanionError(str(error)) from error
+    if archive is not None:
+        try:
+            archive = resolve_legacy_bundle_archive(
+                archive,
+                expected_sha256=agentkit_cli_artifact().sha256,
+                cache_root=cache_root,
+            )
+        except ValueError as error:
             raise StudioCompanionError(str(error)) from error
     return resolve_agentkit_cli(archive=archive, cache_root=cache_root)
 

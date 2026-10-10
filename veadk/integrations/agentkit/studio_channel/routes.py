@@ -37,10 +37,12 @@ from veadk.integrations.agentkit.studio_channel.protocol import (
     CatalogSnapshot,
     StudioToolManifest,
     validate_catalog,
+    validate_skills,
 )
 from veadk.integrations.agentkit.studio_channel.tool import (
     StudioRemoteTool,
     bind_studio_tools,
+    bind_studio_skills,
 )
 from veadk.utils.logger import get_logger
 
@@ -199,6 +201,11 @@ class _StudioChannelConnection:
                 run_id=run_id,
             )
             return
+        try:
+            skills = validate_skills(message.get("skills", []))
+        except (TypeError, ValueError):
+            await self._send_error("Invalid Studio Skill snapshots", run_id=run_id)
+            return
         tools = [
             StudioRemoteTool(
                 manifest=manifest,
@@ -215,6 +222,7 @@ class _StudioChannelConnection:
                 request_id=str(message.get("request_id") or ""),
                 payload=payload,
                 tools=tools,
+                skills=skills,
             )
         )
         self.run_tasks[run_id] = task
@@ -226,27 +234,33 @@ class _StudioChannelConnection:
         request_id: str,
         payload: dict[str, Any],
         tools: list[StudioRemoteTool],
+        skills=(),
     ) -> None:
         await self.send(
             {"type": "run.started", "request_id": request_id, "run_id": run_id}
         )
         status = "success"
         try:
-            with bind_studio_tools(tools):
-                async for event in self.run_handler(payload):
-                    await self.send(
-                        {"type": "run.event", "run_id": run_id, "event": event}
-                    )
+            async with bind_studio_skills(skills):
+                with bind_studio_tools(tools):
+                    async for event in self.run_handler(payload):
+                        await self.send(
+                            {"type": "run.event", "run_id": run_id, "event": event}
+                        )
         except asyncio.CancelledError:
             status = "cancelled"
         except Exception as error:  # noqa: BLE001 - runtime boundary
             status = "error"
-            logger.exception("Studio channel run failed run_id=%s", run_id)
+            logger.error(
+                "Studio channel run failed run_id=%s error_type=%s",
+                run_id,
+                type(error).__name__,
+            )
             await self.send(
                 {
                     "type": "run.event",
                     "run_id": run_id,
-                    "event": {"error": str(error)},
+                    "event": {"error": "Studio channel run failed"},
                 }
             )
         finally:
@@ -350,6 +364,8 @@ def mount_studio_channel_routes(
             "enabled": enabled,
             "protocol": PROTOCOL_VERSION,
             "transports": ["websocket", "http-sse"] if enabled else [],
+            "skills": enabled,
+            "long_running_tools": enabled,
         }
 
     _promote_endpoints(studio_tool_channel_capabilities)
@@ -458,6 +474,7 @@ def mount_studio_channel_routes(
                     "scope_id": scope_id,
                     "catalog_revision": revision,
                     "payload": body.get("payload"),
+                    "skills": body.get("skills", []),
                 }
             )
             if str(body.get("run_id") or "") not in connection.run_tasks:

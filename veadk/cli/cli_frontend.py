@@ -419,14 +419,17 @@ def _filter_harness_runtime_environment(
     runtime_envs: Mapping[str, str],
     *,
     preserve_disabled_contract: bool,
+    preserve_application_identity: bool = False,
 ) -> dict[str, str]:
-    """Clear platform-owned Harness state, retaining only a proven disable contract."""
+    """Clear Sidecar state without losing a retained application's identity."""
 
     filtered = {
         key: value
         for key, value in runtime_envs.items()
         if not key.startswith("HARNESS_")
     }
+    if preserve_application_identity and "HARNESS_NAME" in runtime_envs:
+        filtered["HARNESS_NAME"] = runtime_envs["HARNESS_NAME"]
     if not preserve_disabled_contract:
         return filtered
 
@@ -7522,6 +7525,7 @@ def _run_frontend_server(
         source_preserving_source_image = ""
         source_preserving_mcp_secrets: dict[str, str] = {}
         source_preserving_mcp_owner = "application"
+        source_preserving_mcp_bootstrap = False
         update_identity_snapshot: tuple[Any, ...] | None = None
         requested_base_version: int | None = None
 
@@ -7779,6 +7783,14 @@ def _run_frontend_server(
                                 ),
                             )
                         )
+                        source_preserving_mcp_bootstrap = (
+                            source_preserving_mcp_owner == "application"
+                            and published_environment.get("VEADK_STUDIO_ENABLED", "")
+                            .strip()
+                            .casefold()
+                            in {"true", "1"}
+                            and "MCP_SERVERS_JSON" in published_environment
+                        )
                         if source_preserving_mcp_owner == "platform":
                             if (
                                 mcp_changed
@@ -7816,6 +7828,7 @@ def _run_frontend_server(
                                 application_mcp=(
                                     source_preserving_mcp_owner == "application"
                                 ),
+                                application_mcp_bootstrap=source_preserving_mcp_bootstrap,
                             )
                         )
                     except LegacyRecoveryError as error:
@@ -8266,7 +8279,10 @@ def _run_frontend_server(
                 key = str(getattr(item, "key", "") or "").strip()
                 if (
                     key
-                    and key not in _RESERVED_RUNTIME_ENV_KEYS
+                    and (
+                        key not in _RESERVED_RUNTIME_ENV_KEYS
+                        or (source_preserving_requested and key == "PYTHONPATH")
+                    )
                     and key not in requested_remove_runtime_env_keys
                 ):
                     runtime_envs[key] = str(getattr(item, "value", "") or "")
@@ -8284,6 +8300,13 @@ def _run_frontend_server(
                     status_code=409,
                     detail="保留源码更新快照不可用，请重新打开智能体详情。",
                 )
+            from veadk.cli.legacy_runtime_recovery import (
+                source_preserving_runtime_environment,
+            )
+
+            runtime_envs = source_preserving_runtime_environment(
+                runtime_envs, overlay_files=files
+            )
             if source_preserving_mcp_owner != "platform":
                 for key in (
                     "MCP_SERVERS_JSON",
@@ -8292,7 +8315,10 @@ def _run_frontend_server(
                     *mcp_auth_environment_keys(published_draft),
                 ):
                     runtime_envs.pop(key, None)
-            if source_preserving_mcp_owner == "sidecar":
+            if (
+                source_preserving_mcp_owner == "sidecar"
+                or source_preserving_mcp_bootstrap
+            ):
                 try:
                     runtime_envs["MCP_SERVERS_JSON"] = build_sidecar_mcp_servers_json(
                         draft=source_preserving_draft,
@@ -8300,7 +8326,7 @@ def _run_frontend_server(
                     )
                 except LegacyRecoveryError as error:
                     logger.info(
-                        "source-preserving Sidecar MCP update rejected "
+                        "source-preserving MCP bootstrap update rejected "
                         "runtime_id=%s region=%s code=%s",
                         runtime_id,
                         region,
@@ -8310,7 +8336,7 @@ def _run_frontend_server(
                         status_code=409,
                         detail=_mcp_deployment_error_detail(error.code),
                     ) from error
-            elif source_preserving_mcp_owner == "application":
+            if source_preserving_mcp_owner == "application":
                 runtime_envs.update(source_preserving_mcp_secrets)
         elif sidecar_mcp_enabled:
             if canonical_requested_draft is None:
@@ -8443,6 +8469,7 @@ def _run_frontend_server(
         }
         runtime_envs = _filter_harness_runtime_environment(
             runtime_envs,
+            preserve_application_identity=source_preserving_requested,
             preserve_disabled_contract=(
                 existing_runtime is not None
                 and source_preserving_requested
@@ -14381,6 +14408,7 @@ def _run_frontend_server(
         selected_skills: list[dict[str, Any]],
         mcp_tools: list[dict[str, Any]],
         root: bool,
+        overlay_mcp: Mapping[str, list[dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         agent_type = str(node.get("type") or "llm")
         if agent_type not in {"llm", "sequential", "parallel", "loop", "a2a"}:
@@ -14388,7 +14416,7 @@ def _run_frontend_server(
         raw_children = node.get("children")
         children: list[Any] = raw_children if isinstance(raw_children, list) else []
         return {
-            "name": str(node.get("name") or "legacy-agent"),
+            "name": str(node.get("id") or node.get("name") or "legacy-agent"),
             "description": str(node.get("description") or ""),
             "instruction": str(node.get("instruction") or ""),
             "agentType": agent_type,
@@ -14396,13 +14424,18 @@ def _run_frontend_server(
             "modelName": str(node.get("model") or ""),
             "skills": [item["name"] for item in selected_skills] if root else [],
             "selectedSkills": selected_skills if root else [],
-            "mcpTools": mcp_tools if root else [],
+            "mcpTools": (
+                overlay_mcp[str(node.get("id") or node.get("name") or "legacy-agent")]
+                if overlay_mcp is not None
+                else (mcp_tools if root else [])
+            ),
             "subAgents": [
                 _legacy_draft_node(
                     child,
                     selected_skills=[],
                     mcp_tools=[],
                     root=False,
+                    overlay_mcp=overlay_mcp,
                 )
                 for child in children
                 if isinstance(child, Mapping)
@@ -14519,7 +14552,28 @@ def _run_frontend_server(
         region: str,
     ) -> tuple[dict[str, Any], str, str]:
         environment = _legacy_runtime_environment(runtime)
-        mcp, _secret_values = _legacy_mcp_state(runtime, region)
+        overlay_mcp = None
+        if environment.get("VEADK_STUDIO_SKILL_OVERLAY") or "sourceOverlay" in agent:
+            from veadk.integrations.agentkit.source_overlay import (
+                validate_source_overlay,
+            )
+
+            try:
+                overlay_mcp = validate_source_overlay(agent.get("sourceOverlay"))
+            except (ValueError, TypeError, RecursionError):
+                raise LegacyRecoveryError(
+                    "legacy_overlay_snapshot_unavailable"
+                ) from None
+            if (
+                not overlay_mcp
+                and not str(getattr(runtime, "mcp_toolset_id", "") or "").strip()
+                and _legacy_harness_intent(environment) is None
+            ):
+                raise LegacyRecoveryError("legacy_overlay_snapshot_incomplete")
+        mcp_tools = []
+        if not overlay_mcp:
+            mcp, _secret_values = _legacy_mcp_state(runtime, region)
+            mcp_tools = [dict(item) for item in mcp.tools]
         raw_skill_entries = agent.get("skills")
         raw_skills: list[Any] = (
             raw_skill_entries if isinstance(raw_skill_entries, list) else []
@@ -14544,11 +14598,34 @@ def _run_frontend_server(
         graph: Mapping[str, Any] = (
             raw_graph if isinstance(raw_graph, Mapping) else agent
         )
+        if overlay_mcp:
+            pending, names = [graph], set()
+            while pending:
+                node = pending.pop()
+                name = str(node.get("id") or node.get("name") or "legacy-agent")
+                if name in names or len(names) >= 128:
+                    raise LegacyRecoveryError("legacy_overlay_agent_identity_invalid")
+                names.add(name)
+                children = node.get("children") or []
+                if not isinstance(children, list) or any(
+                    not isinstance(child, Mapping) for child in children
+                ):
+                    raise LegacyRecoveryError("legacy_overlay_agent_identity_invalid")
+                pending.extend(children)
+            if names != set(overlay_mcp):
+                raise LegacyRecoveryError("legacy_overlay_agent_identity_invalid")
+            if any(
+                item["authTokenEnv"] and not environment.get(item["authTokenEnv"])
+                for entries in overlay_mcp.values()
+                for item in entries
+            ):
+                raise LegacyRecoveryError("legacy_overlay_mcp_credential_missing")
         draft = _legacy_draft_node(
             graph,
             selected_skills=selected_skills,
-            mcp_tools=[dict(item) for item in mcp.tools],
+            mcp_tools=mcp_tools,
             root=True,
+            overlay_mcp=overlay_mcp or None,
         )
         draft["deployment"] = {
             "envValues": {
@@ -14990,6 +15067,16 @@ def _run_frontend_server(
                 reason_code="runtime_agent_info_invalid",
             )
 
+        # An image overlay is authoritative even when an old host exposes a
+        # standard draft. Missing overlay metadata must never enable regeneration.
+        if (
+            _legacy_runtime_environment(runtime).get("VEADK_STUDIO_SKILL_OVERLAY")
+            and "sourceOverlay" not in agent
+        ):
+            agent = {
+                **agent,
+                "sourceOverlay": {"schemaVersion": 1, "status": "unavailable"},
+            }
         fallback_draft: Any = None
         fallback_available = False
         if agent.get("draft") is None:

@@ -19,7 +19,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+from pathlib import PurePosixPath
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -45,6 +46,7 @@ class StudioToolManifest(BaseModel):
     input_schema: dict[str, Any]
     executor_revision: str = Field(min_length=1, max_length=128)
     timeout_ms: int = Field(default=30_000, ge=1, le=MAX_TOOL_TIMEOUT_MS)
+    long_running: Literal[True] | None = None
     idempotent: bool = False
     risk_level: str = Field(default="low", pattern=r"^(low|medium|high)$")
 
@@ -78,9 +80,11 @@ def catalog_revision(tools: list[dict[str, Any]] | list[StudioToolManifest]) -> 
     """Return a stable content revision for a complete tool catalog."""
 
     manifests = [
-        item.model_dump(mode="json")
+        item.model_dump(mode="json", exclude_none=True)
         if isinstance(item, StudioToolManifest)
-        else StudioToolManifest.model_validate(item).model_dump(mode="json")
+        else StudioToolManifest.model_validate(item).model_dump(
+            mode="json", exclude_none=True
+        )
         for item in tools
     ]
     manifests.sort(key=lambda item: item["name"])
@@ -126,3 +130,41 @@ def validate_catalog(
     if revision != expected_revision:
         raise ValueError("catalog revision does not match its tool manifests")
     return CatalogSnapshot(scope_id=scope_id, revision=revision, tools=tools)
+
+
+class StudioSkillManifest(BaseModel):
+    """Text-only verified snapshot from the Studio producer; no executable hooks."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    name: str = Field(pattern=r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$", max_length=64)
+    description: str = Field(min_length=1, max_length=1024)
+    instructions: str = Field(min_length=1, max_length=256 * 1024)
+    references: dict[str, str] = Field(default_factory=dict)
+    assets: dict[str, str] = Field(default_factory=dict)
+    scripts: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("references", "assets", "scripts")
+    @classmethod
+    def validate_paths(cls, values):
+        for name in values:
+            path = PurePosixPath(name)
+            if (
+                not name
+                or path.is_absolute()
+                or ".." in path.parts
+                or "\\" in name
+                or "\0" in name
+            ):
+                raise ValueError("Invalid Skill resource path")
+        return values
+
+
+def validate_skills(raw: object) -> tuple[StudioSkillManifest, ...]:
+    if not isinstance(raw, list) or len(raw) > 16:
+        raise ValueError("Invalid Studio Skill snapshot count")
+    if len(json.dumps(raw, ensure_ascii=False).encode()) > MAX_CATALOG_BYTES:
+        raise ValueError("Studio Skill snapshots exceed the size limit")
+    result = tuple(StudioSkillManifest.model_validate(item) for item in raw)
+    if len({skill.name for skill in result}) != len(result):
+        raise ValueError("Duplicate Studio Skill names")
+    return result

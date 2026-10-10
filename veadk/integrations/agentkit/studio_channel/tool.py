@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Protocol
 
@@ -66,8 +66,18 @@ class StudioExternalToolset(BaseToolset):
         self,
         readonly_context: ReadonlyContext | None = None,
     ) -> list[BaseTool]:
-        del readonly_context
-        return list(_current_studio_tools.get())
+        tools = list(_current_studio_tools.get())
+        skills = _current_studio_skills.get()
+        if skills is not None:
+            tools.extend(await skills.get_tools_with_prefix(readonly_context))
+        return tools
+
+    async def process_llm_request(self, *, tool_context, llm_request):
+        skills = _current_studio_skills.get()
+        if skills is not None:
+            await skills.process_llm_request(
+                tool_context=tool_context, llm_request=llm_request
+            )
 
 
 @contextmanager
@@ -95,6 +105,7 @@ class StudioRemoteTool(BaseTool):
     ) -> None:
         super().__init__(
             name=manifest.name,
+            is_long_running=manifest.long_running is True,
             description=manifest.description,
             custom_metadata={
                 "studio_catalog_revision": catalog_revision,
@@ -141,3 +152,47 @@ class StudioRemoteTool(BaseTool):
             # Studio for the detailed codex_activity rendering.
             tool_context.actions.skip_summarization = True
         return result
+
+
+_current_studio_skills: ContextVar[Any] = ContextVar(
+    "veadk_studio_skills", default=None
+)
+
+
+@asynccontextmanager
+async def bind_studio_skills(manifests):
+    from google.adk.skills.models import Frontmatter, Resources, Script, Skill
+    from google.adk.tools.skill_toolset import SkillToolset
+
+    toolset = (
+        SkillToolset(
+            skills=[
+                Skill(
+                    frontmatter=Frontmatter(
+                        name=item.name, description=item.description
+                    ),
+                    instructions=item.instructions,
+                    resources=Resources(
+                        references=dict(item.references),
+                        assets=dict(item.assets),
+                        scripts={
+                            name: Script(src=value)
+                            for name, value in item.scripts.items()
+                        },
+                    ),
+                )
+                for item in manifests
+            ],
+            tool_name_prefix="studio",
+            tool_filter=["list_skills", "load_skill", "load_skill_resource"],
+        )
+        if manifests
+        else None
+    )
+    token = _current_studio_skills.set(toolset)
+    try:
+        yield
+    finally:
+        _current_studio_skills.reset(token)
+        if toolset is not None:
+            await toolset.close()

@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import gzip
 import importlib.util
 import json
 import os
@@ -761,7 +763,9 @@ def validate_studio_wheel(wheel: Path, source_root: Path) -> None:
         )
 
 
-def validate_studio_agentkit_cli_archive(artifacts: list[Path]) -> Path:
+def validate_studio_agentkit_cli_archive(
+    artifacts: list[Path], *, expected_sha256: str | None = None
+) -> Path:
     """Require the exact pinned Linux/x64 native CLI archive."""
 
     candidates = [path for path in artifacts if path.name == _AGENTKIT_CLI_ARCHIVE]
@@ -776,7 +780,9 @@ def validate_studio_agentkit_cli_archive(artifacts: list[Path]) -> Path:
         raise StudioPublisherError(
             "The Studio release AgentKit CLI archive is unavailable."
         ) from error
-    if digest != _AGENTKIT_CLI_ARCHIVE_SHA256:
+    if digest != (
+        _AGENTKIT_CLI_ARCHIVE_SHA256 if expected_sha256 is None else expected_sha256
+    ):
         raise StudioPublisherError(
             "The Studio release AgentKit CLI archive checksum is invalid."
         )
@@ -832,8 +838,86 @@ def ensure_studio_bundle_agentkit_cli(
         )
 
 
-def validate_studio_bundle_dependencies(package_dir: Path) -> Path:
-    """Validate the local VeADK/CLI dependency pair in an extracted bundle."""
+def _target_agentkit_cli_sha256(wheel: Path) -> str:
+    """Read the target wheel's literal Linux/x64 pin without executing its code.
+
+    The updater verifies the outer bundle against its release manifest
+    before extraction. A running Studio's own CLI pin cannot constrain future
+    releases; the target wheel and CLI must instead agree with each other.
+    """
+    message = "Studio target VeADK AgentKit CLI contract is invalid."
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            members = [
+                item
+                for item in archive.infolist()
+                if item.filename == "veadk/cli/agentkit_cli.py"
+            ]
+            if len(members) != 1 or members[0].file_size > 256 * 1024:
+                raise StudioPublisherError(message)
+            source = ast.parse(archive.read(members[0]))
+    except (OSError, ValueError, SyntaxError, zipfile.BadZipFile) as error:
+        raise StudioPublisherError(message) from error
+    assignments = [
+        node.value
+        for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "AGENTKIT_CLI_ARTIFACTS"
+            for target in node.targets
+        )
+    ]
+    if len(assignments) != 1 or not isinstance(assignments[0], ast.Dict):
+        raise StudioPublisherError(message)
+    artifacts = assignments[0]
+    if any(
+        not isinstance(key, ast.Constant) or not isinstance(key.value, str)
+        for key in artifacts.keys
+    ):
+        raise StudioPublisherError(message)
+    candidates = [
+        value
+        for key, value in zip(artifacts.keys, artifacts.values)
+        if isinstance(key, ast.Constant) and key.value == "linux-x64"
+    ]
+    if len(candidates) != 1 or not isinstance(candidates[0], ast.Call):
+        raise StudioPublisherError(message)
+    artifact = candidates[0]
+    if (
+        not isinstance(artifact.func, ast.Name)
+        or artifact.func.id != "AgentKitCliArtifact"
+        or artifact.args
+        or any(keyword.arg is None for keyword in artifact.keywords)
+    ):
+        raise StudioPublisherError(message)
+    fields = {keyword.arg: keyword.value for keyword in artifact.keywords}
+    if len(fields) != len(artifact.keywords):
+        raise StudioPublisherError(message)
+    for name, expected in (
+        ("platform_key", "linux-x64"),
+        ("filename", _AGENTKIT_CLI_ARCHIVE),
+    ):
+        value = fields.get(name)
+        if not isinstance(value, ast.Constant) or value.value != expected:
+            raise StudioPublisherError(message)
+    digest = fields.get("sha256")
+    if (
+        not isinstance(digest, ast.Constant)
+        or not isinstance(digest.value, str)
+        or not _SHA256_PATTERN.fullmatch(digest.value)
+    ):
+        raise StudioPublisherError(message)
+    return digest.value
+
+
+def validate_studio_bundle_dependencies(
+    package_dir: Path, *, use_target_cli_pin: bool = False
+) -> Path:
+    """Validate the local VeADK/CLI dependency pair in an extracted bundle.
+
+    Only consumers of a manifest-verified release may use the target wheel's
+    CLI pin. Build callers retain the publisher's fixed source pin by default.
+    """
     requirements_path = package_dir / "requirements.txt"
     try:
         lines = requirements_path.read_text(encoding="utf-8").splitlines()
@@ -859,6 +943,9 @@ def validate_studio_bundle_dependencies(package_dir: Path) -> Path:
             and item.filename.startswith(("veadk_python-", "veadk-python-"))
         ]
         local_veadk_wheels = sorted(package_dir.glob("veadk*.whl"))
+        expected_cli_sha256 = _AGENTKIT_CLI_ARCHIVE_SHA256
+        if use_target_cli_pin and len(local_veadk_wheels) == 1:
+            expected_cli_sha256 = _target_agentkit_cli_sha256(local_veadk_wheels[0])
         expected_requirements = runtime_manifest.remote_requirements()
         if len(local_veadk_wheels) == 1:
             local_veadk = local_veadk_wheels[0]
@@ -884,7 +971,7 @@ def validate_studio_bundle_dependencies(package_dir: Path) -> Path:
             )
         if (
             cli_artifact.filename != _AGENTKIT_CLI_ARCHIVE
-            or cli_artifact.sha256 != _AGENTKIT_CLI_ARCHIVE_SHA256
+            or cli_artifact.sha256 != expected_cli_sha256
             or remote_veadk_wheels
             or len(local_veadk_wheels) != 1
             or requirements_path.read_text(encoding="utf-8") != expected_requirements
@@ -942,7 +1029,104 @@ def validate_studio_bundle_dependencies(package_dir: Path) -> Path:
         raise StudioPublisherError(
             "Studio full release dependency contract is invalid."
         )
-    return validate_studio_agentkit_cli_archive(list(package_dir.iterdir()))
+    from veadk.cli.studio_legacy_bundle import resolve_legacy_bundle_archive
+
+    expected_cli_sha256 = (
+        _target_agentkit_cli_sha256(veadk_wheels[0])
+        if use_target_cli_pin
+        else _AGENTKIT_CLI_ARCHIVE_SHA256
+    )
+    if not (package_dir / _AGENTKIT_CLI_ARCHIVE).exists():
+        raise StudioPublisherError(
+            "The Studio release must contain the pinned AgentKit CLI archive."
+        )
+    try:
+        cli_archive = resolve_legacy_bundle_archive(
+            package_dir / _AGENTKIT_CLI_ARCHIVE,
+            expected_sha256=expected_cli_sha256,
+        )
+    except ValueError as error:
+        raise StudioPublisherError(str(error)) from error
+    return validate_studio_agentkit_cli_archive(
+        [cli_archive], expected_sha256=expected_cli_sha256
+    )
+
+
+def stage_legacy_studio_bundle(
+    package_dir: Path,
+    *,
+    legacy_cli_version: str,
+    legacy_archive: Path,
+    target_delta: Path | None = None,
+) -> None:
+    """Wrap a validated full package for one historical updater's native pin.
+
+    This changes only an isolated package under construction, never a release
+    pointer or an installed updater. The current VeADK and its runtime CLI stay
+    paired; the historical archive authenticates the transport for old readers.
+    """
+    from veadk.cli.studio_legacy_bundle import (
+        LEGACY_BUNDLE_DESCRIPTOR,
+        LEGACY_CLI_SHA256,
+        TARGET_CLI_DIRECTORY,
+    )
+
+    descriptor = package_dir / LEGACY_BUNDLE_DESCRIPTOR
+    target_dir = package_dir / TARGET_CLI_DIRECTORY
+    expected_legacy = LEGACY_CLI_SHA256.get(legacy_cli_version)
+    if (
+        expected_legacy is None
+        or descriptor.exists()
+        or descriptor.is_symlink()
+        or target_dir.exists()
+        or target_dir.is_symlink()
+        or (package_dir / _STUDIO_RUNTIME_MANIFEST).exists()
+        or legacy_archive.is_symlink()
+        or not legacy_archive.is_file()
+        or _sha256_file(legacy_archive) != expected_legacy
+    ):
+        raise StudioPublisherError("Studio legacy bundle input is invalid.")
+    original = validate_studio_bundle_dependencies(package_dir)
+    contract: dict[str, Any] = {
+        "formatVersion": 1,
+        "legacyCliVersion": legacy_cli_version,
+        "targetCliSha256": _AGENTKIT_CLI_ARCHIVE_SHA256,
+    }
+    if target_delta is not None:
+        from veadk.cli.studio_cli_delta import MAX_CLI_ARCHIVE_BYTES, MAX_CLI_TAR_BYTES
+
+        if (
+            target_delta.is_symlink()
+            or not target_delta.is_file()
+            or target_delta.stat().st_size > MAX_CLI_ARCHIVE_BYTES
+        ):
+            raise StudioPublisherError("Studio legacy delta input is invalid.")
+        with gzip.open(original, "rb") as stream:
+            target_tar = stream.read(MAX_CLI_TAR_BYTES + 1)
+        if len(target_tar) > MAX_CLI_TAR_BYTES:
+            raise StudioPublisherError("Studio legacy delta target is too large.")
+        contract.update(
+            {
+                "formatVersion": 2,
+                "targetCliSize": original.stat().st_size,
+                "targetTarSize": len(target_tar),
+                "targetTarSha256": hashlib.sha256(target_tar).hexdigest(),
+                "deltaSha256": _sha256_file(target_delta),
+            }
+        )
+    target_dir.mkdir()
+    if target_delta is None:
+        original.replace(target_dir / _AGENTKIT_CLI_ARCHIVE)
+    else:
+        shutil.copyfile(target_delta, target_dir / "agentkit-tar.bsdiff")
+    shutil.copyfile(legacy_archive, package_dir / _AGENTKIT_CLI_ARCHIVE)
+    (package_dir / _AGENTKIT_CLI_ARCHIVE).chmod(0o644)
+    descriptor.write_text(
+        json.dumps(contract) + "\n",
+        encoding="utf-8",
+    )
+    descriptor.chmod(0o644)
+    validate_studio_bundle_dependencies(package_dir)
 
 
 def _build_local_requirements(

@@ -29,6 +29,12 @@ on:
   pull_request:
     paths:
       - '.github/workflows/publish-studio-release.yaml'
+      - 'tests/cli/test_studio_update_cli_contract.py'
+      - 'tests/cli/test_studio_guided_release.py'
+      - 'tests/cli/test_studio_legacy_bundle.py'
+      - 'tests/cli/test_studio_cli_delta.py'
+      - 'tests/cli/test_studio_historical_consumers.py'
+      - 'tests/cli/fixtures/**'
       - 'frontend/**'
       - 'veadk/**'
       - 'pyproject.toml'
@@ -61,6 +67,7 @@ jobs:
       UV_DEFAULT_INDEX: https://pypi.org/simple
       npm_config_registry: https://registry.npmjs.org
       npm_config_replace_registry_host: always
+      STUDIO_HISTORY_CLI_DIR: ${{ runner.temp }}/studio-history-cli
 
     steps:
       - name: Check out release source
@@ -102,6 +109,24 @@ jobs:
 
       - name: Validate frozen Studio runtime lock
         run: uv lock --check
+
+      - name: Validate cross-version Studio update contracts
+        run: >-
+          uv run --frozen --group dev python -m pytest -q
+          tests/cli/test_studio_update_cli_contract.py
+          tests/cli/test_studio_guided_release.py
+          tests/cli/test_studio_legacy_bundle.py
+          tests/cli/test_studio_cli_delta.py
+
+      - name: Prepare pinned historical CLI archives
+        run: >-
+          uv run --frozen --group dev python -m
+          tests.cli.fixtures.prepare_studio_history "$STUDIO_HISTORY_CLI_DIR"
+
+      - name: Validate original historical Studio consumers
+        run: >-
+          uv run --frozen --group dev python -m pytest -q
+          tests/cli/test_studio_historical_consumers.py
 
       - name: Build and validate Studio bundle
         run: |

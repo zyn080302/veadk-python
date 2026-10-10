@@ -19,11 +19,19 @@ on:
       - 'tests/cli/test_studio_startup_imports.py'
       - 'tests/frontend/server/studio_tools/test_deferred_veadk_builtin_tools.py'
       - 'tests/frontend/server/test_runtime_iam.py'
+      - 'tests/aiops/**'
+      - 'tests/runtime/codex/**'
+      - 'veadk/runtime/codex/**'
+      - 'veadk/integrations/agentkit/studio_channel/**'
+      - 'tests/integrations/agentkit/test_studio_channel.py'
+      - 'veadk/aiops/**'
       - 'tests/extensions/harness/**'
       - 'tests/integrations/agentkit/test_app.py'
       - 'tests/test_harness_sidecar_release_gate.py'
       - 'tests/test_cloud.py'
       - 'tests/test_studio_release_server.py'
+      - 'tests/cli/test_studio_update_cli_contract.py'
+      - 'tests/cli/test_studio_guided_release.py'
       - 'tests/test_studio_release_workflow.py'
       - 'veadk/cli/generated_agent_codegen.py'
       - 'veadk/cli/generated_agent_mcp.py'
@@ -39,6 +47,8 @@ on:
       - 'veadk/integrations/ve_faas/ve_faas.py'
       - 'veadk/extensions/harness/**'
       - 'veadk/integrations/agentkit/app.py'
+      - 'veadk/cli/runtime_update_recovery.py'
+      - 'veadk/integrations/agentkit/source_overlay.py'
       - 'pyproject.toml'
   pull_request:
     paths:
@@ -57,11 +67,19 @@ on:
       - 'tests/cli/test_studio_startup_imports.py'
       - 'tests/frontend/server/studio_tools/test_deferred_veadk_builtin_tools.py'
       - 'tests/frontend/server/test_runtime_iam.py'
+      - 'tests/aiops/**'
+      - 'tests/runtime/codex/**'
+      - 'veadk/runtime/codex/**'
+      - 'veadk/integrations/agentkit/studio_channel/**'
+      - 'tests/integrations/agentkit/test_studio_channel.py'
+      - 'veadk/aiops/**'
       - 'tests/extensions/harness/**'
       - 'tests/integrations/agentkit/test_app.py'
       - 'tests/test_harness_sidecar_release_gate.py'
       - 'tests/test_cloud.py'
       - 'tests/test_studio_release_server.py'
+      - 'tests/cli/test_studio_update_cli_contract.py'
+      - 'tests/cli/test_studio_guided_release.py'
       - 'tests/test_studio_release_workflow.py'
       - 'veadk/cli/generated_agent_codegen.py'
       - 'veadk/cli/generated_agent_mcp.py'
@@ -77,6 +95,8 @@ on:
       - 'veadk/integrations/ve_faas/ve_faas.py'
       - 'veadk/extensions/harness/**'
       - 'veadk/integrations/agentkit/app.py'
+      - 'veadk/cli/runtime_update_recovery.py'
+      - 'veadk/integrations/agentkit/source_overlay.py'
       - 'pyproject.toml'
 
 permissions:
@@ -134,6 +154,15 @@ jobs:
           pids+=("$!")
           (
             python -m pytest -q \
+              tests/aiops \
+              tests/runtime/codex/test_provider_extension.py \
+              tests/integrations/agentkit/test_studio_channel.py \
+              tests/cli/test_legacy_runtime_recovery.py::test_source_overlay_oci_recovery_uses_final_image_selection \
+              tests/cli/test_studio_rbac.py::test_source_preserving_overlay_reopen_keeps_mcp_and_private_source \
+              tests/cli/test_legacy_runtime_recovery.py::test_source_preserving_runtime_environment_activates_packaged_overlay \
+              tests/cli/test_legacy_runtime_recovery.py::test_source_preserving_nonroot_build_uses_readable_immutable_assets \
+              tests/cli/test_legacy_runtime_recovery.py::test_source_preserving_oci_rejects_unsafe_layout \
+              tests/cli/test_legacy_runtime_recovery.py::test_source_preserving_oci_current_revision_excludes_old_resources \
               tests/frontend/server/test_runtime_iam.py \
               tests/cli/test_generated_agent_mcp.py \
               tests/cli/test_studio_a2a_deployment.py \
@@ -154,6 +183,8 @@ jobs:
           pids+=("$!")
           (
             python -m pytest -q \
+              tests/cli/test_studio_update_cli_contract.py \
+              tests/cli/test_studio_guided_release.py \
               tests/test_studio_release_server.py::test_release_server_agentkit_cli_pin_matches_veadk \
               tests/test_studio_release_server.py::test_publisher_repairs_missing_agentkit_cli_before_manifest \
               tests/test_studio_release_server.py::test_release_server_zip_normalizes_runtime_file_permissions \

@@ -19,9 +19,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from veadk.utils.logger import get_logger
 
@@ -63,6 +64,23 @@ class CodexRuntimeConfig(BaseModel):
     (or grant) network access outside ``sandbox="workspace_write"``.
     """
 
+    provider_factory: SkipJsonSchema[Any] = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description=(
+            "Trusted programmatic async-context factory for an invocation-scoped "
+            "Responses provider. Not configurable through serialized settings."
+        ),
+    )
+
+    @field_validator("provider_factory")
+    @classmethod
+    def _validate_provider_factory(cls, value: Any) -> Any:
+        if value is not None and not callable(value):
+            raise ValueError("provider_factory must be a programmatic callable")
+        return value
+
     approval_mode: Literal["deny_all", "auto_review"] = Field(
         default="deny_all",
         description=(
@@ -80,6 +98,10 @@ class CodexRuntimeConfig(BaseModel):
             "Allow network access from the sandbox. Only honoured by "
             "sandbox='workspace_write'; 'read_only' and 'full_access' ignore it."
         ),
+    )
+    shell_enabled: bool = Field(
+        default=True,
+        description="Expose native Codex shell tools; ADK tools are unaffected.",
     )
     workspace_root: str | None = None
     reuse_workspace: bool = False
@@ -116,6 +138,18 @@ class CodexRuntimeConfig(BaseModel):
             "(Codex's own summarization; its `model_auto_compact_token_limit`). "
             "Direct transport only. None keeps Codex's default."
         ),
+    )
+    compact_prompt: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32768,
+        description="Optional native history maintenance instruction; no runtime loop.",
+    )
+    tool_output_token_limit: int | None = Field(
+        default=None,
+        gt=0,
+        le=131072,
+        description="Native stored MCP result budget; None preserves Codex defaults.",
     )
     model_transport: Literal["auto", "direct", "shim"] = Field(
         default="auto",
@@ -187,7 +221,12 @@ class CodexRuntimeConfig(BaseModel):
         """Resolve config from the Agent field with narrow environment fallbacks."""
         configured = getattr(agent, "codex_runtime_config", None)
         if isinstance(configured, cls):
-            config = configured.model_copy(deep=True)
+            config = cls.model_validate(
+                {
+                    **configured.model_dump(),
+                    "provider_factory": configured.provider_factory,
+                }
+            )
         elif isinstance(configured, dict):
             config = cls.model_validate(configured)
         else:
@@ -214,7 +253,13 @@ class CodexRuntimeConfig(BaseModel):
                 "on",
             }
         return (
-            cls.model_validate({**config.model_dump(), **updates})
+            cls.model_validate(
+                {
+                    **config.model_dump(),
+                    **updates,
+                    "provider_factory": config.provider_factory,
+                }
+            )
             if updates
             else config
         )

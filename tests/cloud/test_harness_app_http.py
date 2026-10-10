@@ -88,6 +88,8 @@ def test_harness_app_disables_bff_tool_host_by_default(monkeypatch):
             "enabled": False,
             "protocol": "studio-tool-channel/1",
             "transports": [],
+            "skills": False,
+            "long_running_tools": False,
         }
         assert not any(
             getattr(route, "path", None) == "/harness/studio-channel/v1/http-runs"

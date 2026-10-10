@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
@@ -494,6 +495,8 @@ def test_channel_capability_can_be_advertised_without_enabling_rpc_routes() -> N
         "enabled": False,
         "protocol": PROTOCOL_VERSION,
         "transports": [],
+        "skills": False,
+        "long_running_tools": False,
     }
     assert (
         client.post(
@@ -520,4 +523,102 @@ def test_channel_capability_advertises_supported_transports_when_enabled() -> No
         "enabled": True,
         "protocol": PROTOCOL_VERSION,
         "transports": ["websocket", "http-sse"],
+        "skills": True,
+        "long_running_tools": True,
     }
+
+
+def test_reference_producer_long_running_hash_is_compatible():
+    import hashlib
+    import json
+
+    raw = {**_manifest(), "long_running": True}
+    expected = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                [raw], sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+    )
+    assert catalog_revision([raw]) == expected
+    tool = StudioRemoteTool(
+        manifest=StudioToolManifest.model_validate(raw),
+        dispatcher=None,
+        run_id="run",
+        scope_id="scope",
+        catalog_revision=expected,
+    )
+    assert tool.is_long_running is True
+
+
+@pytest.mark.asyncio
+async def test_http_run_skills_are_readonly_and_scoped():
+    app = FastAPI()
+    observed = []
+
+    async def run(payload):
+        toolset = StudioExternalToolset()
+        tools = await toolset.get_tools()
+        observed.append([tool.name for tool in tools])
+        yield {"author": "fixture", "turnComplete": True}
+
+    mount_studio_channel_routes(app=app, run_handler=run)
+    with TestClient(app) as client:
+        response = client.post(
+            "/harness/studio-channel/v1/http-runs",
+            json={
+                "protocol": PROTOCOL_VERSION,
+                "channel_id": "fixture_channel_123456",
+                "run_id": "run",
+                "scope_id": "scope",
+                "catalog_revision": catalog_revision([]),
+                "tools": [],
+                "skills": [
+                    {
+                        "name": "fixture-method",
+                        "description": "Fixture method",
+                        "instructions": "Read the observation",
+                        "references": {"guide.md": "Fixture guide"},
+                    }
+                ],
+                "payload": {
+                    "app_name": "fixture",
+                    "user_id": "user",
+                    "session_id": "session",
+                    "new_message": {"role": "user", "parts": [{"text": "inspect"}]},
+                    "streaming": True,
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert '"status":"success"' in response.text
+    assert observed == [
+        ["studio_list_skills", "studio_load_skill", "studio_load_skill_resource"]
+    ]
+    assert await StudioExternalToolset().get_tools() == []
+
+
+@pytest.mark.asyncio
+async def test_channel_failure_does_not_echo_exception_payload():
+    from veadk.integrations.agentkit.studio_channel.routes import (
+        _StudioChannelConnection,
+    )
+
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    async def fail(payload):
+        raise ValueError("fixture-private-provider-error")
+        yield
+
+    connection = _StudioChannelConnection(
+        sender=send, run_handler=fail, reserved_tool_names=set()
+    )
+    await connection._execute_run(
+        run_id="run", request_id="request", payload={}, tools=[]
+    )
+    assert messages[-1] == {"type": "run.completed", "run_id": "run", "status": "error"}
+    assert "fixture-private-provider-error" not in json.dumps(messages)

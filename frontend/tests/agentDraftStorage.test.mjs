@@ -6,7 +6,9 @@ import { build } from "esbuild";
 
 const result = await build({
   entryPoints: [
-    fileURLToPath(new URL("../src/create/agentDraftStorage.ts", import.meta.url)),
+    fileURLToPath(
+      new URL("../src/create/agentDraftStorage.ts", import.meta.url),
+    ),
   ],
   bundle: true,
   format: "esm",
@@ -59,12 +61,20 @@ function memoryStorage(initial = {}) {
 test("keeps MCP credentials ephemeral while preserving deployment values", () => {
   const sourceDraft = draft({
     mcpTools: [{ name: "root", transport: "http", authToken: "root-secret" }],
-    deployment: { feishuEnabled: true, envValues: { FEISHU_APP_SECRET: "secret" } },
+    deployment: {
+      feishuEnabled: true,
+      envValues: { FEISHU_APP_SECRET: "secret" },
+    },
     subAgents: [
       draft({
         name: "child",
-        mcpTools: [{ name: "child", transport: "http", authToken: "child-secret" }],
-        deployment: { feishuEnabled: false, envValues: { API_KEY: "child-key" } },
+        mcpTools: [
+          { name: "child", transport: "http", authToken: "child-secret" },
+        ],
+        deployment: {
+          feishuEnabled: false,
+          envValues: { API_KEY: "child-key" },
+        },
       }),
     ],
     workflow: {
@@ -76,7 +86,11 @@ test("keeps MCP credentials ephemeral while preserving deployment values", () =>
           agent: draft({
             name: "workflow_agent",
             mcpTools: [
-              { name: "workflow", transport: "http", authToken: "workflow-secret" },
+              {
+                name: "workflow",
+                transport: "http",
+                authToken: "workflow-secret",
+              },
             ],
           }),
         },
@@ -96,7 +110,10 @@ test("keeps MCP credentials ephemeral while preserving deployment values", () =>
   assert.deepEqual(sanitized.subAgents[0].deployment.envValues, {
     API_KEY: "child-key",
   });
-  assert.equal(sanitized.workflow.nodes[0].agent.mcpTools[0].authToken, undefined);
+  assert.equal(
+    sanitized.workflow.nodes[0].agent.mcpTools[0].authToken,
+    undefined,
+  );
   assert.equal(
     sanitized.workflow.nodes[0].agent.mcpTools[0].authTokenEnv,
     undefined,
@@ -253,7 +270,9 @@ test("writes a versioned user-scoped payload without transient MCP values", () =
     },
   ]);
 
-  const payload = JSON.parse(storage.value(workspaceDraftsKey("alice@example.com")));
+  const payload = JSON.parse(
+    storage.value(workspaceDraftsKey("alice@example.com")),
+  );
   assert.equal(payload.version, 1);
   assert.equal(payload.drafts[0].id, "draft-1");
   assert.equal(payload.drafts[0].draft.mcpTools[0].authToken, undefined);
@@ -414,7 +433,8 @@ test("round-trips every quick-create page field with its Runtime update identity
   const quickDraft = draft({
     name: "research_assistant",
     description: "Researches complex topics and produces cited reports",
-    instruction: "Plan the work, delegate independent research, then synthesize it.",
+    instruction:
+      "Plan the work, delegate independent research, then synthesize it.",
     dynamicAgentDelegation: true,
     cloudProvider: "byteplus",
     modelSource: "custom",
@@ -580,10 +600,7 @@ test("never persists server-managed Ark API key values while retaining selection
   assert.equal(persisted.deployment.modelApiKeyName, "production-key");
   assert.deepEqual(persisted.deployment.envValues, { SAFE_SETTING: "kept" });
   assert.deepEqual(persisted.subAgents[0].deployment.envValues, {});
-  assert.deepEqual(
-    persisted.workflow.nodes[0].agent.deployment.envValues,
-    {},
-  );
+  assert.deepEqual(persisted.workflow.nodes[0].agent.deployment.envValues, {});
 });
 
 test("never persists cross-provider fallback API key values", () => {
@@ -698,3 +715,121 @@ test("reports browser storage write failures with a recovery action", () => {
     /Delete unused drafts or clear this site's storage/,
   );
 });
+
+const authBuild = await build({
+  entryPoints: [
+    fileURLToPath(new URL("../src/create/mcpAuth.ts", import.meta.url)),
+  ],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  write: false,
+});
+const { hydrateMcpCredentialValues, prepareMcpAuth, updateMcpAuthTokenInput } =
+  await import(
+    `data:text/javascript;base64,${Buffer.from(authBuild.outputFiles[0].contents).toString("base64")}`
+  );
+
+for (const scope of ["root", "child", "workflow"]) {
+  test(`refresh retains the published MCP reference after hydration in ${scope}`, () => {
+    const storage = memoryStorage();
+    const owner = draft({
+      name: "published_agent",
+      mcpTools: [
+        {
+          name: "metrics",
+          url: "https://mcp.example.com/metrics",
+          transport: "http",
+          authTokenEnv: "PUBLISHED_METRICS_AUTH_TOKEN",
+          credentialConfigured: true,
+        },
+      ],
+      deployment: {
+        envValues: { PUBLISHED_METRICS_AUTH_TOKEN: "synthetic-hydrated-value" },
+      },
+    });
+    const source =
+      scope === "root"
+        ? owner
+        : scope === "child"
+          ? draft({ subAgents: [owner] })
+          : draft({
+              workflow: {
+                type: "sequential",
+                edges: [],
+                nodes: [{ id: "node", agent: owner }],
+              },
+            });
+    const hydrated = hydrateMcpCredentialValues(source, [
+      {
+        agentName: "published_agent",
+        authTokenEnv: "PUBLISHED_METRICS_AUTH_TOKEN",
+        url: "https://mcp.example.com/metrics",
+        value: "synthetic-hydrated-value",
+      },
+    ]);
+    const select = (value) =>
+      scope === "root"
+        ? value
+        : scope === "child"
+          ? value.subAgents[0]
+          : value.workflow.nodes[0].agent;
+    assert.equal(
+      select(hydrated).mcpTools[0].authToken,
+      "synthetic-hydrated-value",
+    );
+    writeWorkspaceDrafts(storage, "fixture", [
+      { id: "published", updatedAt: 1, draft: hydrated },
+    ]);
+    const loaded = loadWorkspaceDrafts(storage, "fixture")[0].draft;
+    assert.equal(
+      select(loaded).mcpTools[0].authTokenEnv,
+      "PUBLISHED_METRICS_AUTH_TOKEN",
+    );
+    assert.equal(select(loaded).mcpTools[0].credentialConfigured, true);
+    const prepared = prepareMcpAuth(loaded);
+    assert.equal(
+      select(prepared.draft).mcpTools[0].authTokenEnv,
+      "PUBLISHED_METRICS_AUTH_TOKEN",
+    );
+    assert.equal(select(prepared.draft).mcpTools[0].authToken, undefined);
+    assert.deepEqual(prepared.envValues, {});
+    assert.equal(
+      select(loaded).deployment.envValues.PUBLISHED_METRICS_AUTH_TOKEN,
+      undefined,
+    );
+    assert.doesNotMatch(
+      storage.value(workspaceDraftsKey("fixture")),
+      /synthetic-hydrated-value/,
+    );
+    assert.deepEqual(sanitizeAgentDraftForStorage(loaded), loaded);
+    assert.equal(
+      select(hydrated).mcpTools[0].authToken,
+      "synthetic-hydrated-value",
+    );
+  });
+}
+
+for (const value of ["", "synthetic-replacement-value"]) {
+  test(`storage does not restore a configured reference after explicit ${value ? "replacement" : "removal"}`, () => {
+    const configured = {
+      name: "metrics",
+      transport: "http",
+      url: "https://mcp.example.com/metrics",
+      authTokenEnv: "PUBLISHED_METRICS_AUTH_TOKEN",
+      authToken: "synthetic-old-value",
+      credentialConfigured: true,
+    };
+    const edited = updateMcpAuthTokenInput(configured, value);
+    const source = draft({ mcpTools: [edited] });
+    const safe = sanitizeAgentDraftForStorage(source);
+    assert.equal(safe.mcpTools[0].authTokenEnv, undefined);
+    assert.notEqual(safe.mcpTools[0].credentialConfigured, true);
+    assert.equal(safe.mcpTools[0].authToken, undefined);
+    assert.doesNotMatch(
+      JSON.stringify(safe),
+      /synthetic-old-value|synthetic-replacement-value/,
+    );
+  });
+}

@@ -50,6 +50,11 @@ def test_sidecar_release_gate_runs_backend_and_frontend_in_parallel() -> None:
     backend_run = _run_script(backend)
     frontend_run = _run_script(frontend)
     aggregate_run = _run_script(aggregate)
+    assert "tests/aiops" in backend_run
+    assert (
+        "test_source_preserving_runtime_environment_activates_packaged_overlay"
+        in backend_run
+    )
     assert "test_studio_sidecar.py" in backend_run
     assert "tests/cli/test_studio_startup_imports.py" in backend_run
     assert "test_deferred_veadk_builtin_tools.py" in backend_run
@@ -81,6 +86,8 @@ def test_sidecar_release_gate_runs_backend_and_frontend_in_parallel() -> None:
         in (backend_run)
     )
     assert "test_release_server_agentkit_cli_pin_matches_veadk" in backend_run
+    assert "tests/cli/test_studio_update_cli_contract.py" in backend_run
+    assert "tests/cli/test_studio_guided_release.py" in backend_run
     assert "test_smoke_gate_survives_platform_entrypoint_mode_normalization" in (
         backend_run
     )

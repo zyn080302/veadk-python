@@ -436,6 +436,100 @@ class StudioReleaseStore:
             content_type="application/json",
         )
 
+    def publish_guided(
+        self,
+        bundle: Path,
+        manifest: StudioReleaseManifest,
+        *,
+        source_version: str,
+    ) -> None:
+        """Add a verified full bridge without changing normal upgrade defaults.
+
+        Old clients sort the catalog and default to its first entry. Therefore
+        a compatible ordinary release newer than this bridge must already be
+        published. A bridge cannot be promoted using the ordinary publish API.
+        The caller must complete artifact and historical-consumer acceptance
+        before invoking either publication API.
+        """
+        _validate_release_version(source_version)
+        if manifest.runtime_epoch:
+            raise StudioReleaseError("Guided Studio releases must use full bundles.")
+        content = bundle.read_bytes()
+        if (
+            len(content) != manifest.size
+            or hashlib.sha256(content).hexdigest() != manifest.sha256
+        ):
+            raise StudioReleaseError("Studio guided bundle does not match manifest.")
+        latest = self.latest_manifest()
+        catalog_key = release_catalog_object_key(self.prefix)
+        response = self._client.get_object(bucket=self.bucket, key=catalog_key)
+        etag = getattr(response, "etag", "")
+        if not etag:
+            raise StudioReleaseError("Studio guided catalog requires an ETag.")
+        raw = _read_object(response, 1024 * 1024)
+        try:
+            catalog = json.loads(raw)
+            entries = catalog["releases"]
+            if not isinstance(entries, list) or len(entries) > MAX_STUDIO_RELEASES:
+                raise ValueError("invalid releases")
+            releases = [StudioReleaseManifest.from_json(json.dumps(x)) for x in entries]
+        except (KeyError, TypeError, ValueError) as error:
+            raise StudioReleaseError("Studio release catalog is invalid.") from error
+        if (
+            not releases
+            or len({item.version for item in releases}) != len(releases)
+            or max(releases, key=lambda item: item.version) != latest
+            or not source_version < manifest.version < latest.version
+        ):
+            raise StudioReleaseError("Guided release would change upgrade defaults.")
+        matches = [item for item in releases if item.version == manifest.version]
+        if matches and matches != [manifest]:
+            raise StudioReleaseError("Studio release version has a conflict.")
+        if not matches and len(releases) == MAX_STUDIO_RELEASES:
+            raise StudioReleaseError("Guided release would remove existing versions.")
+        # Immutable writes can be reconciled safely after a lost response.
+        self._put_immutable(
+            key=bundle_object_key(self.prefix, manifest.version),
+            content=content,
+            content_type="application/zip",
+        )
+        self._put_immutable(
+            key=manifest_object_key(self.prefix, manifest.version),
+            content=manifest.to_json(),
+            content_type="application/json",
+        )
+        if matches:
+            return
+        if self.latest_manifest() != latest:
+            raise StudioReleaseError(
+                "Studio default changed during guided publication."
+            )
+        # Preserve all existing records, including fields unknown to this reader.
+        catalog["releases"] = sorted(
+            [*entries, json.loads(manifest.to_json())],
+            key=lambda item: str(item["version"]),
+            reverse=True,
+        )
+        updated = (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode()
+        try:
+            self._client.put_object(
+                bucket=self.bucket,
+                key=catalog_key,
+                content=updated,
+                content_type="application/json",
+                if_match=etag,
+            )
+        except Exception as error:
+            if self._get_optional_object(catalog_key, 1024 * 1024) != updated:
+                raise StudioReleaseError(
+                    "Studio guided catalog update failed."
+                ) from error
+        if (
+            self._get_optional_object(catalog_key, 1024 * 1024) != updated
+            or self.latest_manifest() != latest
+        ):
+            raise StudioReleaseError("Studio guided publication verification failed.")
+
     def _get_optional_object(self, key: str, max_bytes: int) -> bytes | None:
         try:
             response = self._client.get_object(bucket=self.bucket, key=key)
