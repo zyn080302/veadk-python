@@ -38,6 +38,11 @@ on:
       - 'veadk/cli/studio_self_update.py'
       - 'veadk/integrations/ve_faas/ve_faas.py'
       - 'veadk/extensions/harness/**'
+      - 'veadk/extensions/aiops/**'
+      - 'veadk/aiops/**'
+      - 'veadk/runtime/codex/**'
+      - 'tests/extensions/aiops/**'
+      - 'tests/runtime/codex/**'
       - 'veadk/integrations/agentkit/app.py'
       - 'pyproject.toml'
   pull_request:
@@ -76,6 +81,11 @@ on:
       - 'veadk/cli/studio_self_update.py'
       - 'veadk/integrations/ve_faas/ve_faas.py'
       - 'veadk/extensions/harness/**'
+      - 'veadk/extensions/aiops/**'
+      - 'veadk/aiops/**'
+      - 'veadk/runtime/codex/**'
+      - 'tests/extensions/aiops/**'
+      - 'tests/runtime/codex/**'
       - 'veadk/integrations/agentkit/app.py'
       - 'pyproject.toml'
 
@@ -100,6 +110,15 @@ jobs:
 
       - name: Install Python test dependencies
         run: python -m pip install -e '.[dev]'
+
+      - name: Verify optional AI OPS and native provider contracts
+        env:
+          PYTHON_DOTENV_DISABLED: '1'
+          OTEL_SDK_DISABLED: 'true'
+          LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+        run: >-
+          python -m pytest -q tests/extensions/aiops
+          tests/runtime/codex/test_provider_extension.py
 
       - name: Run Python Sidecar checks in parallel
         shell: bash

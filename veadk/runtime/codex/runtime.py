@@ -82,6 +82,10 @@ from veadk.runtime.codex.model_provider import pinned_codex_settings
 from veadk.runtime.codex.model_provider import resolve_transport
 from veadk.runtime.codex.model_provider import shim_route
 from veadk.runtime.codex.proxy import get_shim
+from veadk.runtime.codex.provider_extension import (
+    CodexProviderEndpoint,
+    wrap_provider_executors,
+)
 from veadk.runtime.codex.rollout_io import export_rollout
 from veadk.runtime.codex.rollout_io import import_rollout
 from veadk.runtime.codex.skills import sync_skills_to_codex_home
@@ -285,10 +289,37 @@ class CodexRuntime(BaseRuntime):
     async def run_async(
         self, agent: "Agent", ctx: "InvocationContext"
     ) -> AsyncGenerator["Event", None]:
+        """Own an optional provider for precisely the consumer's stream lifetime."""
+        factory = CodexRuntimeConfig.from_agent(agent).provider_factory
+        if factory is None:
+            async with contextlib.aclosing(self._run_async(agent, ctx)) as events:
+                async for event in events:
+                    yield event
+            return
+        async with factory(agent, ctx) as endpoint:
+            if not isinstance(endpoint, CodexProviderEndpoint):
+                raise TypeError("provider_factory must yield CodexProviderEndpoint")
+            async with contextlib.aclosing(
+                self._run_async(agent, ctx, provider_endpoint=endpoint)
+            ) as events:
+                async for event in events:
+                    yield event
+
+    async def _run_async(
+        self,
+        agent: "Agent",
+        ctx: "InvocationContext",
+        *,
+        provider_endpoint: CodexProviderEndpoint | None = None,
+    ) -> AsyncGenerator["Event", None]:
         model = self._resolve_model(agent)
         runtime_config = CodexRuntimeConfig.from_agent(agent)
         api_base = agent.model_api_base or os.getenv("OPENAI_BASE_URL")
         api_key = agent.model_api_key or os.getenv("OPENAI_API_KEY")
+        if provider_endpoint is not None:
+            api_base, api_key = provider_endpoint.api_base, provider_endpoint.api_key
+            if _model_extra_body(agent) and not provider_endpoint.handles_extra_body:
+                raise ValueError("Configured provider does not handle model extra_body")
         if not api_base or not api_key:
             raise ValueError(
                 "codex runtime requires model_api_base and model_api_key "
@@ -299,8 +330,16 @@ class CodexRuntime(BaseRuntime):
         # the agent's ADK tools through the MCP bridge, so Codex owns the tool
         # loop. "shim": the in-process Responses->chat shim sits in between and
         # runs the ADK tools itself, for backends that only speak chat.
-        transport = resolve_transport(runtime_config, api_base)
-        if transport == "direct" and _model_extra_body(agent):
+        transport = (
+            "direct"
+            if provider_endpoint is not None
+            else resolve_transport(runtime_config, api_base)
+        )
+        if (
+            provider_endpoint is None
+            and transport == "direct"
+            and _model_extra_body(agent)
+        ):
             # Codex's provider config has no request-body passthrough, so the
             # direct transport would silently drop `extra_body` (e.g. a
             # thinking switch). Under "auto" keep the shim, which forwards it.
@@ -324,7 +363,11 @@ class CodexRuntime(BaseRuntime):
             shim_route(shim.url or "", "")
             if shim is not None
             else direct_route(
-                api_base, api_key, extra_headers=_model_extra_headers(agent)
+                api_base,
+                api_key,
+                extra_headers=_model_extra_headers(agent)
+                if provider_endpoint is None
+                else None,
             )
         )
         workspace = _prepare_workspace(runtime_config, ctx)
@@ -555,6 +598,9 @@ class CodexRuntime(BaseRuntime):
             bound_executors = bind_workspace_to_executors(
                 tool_bundle.executors, workspace
             )
+            bound_executors = wrap_provider_executors(
+                provider_endpoint, bound_executors
+            )
             if shim is not None:
                 turn_token = shim.register_turn(
                     tool_bundle.specs,
@@ -744,6 +790,12 @@ class CodexRuntime(BaseRuntime):
             if bridge is not None:
                 subprocess_env.update(route.env)
                 direct_config = route.thread_config()
+                for option in ("compact_prompt", "tool_output_token_limit"):
+                    value = getattr(runtime_config, option)
+                    if value is not None:
+                        direct_config[option] = value
+                if not runtime_config.shell_enabled:
+                    direct_config["features"]["shell_tool"] = False
                 if runtime_config.auto_compact_token_limit:
                     direct_config["model_auto_compact_token_limit"] = (
                         runtime_config.auto_compact_token_limit
@@ -1360,7 +1412,14 @@ def _prepare_codex_home(
         "workspace_write": "workspace-write",
         "full_access": "danger-full-access",
     }[runtime_config.sandbox]
-    pinned_scalars, pinned_tables = _toml_settings(pinned_codex_settings())
+    pinned = pinned_codex_settings()
+    if not runtime_config.shell_enabled:
+        pinned["features"]["shell_tool"] = False
+    for option in ("compact_prompt", "tool_output_token_limit"):
+        value = getattr(runtime_config, option)
+        if value is not None:
+            pinned[option] = value
+    pinned_scalars, pinned_tables = _toml_settings(pinned)
     provider_block = "".join(
         f"{key} = {_toml_value(value)}\n"
         for key, value in route.provider_config.items()
