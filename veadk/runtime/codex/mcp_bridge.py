@@ -119,6 +119,7 @@ class _Turn:
     otel_context: Any
     max_tool_iterations: int | None = None
     on_error: Callable[[Exception], Awaitable[None]] | None = None
+    on_interrupt: Callable[[], Awaitable[None]] | None = None
     state: BridgeTurnState = field(default_factory=BridgeTurnState)
     # JSON-RPC request id -> slot, so `notifications/cancelled` can find it.
     slots: dict[str, "_CallSlot"] = field(default_factory=dict)
@@ -251,6 +252,7 @@ class McpBridge:
         otel_context: Any = None,
         max_tool_iterations: int | None = None,
         on_error: Callable[[Exception], Awaitable[None]] | None = None,
+        on_interrupt: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         """Register one turn's tools and return a fresh bearer token for it."""
         tools: list[types.Tool] = []
@@ -273,6 +275,7 @@ class McpBridge:
             otel_context=otel_context,
             max_tool_iterations=max_tool_iterations,
             on_error=on_error,
+            on_interrupt=on_interrupt,
         )
         with self._turns_lock:
             self._turns[_token_key(token)] = turn
@@ -464,6 +467,18 @@ class McpBridge:
                         call_id=call_id, tool=name, status=status, payload=payload
                     )
                 )
+                # A placeholder must not let the native loop race into another
+                # model request while its call is waiting for client input.
+                if turn.on_interrupt is not None:
+                    try:
+                        await turn.on_interrupt()
+                    except Exception as error:
+                        turn.state.errors.append(error)
+                        if turn.on_error is not None:
+                            await turn.on_error(error)
+                        return _text_result(
+                            "Native tool interruption failed.", is_error=True
+                        )
                 _log(status)
                 return _text_result(_interrupt_text(name, status, payload))
             _log(status[:40] if isinstance(status, str) else "completed")

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 
 
 class CodexToolIterationLimitError(RuntimeError):
@@ -87,3 +87,26 @@ class TurnRequests:
                     )
                 )
         await asyncio.gather(*waits)
+
+
+class TurnInterrupt:
+    """Share one native acknowledgement, including failures, across callers."""
+
+    def __init__(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._callback = callback
+        self._lock = asyncio.Lock()
+        self._error: BaseException | None = None
+        self.done = False
+
+    async def __call__(self) -> None:
+        async with self._lock:
+            if self._error is not None:
+                raise self._error
+            if self.done:
+                return
+            try:
+                await self._callback()
+            except BaseException as error:
+                self._error = error
+                raise
+            self.done = True

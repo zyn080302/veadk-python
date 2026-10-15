@@ -69,7 +69,10 @@ from veadk.runtime.agent_transfer import build_transfer_tool
 from veadk.runtime.agent_transfer import get_transfer_targets
 from veadk.runtime.agent_transfer import run_transferred_agent
 from veadk.runtime.agent_transfer import transfer_agent_name
-from veadk.runtime.codex.execution_control import CodexToolIterationLimitError
+from veadk.runtime.codex.execution_control import (
+    CodexToolIterationLimitError,
+    TurnInterrupt,
+)
 from veadk.runtime.codex.config import CodexRuntimeConfig
 from veadk.runtime.codex.config import codex_subprocess_env
 from veadk.runtime.codex.config import toml_string
@@ -391,6 +394,14 @@ class CodexRuntime(BaseRuntime):
         event_queue: asyncio.Queue["Event | BaseException | _QueueSentinel"] = (
             asyncio.Queue()
         )
+
+        async def _interrupt_bridge_turn() -> None:
+            if turn is None:
+                raise RuntimeError("Native turn is not available for interruption")
+            await turn.interrupt()
+
+        bridge_interrupt = TurnInterrupt(_interrupt_bridge_turn)
+
         use_adk_transfer_scheduler = _uses_adk_transfer_scheduler(ctx)
         turn_token: str | None = None
         bridge_token: str | None = None
@@ -619,6 +630,7 @@ class CodexRuntime(BaseRuntime):
                     otel_context=_current_otel_context(),
                     max_tool_iterations=runtime_config.max_tool_iterations,
                     on_error=event_queue.put,
+                    on_interrupt=bridge_interrupt,
                 )
             # Keep privileged instructions out of the user transcript. The SDK
             # exposes a native developer-instruction channel for them.
@@ -1052,7 +1064,6 @@ class CodexRuntime(BaseRuntime):
                 final_text_events: list[Event] = []
                 transfer_requested = False
                 deferred_transfer_event: Event | None = None
-                bridge_interrupted = False
                 while True:
                     queued = await event_queue.get()
                     if queued is _QUEUE_DONE:
@@ -1076,10 +1087,9 @@ class CodexRuntime(BaseRuntime):
                         if (
                             state is not None
                             and state.interrupts
-                            and not bridge_interrupted
+                            and not bridge_interrupt.done
                         ):
-                            bridge_interrupted = True
-                            await _interrupt_quietly(turn, ctx)
+                            await bridge_interrupt()
                         budget_error = _turn_error()
                         if budget_error is not None and direct_turn_error is None:
                             direct_turn_error = budget_error

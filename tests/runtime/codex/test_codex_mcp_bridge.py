@@ -746,3 +746,102 @@ async def test_real_codex_calls_adk_executor_through_bridge() -> None:
     text = json.dumps(outputs[0].get("output"))
     assert "shipped" in text and "A-42" in text
     assert "approval" not in text.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    ["pending", "authentication_required", "confirmation_required", "transferred"],
+)
+async def test_interrupt_is_acknowledged_before_placeholder(bridge, status):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def execute(args, call_id):
+        return json.dumps({"status": status, "call_id": call_id})
+
+    async def interrupt():
+        entered.set()
+        await release.wait()
+
+    token = bridge.register_turn(
+        [_spec("wait")], {"wait": execute}, on_interrupt=interrupt
+    )
+    async with _session(bridge.url, token) as session:
+        call = asyncio.create_task(session.call_tool("wait", {}))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            assert not call.done()
+            assert bridge.turn_state(token).interrupts[0].status == status
+            release.set()
+            result = await asyncio.wait_for(call, 3)
+            assert not result.isError
+        finally:
+            release.set()
+            call.cancel()
+            await asyncio.gather(call, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_failure_is_reported_without_placeholder(bridge):
+    errors = []
+
+    async def execute(args, call_id):
+        return '{"status":"pending"}'
+
+    async def interrupt():
+        raise RuntimeError("synthetic-interrupt-failure")
+
+    async def on_error(error):
+        errors.append(error)
+
+    token = bridge.register_turn(
+        [_spec("wait")],
+        {"wait": execute},
+        on_interrupt=interrupt,
+        on_error=on_error,
+    )
+    async with _session(bridge.url, token) as session:
+        result = await session.call_tool("wait", {})
+    assert result.isError
+    assert len(errors) == 1
+    assert bridge.turn_state(token).errors == errors
+    assert "synthetic-interrupt-failure" not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+async def test_concurrent_interrupts_share_acknowledgement(outcome):
+    from veadk.runtime.codex.execution_control import TurnInterrupt
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def interrupt():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        if outcome == "failure":
+            raise RuntimeError("interrupt rejected")
+        if outcome == "cancel":
+            raise asyncio.CancelledError()
+
+    once = TurnInterrupt(interrupt)
+    tasks = [asyncio.create_task(once()) for _ in range(2)]
+    await asyncio.wait_for(entered.wait(), 3)
+    await asyncio.sleep(0)
+    assert not any(task.done() for task in tasks)
+    assert not once.done
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
+    assert calls == 1
+    assert once.done == (outcome == "success")
+    if outcome == "success":
+        assert results == [None, None]
+        await once()
+        assert calls == 1
+    else:
+        expected = RuntimeError if outcome == "failure" else asyncio.CancelledError
+        assert all(isinstance(result, expected) for result in results)
+        with pytest.raises(expected):
+            await once()
