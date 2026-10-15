@@ -21,6 +21,6 @@ T-1/AC-1：桥接HTTP覆盖所有中断状态的顺序及正常工具不受影�
 ## 验证记录
 2026-10-15：原生客户端工具红测稳定复现额外上游请求。修复后桥接测试 33 passed、1 skipped，覆盖四类等待状态、并发确认、回调失败和取消。下游 Harness 原生测试 15 项通过，包含三协议调用/回执往返且每轮仅一次模型请求、Workflow 恢复与双向 A2A。
 
-`python -m pytest tests -q`：7136 passed、50 skipped、4 xfailed，6 个子测试通过。使用隔离环境并开启遥测，使 tracing/metrics 测试实际初始化；初轮 OTEL_SDK_DISABLED=true 导致 65 项遥测测试失败，纠正环境后 65 项复查和完整重跑均通过。`python -m pytest tests/runtime/codex/test_codex_native_smoke.py -q` 与选定持久化 smoke：12 passed、2 skipped（缺外部数据库配置），已实际启动原生进程。`pre-commit run --all-files` 全部通过，包含依赖策略和密钥检查。
+`python -m pytest tests -q`：7136 passed、50 skipped、4 xfailed，6 个子测试通过。使用隔离环境并开启遥测，使 tracing/metrics 测试实际初始化；初轮 OTEL_SDK_DISABLED=true 导致 65 项遥测测试失败，纠正环境后 65 项复查和完整重跑均通过。`CODEX_RUN_SMOKE=1 python -m pytest tests -m codex_smoke -q` 与选定持久化 smoke：12 passed、2 skipped（缺外部数据库配置），已实际启动原生进程。`pre-commit run --all-files` 全部通过，包含依赖策略和密钥检查。
 
 2026-10-15 已复核本次 execution_control、mcp_bridge、runtime 及回归文件的取消、共享确认、错误脱敏、普通工具兼容和轮次隔离，没有未解决的本地阻塞。云验收与新版公共镜像仍待完成，须单独记录；本地夹具结果不代表云验收。
