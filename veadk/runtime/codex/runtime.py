@@ -377,9 +377,10 @@ class CodexRuntime(BaseRuntime):
         # `$CODEX_HOME/skills/`, where Codex's native skill system discovers
         # them. Best-effort: a skill failure must not abort the turn.
         try:
-            sync_skills_to_codex_home(
-                agent, codex_home, invocation_id=ctx.invocation_id
-            )
+            if runtime_config.shell_enabled:
+                sync_skills_to_codex_home(
+                    agent, codex_home, invocation_id=ctx.invocation_id
+                )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "codex_skill_sync_failed invocation_id=%s error_type=%s",

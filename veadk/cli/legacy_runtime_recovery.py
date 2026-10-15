@@ -218,7 +218,12 @@ def _replace_mcp(root_agent, configuration):
             raise RuntimeError("Studio MCP overlay Agent identity is invalid")
         visited.add(name)
         configured = configuration.get(name)
-        if isinstance(configured, list):
+        handler = getattr(agent, "_veadk_studio_mcp_overlay_handler", None)
+        if isinstance(configured, list) and handler is not None:
+            if not callable(handler):
+                raise RuntimeError("Studio MCP overlay handler is invalid")
+            handler(configured)
+        elif isinstance(configured, list):
             tools = [
                 item
                 for item in list(getattr(agent, "tools", None) or [])

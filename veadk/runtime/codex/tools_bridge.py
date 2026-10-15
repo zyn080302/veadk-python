@@ -91,6 +91,9 @@ async def build_executable_tools(
     from google.adk.tools.base_toolset import BaseToolset
     from google.adk.tools.function_tool import FunctionTool
 
+    from veadk.runtime.codex.config import CodexRuntimeConfig
+
+    native_skills = CodexRuntimeConfig.from_agent(agent).shell_enabled
     bundle = CodexToolBundle()
     readonly = ReadonlyContext(ctx)
 
@@ -122,8 +125,12 @@ async def build_executable_tools(
 
     try:
         for entry in getattr(agent, "tools", None) or []:
-            # Skill toolsets are handled by materializing SKILL.md resources.
-            if type(entry).__name__ in ("SkillToolset", "SkillsToolset"):
+            # Native Skills need shell access to read materialized resources.
+            # Without it, preserve the configured ADK readers and filters.
+            if native_skills and type(entry).__name__ in (
+                "SkillToolset",
+                "SkillsToolset",
+            ):
                 continue
             if isinstance(entry, BaseToolset):
                 try:

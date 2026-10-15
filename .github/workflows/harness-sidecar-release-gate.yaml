@@ -42,6 +42,7 @@ on:
       - 'veadk/aiops/**'
       - 'veadk/runtime/codex/**'
       - 'tests/extensions/aiops/**'
+      - 'tests/aiops/**'
       - 'tests/runtime/codex/**'
       - 'veadk/integrations/agentkit/app.py'
       - 'pyproject.toml'
@@ -85,6 +86,7 @@ on:
       - 'veadk/aiops/**'
       - 'veadk/runtime/codex/**'
       - 'tests/extensions/aiops/**'
+      - 'tests/aiops/**'
       - 'tests/runtime/codex/**'
       - 'veadk/integrations/agentkit/app.py'
       - 'pyproject.toml'
@@ -117,8 +119,9 @@ jobs:
           OTEL_SDK_DISABLED: 'true'
           LITELLM_LOCAL_MODEL_COST_MAP: 'True'
         run: >-
-          python -m pytest -q tests/extensions/aiops
+          python -m pytest -q tests/extensions/aiops tests/aiops
           tests/runtime/codex/test_provider_extension.py
+          tests/runtime/codex/test_codex_runtime.py
 
       - name: Run Python Sidecar checks in parallel
         shell: bash

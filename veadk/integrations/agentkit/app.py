@@ -461,6 +461,11 @@ def _add_introspection_routes(
                 for child in getattr(root_agent, "sub_agents", []) or []
             ],
             "graph": node,
+            **(
+                {"instructionExtension": True}
+                if getattr(root_agent, "_studio_instruction_extension", False) is True
+                else {}
+            ),
             "draft": dict(agent_draft) if agent_draft is not None else None,
         }
 

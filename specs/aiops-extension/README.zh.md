@@ -13,3 +13,9 @@
 例子：AIOpsExtension(config=AgentConfig(name="ops", instruction_source="harness_config")).apply(fresh_agent)。create_app() 返回原生 ADK App，其生命周期由原生宿主管理。扩展不启动 sidecar，不提供没有实际资源可关闭的 close 方法。Core/provider 错误传播，不能转成空成功报告。
 
 验证：tests/extensions/aiops 覆盖 CON-1–3、5；provider 合同/原生测试覆盖 CON-4；实际安装 Core 装配验证真实边界。CI 与执行结果记录在关联变更中，不代表已经云端部署。
+
+- CON-6：Harness 宿主将扩展应用于每次授权配置快照新建的 Agent。模型、工具与 Skill 选择属于该轮调用，会话历史归宿主管理。关闭 shell 的 Codex 使用已配置 ADK Skill 工具；开启 shell 保留原生落盘方式。只读过滤仍由宿主负责。
+
+- CON-7: 保留已发行的 `veadk.aiops.harness` 固定配置适配器与 `veadk.aiops.services` 延迟服务入口，以兼容 Core 源码启动。Managed 模板仍由独立 Harness App Server 承载；这些可选模块不自动加载 Core。
+
+- CON-8：旧Studio overlay遵从显式注册的Agent级MCP处理器，其校验错误必须在就绪前透传；普通Agent仍按默认装配。只有宿主显式设为true时自省接口才返回instructionExtension。两个钩子均不导入Core。

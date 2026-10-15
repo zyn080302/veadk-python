@@ -1055,6 +1055,7 @@ class TestHarnessConfig:
             }
 
         monkeypatch.setenv("MODEL_AGENT_NAME", "env-agent")
+        monkeypatch.setenv("MODEL_AGENT_API_KEY", "test-agent-key")
         monkeypatch.setenv("MCP_ROUTER_ID", "mt-1")
         monkeypatch.setenv("KNOWLEDGEBASE_ID", "kb-id")
         monkeypatch.setenv("LONG_TERM_MEMORY_ID", "memory-id")

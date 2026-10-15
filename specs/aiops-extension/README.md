@@ -13,3 +13,9 @@ Component: aiops-extension. Status: active. Revised: 2026-10-15. Owned code: vea
 Example: AIOpsExtension(config=AgentConfig(name="ops", instruction_source="harness_config")).apply(fresh_agent). create_app() returns the native ADK App; its lifecycle is owned by the native host. The extension starts no sidecar and has no artificial close method. Core/provider errors propagate; errors must not be converted to empty successful reports.
 
 Verification: tests/extensions/aiops covers CON-1–3,5; provider contract/native tests cover CON-4. Installed Core composition verifies the actual boundary. CI and executed results belong to the linked change record; no cloud deployment is implied.
+
+- CON-6: Harness hosts apply the extension to a fresh Agent from each authorized configuration snapshot. Model, tools and Skill selections belong to that invocation; session history remains host-owned. Shell-disabled Codex runs use configured ADK Skill tools, while shell-enabled runs retain native materialization. The host remains responsible for read-only filtering.
+
+- CON-7: Preserve the shipped `veadk.aiops.harness` fixed-configuration adapter and lazy `veadk.aiops.services` facade for Core source startup. Managed templates remain owned by the independent Harness App Server; these optional modules do not auto-load Core.
+
+- CON-8: Legacy Studio overlays honor an explicitly registered per-Agent MCP handler and propagate its validation error before readiness; ordinary Agents keep default assembly. Introspection includes instructionExtension only for an explicit true host marker. Neither hook imports Core.

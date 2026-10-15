@@ -1323,3 +1323,67 @@ def test_resume_backfill_keeps_tool_envelope_when_result_is_large():
     assert record["response"]["status"] == "completed"
     assert record["response"]["truncated"] is True
     assert len(record["response"]["preview"]) == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", [None, "studio"])
+async def test_shell_disabled_skill_readers_execute_with_adk_receipts(prefix):
+    from google.adk.skills.models import Frontmatter, Resources, Skill
+    from google.adk.tools.skill_toolset import SkillToolset
+
+    skill = Skill(
+        frontmatter=Frontmatter(name="fixture-method", description="Read fixture"),
+        instructions="Follow METHOD-ONLY-7Q.",
+        resources=Resources(references={"evidence.md": "REFERENCE-ONLY-8R"}),
+    )
+    toolset = SkillToolset(
+        skills=[skill],
+        tool_name_prefix=prefix,
+        tool_filter=["list_skills", "load_skill", "load_skill_resource"],
+    )
+    owner = LlmAgent(name="agent", model="fixture", tools=[toolset])
+    agent = SimpleNamespace(
+        tools=owner.tools, codex_runtime_config=CodexRuntimeConfig(shell_enabled=False)
+    )
+    events = []
+
+    async def sink(event):
+        events.append(event)
+
+    bundle = await build_executable_tools(agent, _ctx(owner), event_sink=sink)
+    tag = prefix + "_" if prefix else ""
+    assert set(bundle.tools) == {
+        tag + n for n in ("list_skills", "load_skill", "load_skill_resource")
+    }
+    try:
+        loaded = await bundle.executors[tag + "load_skill"](
+            {"skill_name": "fixture-method"}, "skill-call"
+        )
+        assert "METHOD-ONLY-7Q" in loaded
+        assert len(events) == 2
+        assert events[0].get_function_calls()[0].id == "skill-call"
+        assert events[1].get_function_responses()[0].id == "skill-call"
+    finally:
+        await close_toolsets(bundle.opened_toolsets)
+
+
+@pytest.mark.asyncio
+async def test_shell_enabled_retains_native_skill_materialization():
+    from google.adk.skills.models import Frontmatter, Skill
+    from google.adk.tools.skill_toolset import SkillToolset
+
+    toolset = SkillToolset(
+        skills=[
+            Skill(
+                frontmatter=Frontmatter(name="fixture", description="Native fixture"),
+                instructions="Native skill content",
+            )
+        ]
+    )
+    owner = LlmAgent(name="agent", model="fixture", tools=[toolset])
+    agent = SimpleNamespace(
+        tools=owner.tools, codex_runtime_config=CodexRuntimeConfig()
+    )
+    bundle = await build_executable_tools(agent, _ctx(owner))
+    assert bundle.tools == {}
+    assert bundle.opened_toolsets == []
