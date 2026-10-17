@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
 # the first request of an already-deployed runtime.
 ARG INSTALL_CODEX=1
 RUN if [ "$INSTALL_CODEX" = "1" ]; then \
-        pip3 install --no-cache-dir "openai-codex==0.1.0b3" "openai-codex-cli-bin==0.137.0a4"; \
+        pip3 install --no-cache-dir "openai-codex==0.163.0" "openai-codex-cli-bin==0.163.0"; \
     fi
 
 COPY agent.py app.py ./

@@ -47,7 +47,7 @@ from veadk.runtime.codex import translate  # noqa: E402
 
 #: Pin from ``pyproject.toml``. Both string-matched surfaces below are only
 #: meaningful against a known SDK version.
-EXPECTED_SDK_VERSION = "0.157.0"
+EXPECTED_SDK_VERSION = "0.163.0"
 
 
 def _turn_notification_names() -> set[str]:
@@ -84,9 +84,9 @@ def test_dispatch_table_covers_every_sdk_notification() -> None:
         f"stream: {sorted(stale)}. They are dead dispatch entries -- the SDK "
         "renamed or removed them, so the real payloads now fall through."
     )
-    assert not (
-        set(translate._DISPATCH) & translate._EXPLICITLY_IGNORED
-    ), "a notification is both handled and explicitly ignored"
+    assert not (set(translate._DISPATCH) & translate._EXPLICITLY_IGNORED), (
+        "a notification is both handled and explicitly ignored"
+    )
 
 
 def test_sdk_pin_matches_pyproject() -> None:
@@ -515,3 +515,10 @@ def test_thread_item_discriminators_match_sdk(
         "call and its result would be silently dropped"
     )
     assert call[0] == expected_tool_name, call
+
+
+def test_cloud_harness_uses_the_same_pinned_codex_pair() -> None:
+    root = Path(__file__).resolve().parents[3]
+    dockerfile = (root / "veadk/cloud/harness_app/Dockerfile").read_text()
+    for package in ("openai-codex", "openai-codex-cli-bin"):
+        assert f'"{package}=={EXPECTED_SDK_VERSION}"' in dockerfile
