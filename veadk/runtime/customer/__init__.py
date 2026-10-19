@@ -1,6 +1,7 @@
 """Public managed customer channel client; runtime dispatch is a separate layer."""
 
 from .client import CustomerChannelClient
+from .dispatch import CustomerToolDispatcher
 from .protocol import (
     CustomerChannelError,
     CustomerRunRequest,
@@ -9,6 +10,7 @@ from .protocol import (
 )
 
 __all__ = [
+    "CustomerToolDispatcher",
     "CustomerChannelClient",
     "CustomerChannelError",
     "CustomerRunRequest",

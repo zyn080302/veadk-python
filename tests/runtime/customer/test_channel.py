@@ -598,7 +598,10 @@ async def test_start_http_rejection_is_not_replayed_or_cancelled(status):
 
 
 @pytest.mark.asyncio
-async def test_local_http_reverse_result_makes_progress_before_stream_eof():
+@pytest.mark.parametrize("dispatch_tools", [False, True])
+async def test_local_http_reverse_result_makes_progress_before_stream_eof(
+    dispatch_tools,
+):
     """Use real HTTP to catch accidental stream buffering or half-duplex I/O."""
     run = request(tools=(tool(),))
     result_received = asyncio.Event()
@@ -648,10 +651,25 @@ async def test_local_http_reverse_result_makes_progress_before_stream_eof():
             server,
             CustomerChannelClient(f"http://127.0.0.1:{port}", turn_timeout=3) as client,
         ):
-            async with client.run(run) as channel:
-                async for event in channel.events():
-                    if event["type"] == "tool.call":
-                        await channel.submit_result("call-a", content={"pages": [1, 2]})
+            if dispatch_tools:
+                from veadk.runtime.customer import CustomerToolDispatcher
+
+                async def executor(arguments, request_id):
+                    return {"pages": [1, 2]}
+
+                async with CustomerToolDispatcher(
+                    client, run, {"lookup": executor}
+                ) as dispatch:
+                    events = [event async for event in dispatch.events()]
+                assert dispatch.quiescent
+                assert events[-1]["type"] == "run.completed"
+            else:
+                async with client.run(run) as channel:
+                    async for event in channel.events():
+                        if event["type"] == "tool.call":
+                            await channel.submit_result(
+                                "call-a", content={"pages": [1, 2]}
+                            )
     finally:
         if connections:
             await asyncio.gather(*connections)
