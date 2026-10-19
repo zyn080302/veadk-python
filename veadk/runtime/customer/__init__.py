@@ -2,6 +2,7 @@
 
 from .client import CustomerChannelClient
 from .dispatch import CustomerToolDispatcher
+from .events import CustomerAdkEventStream
 from .protocol import (
     CustomerChannelError,
     CustomerRunRequest,
@@ -10,6 +11,7 @@ from .protocol import (
 )
 
 __all__ = [
+    "CustomerAdkEventStream",
     "CustomerToolDispatcher",
     "CustomerChannelClient",
     "CustomerChannelError",

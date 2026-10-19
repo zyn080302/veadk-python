@@ -598,7 +598,7 @@ async def test_start_http_rejection_is_not_replayed_or_cancelled(status):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dispatch_tools", [False, True])
+@pytest.mark.parametrize("dispatch_tools", [False, True, "adk-events"])
 async def test_local_http_reverse_result_makes_progress_before_stream_eof(
     dispatch_tools,
 ):
@@ -607,6 +607,19 @@ async def test_local_http_reverse_result_makes_progress_before_stream_eof(
     result_received = asyncio.Event()
     connections = set()
     failures = []
+
+    def display_event(part, role="model"):
+        from google.adk.events import Event
+        from google.genai import types
+
+        event = Event(
+            author="remote_agent", content=types.Content(role=role, parts=[part])
+        )
+        return {
+            "type": "run.event",
+            "run_id": run.run_id,
+            "event": event.model_dump(mode="json", by_alias=True, exclude_none=True),
+        }
 
     async def serve(reader, writer):
         task = asyncio.current_task()
@@ -624,10 +637,40 @@ async def test_local_http_reverse_result_makes_progress_before_stream_eof(
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
                 )
-                for event in (ready(), call(run)):
+                start = [ready()]
+                if dispatch_tools == "adk-events":
+                    from google.genai import types
+
+                    start.append(
+                        display_event(
+                            types.Part(
+                                function_call=types.FunctionCall(
+                                    id="display-a",
+                                    name="lookup",
+                                    args={"name": "企业"},
+                                )
+                            )
+                        )
+                    )
+                for event in (*start, call(run)):
                     writer.write(("data: " + json.dumps(event) + "\n\n").encode())
                 await writer.drain()
                 await asyncio.wait_for(result_received.wait(), 2)
+                if dispatch_tools == "adk-events":
+                    for event in (
+                        display_event(
+                            types.Part(
+                                function_response=types.FunctionResponse(
+                                    id="display-a",
+                                    name="lookup",
+                                    response={"pages": [1, 2]},
+                                )
+                            ),
+                            role="user",
+                        ),
+                        display_event(types.Part(text="Completed")),
+                    ):
+                        writer.write(("data: " + json.dumps(event) + "\n\n").encode())
                 writer.write(("data: " + json.dumps(complete(run)) + "\n\n").encode())
             else:
                 assert body["type"] == "tool.result"
@@ -657,12 +700,27 @@ async def test_local_http_reverse_result_makes_progress_before_stream_eof(
                 async def executor(arguments, request_id):
                     return {"pages": [1, 2]}
 
-                async with CustomerToolDispatcher(
-                    client, run, {"lookup": executor}
-                ) as dispatch:
-                    events = [event async for event in dispatch.events()]
+                dispatch = CustomerToolDispatcher(client, run, {"lookup": executor})
+                if dispatch_tools == "adk-events":
+                    from veadk.runtime.customer import CustomerAdkEventStream
+
+                    async with CustomerAdkEventStream(
+                        dispatch,
+                        author="local_agent",
+                        invocation_id="local-run",
+                        new_message=run.new_message,
+                    ) as stream:
+                        events = [event async for event in stream.events()]
+                    assert len(events) == 3 and events[-1].is_final_response()
+                    assert (
+                        events[0].get_function_calls()[0].id
+                        == events[1].get_function_responses()[0].id
+                    )
+                else:
+                    async with dispatch:
+                        events = [event async for event in dispatch.events()]
+                    assert events[-1]["type"] == "run.completed"
                 assert dispatch.quiescent
-                assert events[-1]["type"] == "run.completed"
             else:
                 async with client.run(run) as channel:
                     async for event in channel.events():
