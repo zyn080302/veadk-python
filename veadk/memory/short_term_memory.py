@@ -22,7 +22,7 @@ from google.adk.sessions import (
     InMemorySessionService,
     Session,
 )
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from veadk.memory.short_term_memory_backends.mysql_backend import (
     MysqlSTMBackend,
@@ -61,6 +61,12 @@ class ShortTermMemory(BaseModel):
     The short term memory represents the context of the agent model. All content in the short term memory will be sent to agent model directly, including the system prompt, historical user prompt, and historical model responses.
 
     Attributes:
+        session_service (BaseSessionService | None):
+            Reuse a caller-owned service instead of constructing a backend.
+            Cannot be combined with non-default storage configuration. The
+            caller owns disposal. The service is excluded from repr and dumps.
+            After-load callbacks wrap this service's get_session method, so do
+            not share it between memories with different callbacks.
         backend (Literal["local", "mysql", "sqlite", "postgresql", "database"]):
             The backend of short term memory:
             - `local` for in-memory storage
@@ -81,6 +87,12 @@ class ShortTermMemory(BaseModel):
             asynchronous. It is not called when an existing session is reused.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    session_service_override: BaseSessionService | None = Field(
+        default=None, alias="session_service", exclude=True, repr=False
+    )
+
     backend: Literal["local", "mysql", "sqlite", "postgresql", "database"] = "local"
 
     backend_configs: dict = Field(default_factory=dict)
@@ -98,7 +110,19 @@ class ShortTermMemory(BaseModel):
     _session_service: BaseSessionService = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
-        if self.db_url:
+        if self.session_service_override is not None:
+            if (
+                self.backend != "local"
+                or self.db_url
+                or self.db_kwargs
+                or self.backend_configs
+                or self.local_database_path != "/tmp/veadk_local_database.db"
+            ):
+                raise ValueError(
+                    "session_service cannot be combined with backend configuration"
+                )
+            self._session_service = self.session_service_override
+        elif self.db_url:
             logger.info("The `db_url` is set, ignore `backend` option.")
             if self.db_url.count("@") > 1 or self.db_url.count(":") > 2:
                 logger.warning(
@@ -150,7 +174,8 @@ class ShortTermMemory(BaseModel):
 
         Short term memory can attempt to create a new session for a given application and user. If a session with the same `session_id` already exists, it will be returned instead of creating a new one.
 
-        If the underlying session service is backed by a database (`DatabaseSessionService`), the method first lists all existing sessions for the given `app_name` and `user_id` and logs the number of sessions found. It then checks whether a session with the specified `session_id` already exists:
+        Only the exact application/user/session tuple is read; user history is
+        never enumerated. Storage errors and cancellation propagate to callers.
         - If it exists → returns the existing session.
         - If it does not exist → creates and returns a new session.
 
@@ -162,15 +187,6 @@ class ShortTermMemory(BaseModel):
         Returns:
             Session | None: The retrieved or newly created `Session` object, or `None` if the session creation failed.
         """
-        if isinstance(self._session_service, DatabaseSessionService):
-            list_sessions_response = await self._session_service.list_sessions(
-                app_name=app_name, user_id=user_id
-            )
-
-            logger.debug(
-                f"Loaded {len(list_sessions_response.sessions)} sessions from db {self.db_url}."
-            )
-
         session = await self._session_service.get_session(
             app_name=app_name, user_id=user_id, session_id=session_id
         )

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import importlib
 import os
 
 import pytest
@@ -128,3 +129,89 @@ def test_after_create_session_callback_error_is_propagated():
         asyncio.run(
             memory.create_session(app_name="app", user_id="user", session_id="session")
         )
+
+
+def test_existing_session_service_is_reused_and_not_serialized():
+    from google.adk.sessions import InMemorySessionService
+
+    service = InMemorySessionService()
+    memory = ShortTermMemory(session_service=service)
+    assert memory.session_service is service
+    assert "session_service" not in memory.model_dump(by_alias=True)
+    assert "session_service_override" not in memory.model_dump()
+    assert "InMemorySessionService" not in repr(memory)
+    asyncio.run(memory.create_session(app_name="app", user_id="user", session_id="s"))
+    assert asyncio.run(
+        service.get_session(app_name="app", user_id="user", session_id="s")
+    )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"backend": "sqlite"},
+        {"db_url": "sqlite+aiosqlite:///:memory:"},
+        {"db_kwargs": {"pool_pre_ping": True}},
+        {"backend_configs": {"host": "unused"}},
+        {"local_database_path": "/tmp/unused-injected-storage.sqlite"},
+    ],
+)
+def test_injected_session_service_rejects_conflicting_storage(options):
+    from google.adk.sessions import InMemorySessionService
+
+    with pytest.raises(ValueError, match="session_service"):
+        ShortTermMemory(session_service=InMemorySessionService(), **options)
+
+
+def test_database_create_and_resume_do_not_enumerate_or_log_url(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    # Existing public constructor exercises the baseline scan/logging defect.
+    path = tmp_path / "synthetic-connection-marker.sqlite"
+    memory = ShortTermMemory(db_url=f"sqlite+aiosqlite:///{path}")
+    lookup = AsyncMock(wraps=memory.session_service.get_session)
+    scan = AsyncMock(side_effect=AssertionError("session hot path enumerated history"))
+    monkeypatch.setattr(memory.session_service, "get_session", lookup)
+    monkeypatch.setattr(memory.session_service, "list_sessions", scan)
+    logs = []
+    module = importlib.import_module("veadk.memory.short_term_memory")
+    for level in ("debug", "info", "warning", "error"):
+        monkeypatch.setattr(
+            module.logger, level, lambda message: logs.append(str(message))
+        )
+
+    async def exercise():
+        try:
+            first = await memory.create_session(
+                app_name="app", user_id="user", session_id="s"
+            )
+            again = await memory.create_session(
+                app_name="app", user_id="user", session_id="s"
+            )
+            assert first.id == again.id == "s"
+            assert lookup.await_count == 2
+            scan.assert_not_awaited()
+            assert all(str(path) not in row for row in logs)
+        finally:
+            await memory.session_service.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("storage unavailable"), asyncio.CancelledError()]
+)
+def test_injected_session_lookup_failure_does_not_create(error, monkeypatch):
+    from google.adk.sessions import InMemorySessionService
+    from unittest.mock import AsyncMock
+
+    service = InMemorySessionService()
+    monkeypatch.setattr(service, "get_session", AsyncMock(side_effect=error))
+    create = AsyncMock()
+    monkeypatch.setattr(service, "create_session", create)
+    memory = ShortTermMemory(session_service=service)
+    with pytest.raises(type(error)):
+        asyncio.run(
+            memory.create_session(app_name="app", user_id="user", session_id="s")
+        )
+    create.assert_not_awaited()

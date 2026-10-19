@@ -20,8 +20,8 @@ the overridable/fixed split silently breaking the deployed server (or the
 ``veadk harness`` CLI, whose flags are generated from these fields) is caught
 here rather than in production.
 
-Only ``types`` and ``utils`` are imported: ``app.py`` builds the live agent at
-import time, so it is intentionally left out to keep these tests offline.
+These schema tests import ``types`` and ``utils``. Class-import and lazy ASGI
+startup behavior are covered separately in ``test_harness_app_embedding.py``.
 """
 
 import json

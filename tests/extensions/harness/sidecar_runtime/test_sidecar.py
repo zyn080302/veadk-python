@@ -619,8 +619,18 @@ def test_runtime_exit_switches_stable_mcp_url_to_env_upstream(
 
 
 def test_run_wraps_child_with_sidecar_environment(
-    fake_runtime: Path, tmp_path: Path
+    fake_runtime: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from veadk.extensions.harness.sidecar_runtime import sidecar
+
+    bindings = []
+
+    def capture_binding(*args, **kwargs):
+        binding = start_harness_sidecar(*args, **kwargs)
+        bindings.append(binding)
+        return binding
+
+    monkeypatch.setattr(sidecar, "start_harness_sidecar", capture_binding)
     output = tmp_path / "child-env.json"
     child = tmp_path / "child.py"
     child.write_text(
@@ -635,9 +645,16 @@ def test_run_wraps_child_with_sidecar_environment(
     )
 
     assert exit_code == 0
+    assert len(bindings) == 1
     values = json.loads(output.read_text(encoding="utf-8"))
-    assert values["model"] == "http://127.0.0.1:18787/api/v3"
-    assert values["mcp"] == "http://127.0.0.1:18899/metrics"
+    assert values["model"] == bindings[0].spec.model_proxy_url
+    model_url = urllib.parse.urlsplit(values["model"])
+    assert model_url.scheme == "http"
+    assert model_url.hostname == "127.0.0.1"
+    assert model_url.port and model_url.port > 0
+    assert model_url.path == "/api/v3"
+    assert values["mcp"] == ",".join(bindings[0].spec.mcp_urls)
+    assert bindings[0].spec.mcp_urls == ["http://127.0.0.1:18899/metrics"]
 
 
 def test_doctor_uses_product_runtime_entrypoint(fake_runtime: Path) -> None:

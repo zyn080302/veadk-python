@@ -14,8 +14,9 @@
 
 """Harness server: serve the env-assembled agent over HTTP.
 
-The agent is built once from the environment (see ``agent.py``) and exposed three
-ways on a single FastAPI app:
+Callers can supply an Agent and memory explicitly. The default ASGI entry point
+builds its environment Agent lazily on first access, exposing three interfaces
+on a single FastAPI app:
 
 * ``POST /harness/invoke`` — the harness entry point, with once-time ``harness``
   overrides (clone the base agent, apply the override, run a throwaway runner).
@@ -36,9 +37,11 @@ Run with either:
 
 import json
 import os
+from functools import lru_cache
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -69,7 +72,6 @@ from veadk.a2a.registry_client import (
     registry_tip_token_from_headers,
 )
 from veadk.a2a.utils.agent_to_a2a import to_a2a
-from veadk.cloud.harness_app.agent import agent, short_term_memory
 from veadk.cloud.harness_app.harness_plugins import (
     build_harness_plugins_from_enhance,
     build_harness_plugins_from_headers,
@@ -772,14 +774,46 @@ class HarnessApp:
         uvicorn.run(self.app, host=host, port=port)
 
 
-harness_app = HarnessApp(
-    agent, short_term_memory, HARNESS_NAME, max_llm_calls=DEFAULT_MAX_LLM_CALLS
-)
-app = harness_app.app
+def create_default_harness_app() -> HarnessApp:
+    """Build an environment-configured App explicitly, without import side effects."""
+    from veadk.cloud.harness_app.utils import init_harness_agent
+
+    agent, short_term_memory = init_harness_agent()
+    return HarnessApp(
+        agent,
+        short_term_memory,
+        os.getenv("HARNESS_NAME", "default"),
+        max_llm_calls=int(os.environ.get("MAX_LLM_CALLS") or 10),
+    )
+
+
+_default_harness_lock = Lock()
+
+
+@lru_cache(maxsize=1)
+def _cached_default_harness_app() -> HarnessApp:
+    return create_default_harness_app()
+
+
+def get_default_harness_app() -> HarnessApp:
+    """Return the process-local default used by ASGI and module entry points."""
+    # lru_cache alone permits duplicate construction on concurrent first access.
+    with _default_harness_lock:
+        return _cached_default_harness_app()
+
+
+def __getattr__(name: str) -> Any:
+    # Preserve ``module:app`` and explicit legacy imports while letting callers
+    # import the class and supply their own Agent/storage without a second App.
+    if name == "harness_app":
+        return get_default_harness_app()
+    if name == "app":
+        return get_default_harness_app().app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":
-    harness_app.serve(
+    get_default_harness_app().serve(
         host=os.getenv("SERVER_HOST", "0.0.0.0"),
         port=int(os.getenv("SERVER_PORT", "8000")),
     )
