@@ -904,9 +904,13 @@ class Agent(LlmAgent):
             run_config=getattr(ctx, "run_config", None),
         )
 
-        async for event in get_runtime(self.runtime).run_async(self, ctx):
-            maybe_save_output_to_state(self, event)
-            yield event
+        # Runner persistence or a consumer can fail while this wrapper is
+        # suspended at yield. Close the delegated stream in its owning task,
+        # before returning, so runtime contexts and tools are not left to GC.
+        async with aclosing(get_runtime(self.runtime).run_async(self, ctx)) as events:
+            async for event in events:
+                maybe_save_output_to_state(self, event)
+                yield event
 
     async def _run_live_impl(
         self, ctx: "InvocationContext"
