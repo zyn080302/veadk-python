@@ -37,6 +37,7 @@ Run with either:
 
 import json
 import os
+from collections.abc import Callable
 from functools import lru_cache
 import tempfile
 from contextlib import asynccontextmanager
@@ -48,6 +49,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from google.adk.agents import RunConfig
 from google.adk.agents.base_agent import BaseAgent
+from google.adk.agents.invocation_context import InvocationContext
 from google.adk.agents.run_config import StreamingMode
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.auth.credential_service.in_memory_credential_service import (
@@ -62,6 +64,7 @@ from google.adk.evaluation.local_eval_sets_manager import LocalEvalSetsManager
 from google.adk.events import Event
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
 from google.adk.plugins import BasePlugin
+from google.adk.runners import Runner as AdkRunner
 from google.adk.sessions import Session
 from google.adk.utils.context_utils import Aclosing
 from typing_extensions import override
@@ -173,6 +176,39 @@ def _public_resource_id(value: dict[str, Any]) -> str:
     return ""
 
 
+class _HarnessCallLimitPlugin(BasePlugin):
+    """Apply the App default without replacing ADK's HTTP execution lifecycle."""
+
+    def __init__(self, get_limit: Callable[[], int | None]) -> None:
+        super().__init__(name="harness_http_call_limit")
+        self._get_limit = get_limit
+
+    async def before_run_callback(
+        self, *, invocation_context: InvocationContext
+    ) -> None:
+        limit = self._get_limit()
+        if limit is not None:
+            # Validate with ADK and leave every other per-request field intact.
+            validated = RunConfig(max_llm_calls=limit).max_llm_calls
+            invocation_context.run_config = invocation_context.run_config.model_copy(
+                update={"max_llm_calls": validated}
+            )
+
+
+class _HarnessWebServer(AdkWebServer):
+    def __init__(self, *, get_call_limit: Callable[[], int | None], **kwargs: Any):
+        super().__init__(**kwargs)
+        self._call_limit_plugin = _HarnessCallLimitPlugin(get_call_limit)
+
+    async def get_runner_async(self, app_name: str) -> AdkRunner:
+        runner = await super().get_runner_async(app_name)
+        manager = runner.plugin_manager
+        # No await between lookup and registration on the shared cached runner.
+        if manager.get_plugin(self._call_limit_plugin.name) is None:
+            manager.register_plugin(self._call_limit_plugin)
+        return runner
+
+
 class _HarnessAgentLoader(BaseAgentLoader):
     """Serve the single env-built harness agent to the ADK web server.
 
@@ -246,7 +282,8 @@ class HarnessApp:
 
         # ADK web/api server over the single in-memory agent (reuses the harness
         # session service so sessions are shared; long-term memory if configured).
-        self._server = AdkWebServer(
+        self._server = _HarnessWebServer(
+            get_call_limit=lambda: self.max_llm_calls,
             agent_loader=_HarnessAgentLoader(agent, harness_name),
             session_service=short_term_memory.session_service,
             memory_service=getattr(agent, "long_term_memory", None)

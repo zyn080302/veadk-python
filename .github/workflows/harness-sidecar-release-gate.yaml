@@ -127,6 +127,7 @@ jobs:
             tests/cloud/test_harness_app_embedding.py \
             tests/cloud/test_harness_app_http.py \
             tests/cloud/test_harness_app_contract.py \
+            tests/cloud/test_harness_app_call_limit.py \
             tests/test_short_term_memory.py
 
       - name: Run Python Sidecar checks in parallel
