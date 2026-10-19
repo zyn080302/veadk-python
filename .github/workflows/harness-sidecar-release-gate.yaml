@@ -24,6 +24,8 @@ on:
       - 'tests/cloud/test_harness_app_*.py'
       - 'tests/test_short_term_memory.py'
       - 'veadk/cloud/harness_app/**'
+      - 'veadk/runtime/customer/**'
+      - 'tests/runtime/customer/**'
       - 'veadk/memory/short_term_memory.py'
       - 'tests/test_harness_sidecar_release_gate.py'
       - 'tests/test_cloud.py'
@@ -66,6 +68,8 @@ on:
       - 'tests/cloud/test_harness_app_*.py'
       - 'tests/test_short_term_memory.py'
       - 'veadk/cloud/harness_app/**'
+      - 'veadk/runtime/customer/**'
+      - 'tests/runtime/customer/**'
       - 'veadk/memory/short_term_memory.py'
       - 'tests/test_harness_sidecar_release_gate.py'
       - 'tests/test_cloud.py'
@@ -128,7 +132,8 @@ jobs:
             tests/cloud/test_harness_app_http.py \
             tests/cloud/test_harness_app_contract.py \
             tests/cloud/test_harness_app_call_limit.py \
-            tests/test_short_term_memory.py
+            tests/test_short_term_memory.py \
+            tests/runtime/customer
 
       - name: Run Python Sidecar checks in parallel
         shell: bash
