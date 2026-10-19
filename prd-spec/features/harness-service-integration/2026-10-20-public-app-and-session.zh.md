@@ -2,7 +2,7 @@
 
 [English](2026-10-20-public-app-and-session.md)
 
-变更 ID：harness-service-integration。创建/修订：2026-10-20。状态：阶段实现；定向验证与 pre-commit 通过，全仓回归尚未全绿。
+变更 ID：harness-service-integration。创建/修订：2026-10-20。状态：阶段实现；定向验证、全仓回归及 pre-commit 通过。
 组件：[harness-service](../../../specs/harness-service/README.zh.md)。
 
 ## 背景与目标
@@ -79,3 +79,26 @@ T-4 / AC-5：捕获真实 start_harness_sidecar 返回的公开 SidecarBindingSp
 - `tests/plugins/test_codex_sandbox_upload.py::test_upload_retries_while_new_session_data_plane_starts` 仅在全仓运行失败，被替换的 sleep 记录到额外调用；当前源码和纯基线的隔离复跑均通过。顺序/后台工作影响的根因仍需调查，不能因此将全仓门禁改写为通过。
 - pass：调整工作流合成 Key 占位值后，重新运行工作流合同测试通过；双语链接/合同 ID 与 diff 空白检查通过。
 - 用户要求有阶段进展就提交到独立分支。本次是供审阅的开发检查点，保留剩余回归调查，不是发布、固定制品验收或完整集成蓝图完成。远端 CI 和真实业务验收仍为 not_run。
+
+### T-5 / AC-6：隔离必需的全仓回归（已批准范围）
+
+阶段门禁发现测试替身缺陷，并在未改变的官方基线复现：读取已记录版本的测试落入真实 GitHub 客户端；artifact 替身在假下载前仍解析合成来源域名。两个上传重试测试修改共享的 time.sleep，导致其他后台工作向重试观察列表追加记录。本次只修正替身，使必需的离线门禁可靠，不改变生产行为及组件合同。
+
+为读取已记录版本的场景显式提供空提交列表客户端。artifact 测试给 service 模块使用局部 socket 替身，只把合成 example 域名解析为公网地址 fixture；保留真实来源 URL 和 IP 校验，以及下载/存储替身。替换 upload_project 自己的 time 绑定，不修改进程共享 time 模块；先增加共享 time.sleep 对象保持不变的断言，稳定复现隔离缺陷。保留原重试次数和精确等待值。
+
+涉及文件：tests/cli/test_github_cicd.py、tests/frontend/server/artifacts/test_artifact_library.py、tests/plugins/test_codex_sandbox_upload.py。验收：原业务断言不依赖外部 DNS/网络即可通过；共享 sleep 不改变；定向文件、改动测试的 Ruff/Pyright、pre-commit 和双 worker 全仓门禁通过。没有前端界面、真实模型或云操作变更。既有全仓单元门禁发现这些测试，不跳过或弱化测试。
+
+实现前直接评审：已检查最小依赖替换、网络/URL 校验保留、生产接口不变及双语要求等价。这属于用户批准蓝图及继续指令下必需的验证工作，不延期或替换 P0-P4。
+
+本次替身修正同时保持静态类型准确：凭证测试字段使用明确的 TypedDict，避免将任意字符串字典展开为所有关键字参数；测试 HTTP Session 替身在明确的依赖注入边界标注类型。这些是测试类型标注，不改变生产身份或 HTTP 行为。
+
+
+### T-5 验证（2026-10-20）
+
+验证范围：SDK 07162535 加 T-5 三个测试文件。fetch/rebase 后官方基线仍为 402a3da。
+
+- pass：五项 DNS 失败均在干净官方归档复现；先增加共享 sleep 身份断言，稳定复现两项上传测试替身失败。
+- pass：三个修改文件共 72 项定向测试通过；类型标注核对后 GitHub 文件 35 项通过。Ruff 通过，使用仓库 Python 3.12 环境运行 Pyright 为 0 errors。
+- pass：通过上述离线包装器执行双 worker 全仓回归：7513 passed、50 skipped、4 xfailed、6 subtests passed、82 warnings，耗时 397.88 秒。只排除仓库默认 codex_smoke/piagent_smoke。
+- pass：最终 pre-commit run --all-files：Ruff check/format、Gitleaks、依赖策略与 YAML 凭证扫描全部通过，未跳过 hook 或扫描规则。
+- not_run：远端 CI 与真实客户验收。测试替身修正不改变生产合同。

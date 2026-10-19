@@ -2,7 +2,7 @@
 
 [中文](2026-10-20-public-app-and-session.zh.md)
 
-Change ID: harness-service-integration. Created/revised: 2026-10-20. Status: stage implementation; targeted verification and pre-commit passed, repository-wide regression not green.
+Change ID: harness-service-integration. Created/revised: 2026-10-20. Status: stage implementation; targeted verification, repository-wide regression and pre-commit passed.
 Component: [harness-service](../../../specs/harness-service/README.md).
 
 ## Background and goals
@@ -78,3 +78,26 @@ T-4 / AC-5: reconcile that regression by capturing the public SidecarBindingSpec
 - `tests/plugins/test_codex_sandbox_upload.py::test_upload_retries_while_new_session_data_plane_starts` fails only in the broad run, where its patched sleep observes additional calls. It passes in both the isolated current-source and clean-baseline reruns; the ordering/background-work cause remains to investigate. These findings do not turn the broad gate green.
 - pass: the workflow contract test was rerun after changing its synthetic key placeholder; bilingual links/contract IDs and diff whitespace also pass.
 - User instruction: submit and push stage progress on independent branches. This is a reviewable development checkpoint, with the remaining regression investigation retained. It is not a release, fixed artifact acceptance, or completion of the full integration blueprint. Remote CI and live business acceptance remain not_run.
+
+### T-5 / AC-6: isolate the required repository regression (approved scope)
+
+The stage gate exposed test-fixture defects, reproduced on the unchanged official baseline: a recorded-version test falls through to a real GitHub client, and artifact fixtures still resolve their synthetic source host before the fake download. Two upload retry tests patch the shared time.sleep function, so unrelated background workers can append to their retry observations. Fix only these fixtures to make the required offline gate reliable; production behavior and component contracts do not change.
+
+Supply an explicit empty-commit client to the recorded-version scenario. Give artifact tests a service-local socket substitute that resolves only the synthetic example host to a global-address fixture; retain real source URL and IP validation and fake download/storage. Replace upload_project's time binding instead of mutating the process-wide time module; first add an assertion that the shared time.sleep identity is unchanged to deterministically reproduce the isolation defect. Keep existing retry counts and exact delays.
+
+Affected files: tests/cli/test_github_cicd.py, tests/frontend/server/artifacts/test_artifact_library.py, tests/plugins/test_codex_sandbox_upload.py. Acceptance: original business assertions pass without external DNS/network; shared sleep remains unchanged; targeted files, Ruff/Pyright for changed tests, pre-commit and the full two-worker repository gate pass. No frontend UI, provider calls or cloud operations are involved. The existing repository unit gate discovers these tests; do not skip or weaken them.
+
+Direct pre-implementation review: minimal dependency substitution, retained network/URL validation, unchanged production interfaces and equivalent bilingual requirements checked. This is required verification work under the user's approved blueprint and instruction to continue; it does not defer or replace P0-P4.
+
+The fixture-only change also keeps static types precise: use an explicit credential TypedDict rather than a generic string-key dictionary for keyword expansion, and type the test HTTP session substitute at its deliberate dependency boundary. These are test annotations, not changes to production identity or HTTP behavior.
+
+
+### T-5 verification (2026-10-20)
+
+Tested scope: SDK 07162535 plus the three fixture files in T-5. The official base remains 402a3da after fetch/rebase.
+
+- pass: all five DNS failures reproduce in the clean official archive; adding the shared sleep identity assertions first reproduces two upload fixture failures.
+- pass: 72 targeted tests across the three changed files; after type annotation reconciliation, all 35 GitHub tests pass. Ruff passes and Pyright reports 0 errors using the repository Python 3.12 environment.
+- pass: full two-worker repository regression through the documented offline wrapper: 7513 passed, 50 skipped, 4 xfailed, 6 subtests passed, 82 warnings in 397.88 seconds. Only the repository default codex_smoke/piagent_smoke exclusions apply.
+- pass: final pre-commit run --all-files: Ruff check/format, Gitleaks, dependency policy and YAML secret scanning. No hook or scan rule was bypassed.
+- not_run: remote CI and live customer acceptance. The fixture correction changes no production contract.

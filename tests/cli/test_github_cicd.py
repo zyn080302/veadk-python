@@ -15,12 +15,13 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import pytest
 from click.testing import CliRunner
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from requests import Session
 
 from veadk.cli.cli import veadk
 from veadk.cli.cli_frontend import _run_frontend_server
@@ -33,7 +34,15 @@ PROJECT = {
         {"path": "requirements.txt", "content": "veadk-python\n"},
     ],
 }
-VOLCENGINE_CREDENTIALS = {
+
+
+class _CloudCredentials(TypedDict):
+    volcengine_access_key: str
+    volcengine_secret_key: str
+    volcengine_session_token: str
+
+
+VOLCENGINE_CREDENTIALS: _CloudCredentials = {
     "volcengine_access_key": "ak_test",
     "volcengine_secret_key": "sk_test",
     "volcengine_session_token": "token_test",
@@ -294,7 +303,9 @@ def test_github_client_initializes_empty_repository_branch() -> None:
 
     session = FakeEmptyRepoSession()
 
-    commit_sha = GitHubClient("ghp_secret", session=session).commit_files(
+    commit_sha = GitHubClient(
+        "ghp_secret", session=cast(Session, session)
+    ).commit_files(
         "acme",
         "demo",
         branch="main",
@@ -336,6 +347,10 @@ def test_list_github_delivery_versions_returns_recorded_versions(
 
     result = list_github_delivery_versions(
         runtime_id="rt-created",
+        github_client=SimpleNamespace(
+            list_branch_commits=lambda *args, **kwargs: [],
+            list_workflow_runs=lambda *args, **kwargs: [],
+        ),
         state_path=state_path,
     )
 

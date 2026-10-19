@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -563,7 +564,9 @@ def test_upload_retries_while_new_session_data_plane_starts(
         "connection",
         lambda _url: (Connection(), "/v1/file/upload"),
     )
-    monkeypatch.setattr(upload_project.time, "sleep", sleeps.append)
+    original_sleep = time.sleep
+    monkeypatch.setattr(upload_project, "time", SimpleNamespace(sleep=sleeps.append))
+    assert time.sleep is original_sleep
 
     assert upload_project.upload_file(
         "https://sandbox.example?Authorization=secret",
@@ -606,7 +609,9 @@ def test_idempotent_json_post_retries_a_lost_response(
         "connection",
         lambda _url: (Connection(), "/handoff"),
     )
-    monkeypatch.setattr(upload_project.time, "sleep", sleeps.append)
+    original_sleep = time.sleep
+    monkeypatch.setattr(upload_project, "time", SimpleNamespace(sleep=sleeps.append))
+    assert time.sleep is original_sleep
 
     assert upload_project.post_json(
         "https://studio.example/handoff",

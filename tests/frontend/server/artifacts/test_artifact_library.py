@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import io
+import socket
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from frontend.server.artifacts import service as artifact_service
 from frontend.server.artifacts.models import (
     ArtifactIngestCandidate,
     ArtifactMetadataPatch,
@@ -30,6 +32,28 @@ from frontend.server.artifacts.models import (
 from frontend.server.artifacts.repository import ArtifactNotFound, TosArtifactRepository
 from frontend.server.artifacts.routes import mount_routes
 from frontend.server.artifacts.service import ArtifactService
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_source_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def getaddrinfo(host: str, port: int, *, type: int) -> list[tuple]:
+        assert (host, port, type) == ("example.com", 443, socket.SOCK_STREAM)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", port),
+            )
+        ]
+
+    # Retain source URL/IP validation without real DNS or changing global sockets.
+    monkeypatch.setattr(
+        artifact_service,
+        "socket",
+        SimpleNamespace(SOCK_STREAM=socket.SOCK_STREAM, getaddrinfo=getaddrinfo),
+    )
 
 
 class _TosError(RuntimeError):
