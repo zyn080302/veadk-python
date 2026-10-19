@@ -8,6 +8,7 @@ import inspect
 import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import anyio
@@ -16,6 +17,24 @@ from .client import CustomerChannelClient
 from .protocol import CustomerChannelError, CustomerRunRequest
 
 Executor = Callable[[dict[str, Any], str], Awaitable[Any]]
+
+
+class _LocalToolFailure(CustomerChannelError):
+    """A bridge failure must terminate the run instead of becoming tool output."""
+
+
+@dataclass
+class _ToolResult:
+    content: Any
+    status: str
+    error: str
+
+
+@dataclass
+class _LocalToolEvents:
+    request_id: str
+    events: tuple
+    accepted: asyncio.Future
 
 
 class CustomerToolDispatcher:
@@ -63,7 +82,9 @@ class CustomerToolDispatcher:
         self._request = snapshot
         self._executors = functions
         self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._queue: asyncio.Queue[dict] = asyncio.Queue(event_queue_size)
+        self._queue: asyncio.Queue[dict | _LocalToolEvents] = asyncio.Queue(
+            event_queue_size
+        )
         self._cleanup_timeout = cleanup_timeout
         self._cleanup_deadline: float | None = None
         self._owner: asyncio.Task | None = None
@@ -128,7 +149,7 @@ class CustomerToolDispatcher:
             if error is not None:
                 raise error
 
-    async def events(self) -> AsyncIterator[dict]:
+    async def events(self) -> AsyncIterator[dict | _LocalToolEvents]:
         """Observe validated envelopes; success follows all result ACKs."""
         if self._owner is None or self._reading or self._closed:
             raise CustomerChannelError("dispatcher_unavailable")
@@ -161,6 +182,25 @@ class CustomerToolDispatcher:
             raise CustomerChannelError("event_backpressure") from None
         # Give a ready consumer a chance even for pre-buffered HTTP chunks.
         await asyncio.sleep(0)
+
+    def _local_active(self, request_id):
+        return self._active and request_id not in self._cancelled
+
+    async def _emit_local(self, request_id, events):
+        if not self._local_active(request_id):
+            raise _LocalToolFailure("native_tool_closed")
+        batch = _LocalToolEvents(
+            request_id,
+            copy.deepcopy(events),
+            asyncio.get_running_loop().create_future(),
+        )
+        try:
+            self._queue.put_nowait(batch)
+        except asyncio.QueueFull:
+            raise _LocalToolFailure("event_backpressure") from None
+        await batch.accepted
+        if not self._local_active(request_id):
+            raise _LocalToolFailure("native_tool_closed")
 
     def _cancel_task(self, task):
         if not task.done() and task not in self._cancel_requested:
@@ -224,7 +264,15 @@ class CustomerToolDispatcher:
                             copy.deepcopy(event["arguments"]), request_id
                         )
                         status, error = "success", ""
+                        if isinstance(result, _ToolResult):
+                            result, status, error = (
+                                result.content,
+                                result.status,
+                                result.error,
+                            )
                     except asyncio.CancelledError:
+                        raise
+                    except _LocalToolFailure:
                         raise
                     except Exception:
                         result, status, error = None, "error", "tool_execution_failed"

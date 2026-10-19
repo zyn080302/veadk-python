@@ -40,3 +40,5 @@ async with CustomerAdkEventStream(
 ## 兼容与验证
 
 新增可选 API，不改变既有 runtime 和通道行为。仅支持普通单 Agent Shared ADK JSON；不支持的 Host 版本/能力须显式适配，不能强制转换。本地测试使用实际 ADK 序列化、Runner 持久化及调度器样例。合同映射：CON-1/CON-6 生命周期/上限；CON-2 信任/回显；CON-3 内容/用量；CON-4 工具；CON-5 终态/ACK/清理。既有 Harness 发布门禁包含 `tests/runtime/customer`。验证状态在关联设计中维护；样例通过不等于真实 Runtime 验收。
+
+原生 Runtime 集成：私有 Python 本地事件批次共用调度器有界队列，绝不从远端 JSON 解析。原生结果提交等待 Runtime journal/yield 确认；取消、队列溢出或日志失败时停止提交。原生模式校验本地已注册工具名的远端展示，实际输出本地完成的 call/response 对；Host 自有工具展示保留。本地状态遵循 [runtime-customer CON-7](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer/README.zh.md)。既有显式 executor 的展示行为不变。

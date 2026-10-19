@@ -8,7 +8,7 @@ import json
 from contextlib import aclosing
 from uuid import uuid4
 
-from .dispatch import CustomerToolDispatcher
+from .dispatch import CustomerToolDispatcher, _LocalToolEvents, _LocalToolFailure
 from .protocol import CustomerChannelError
 
 
@@ -302,6 +302,7 @@ class CustomerAdkEventStream:
         invocation_id: str,
         new_message: dict,
         branch: str | None = None,
+        local_tools: frozenset[str] = frozenset(),
     ):
         self._projector = _Projector(
             author=author,
@@ -313,6 +314,7 @@ class CustomerAdkEventStream:
         self._owner = None
         self._iterator = None
         self._closed = False
+        self._local_tools = local_tools
 
     async def __aenter__(self):
         if self._owner is not None or self._closed:
@@ -350,8 +352,39 @@ class CustomerAdkEventStream:
             async for envelope in envelopes:
                 if asyncio.current_task() is not self._owner:
                     raise CustomerChannelError("event_stream_task_mismatch")
+                if isinstance(envelope, _LocalToolEvents):
+                    for event in envelope.events:
+                        if (
+                            envelope.accepted.cancelled()
+                            or not self._dispatcher._local_active(envelope.request_id)
+                        ):
+                            raise _LocalToolFailure("native_tool_closed")
+                        yield event
+                    if not envelope.accepted.done():
+                        envelope.accepted.set_result(None)
+                    continue
                 if envelope["type"] == "run.event":
                     event = self._projector.project(envelope["event"])
+                    if self._local_tools and event is not None and event.content:
+                        remaining = []
+                        for part in event.content.parts:
+                            function = part.function_call or part.function_response
+                            if (
+                                function is None
+                                or function.name not in self._local_tools
+                            ):
+                                remaining.append(part)
+                        if len(remaining) != len(event.content.parts):
+                            event.content.parts = remaining
+                            if not remaining:
+                                if event.usage_metadata is None:
+                                    continue
+                                event.content = None
+                            if not any(
+                                p.function_call or p.function_response
+                                for p in remaining
+                            ):
+                                event.partial = True
                     if event is not None:
                         yield event
                 elif envelope["type"] == "run.completed":

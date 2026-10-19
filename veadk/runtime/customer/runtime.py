@@ -94,8 +94,13 @@ class CustomerRuntime(BaseRuntime):
             raise CustomerChannelError("unsupported_customer_plugins")
         message = _new_message(ctx)
         identity = _identity(ctx)
+        bridge = None
         try:
             with anyio.fail_after(config.total_timeout):
+                if config.native_tools:
+                    from .native_tools import _NativeToolBridge
+
+                    bridge = _NativeToolBridge(agent, ctx, config.tools)
                 async with await config.store.claim(
                     identity,
                     engine_id=config._binding_id,
@@ -170,17 +175,24 @@ class CustomerRuntime(BaseRuntime):
                         dispatcher = CustomerToolDispatcher(
                             client,
                             request,
-                            config.executors,
+                            bridge.executors
+                            if bridge is not None
+                            else config.executors,
                             max_concurrency=config.max_concurrency,
                             event_queue_size=config.event_queue_size,
                             cleanup_timeout=config.cleanup_timeout,
                         )
+                        if bridge is not None:
+                            bridge.sink = dispatcher._emit_local
                         async with CustomerAdkEventStream(
                             dispatcher,
                             author=agent.name,
                             invocation_id=ctx.invocation_id,
                             new_message=message,
                             branch=ctx.branch,
+                            local_tools=frozenset(bridge.tools)
+                            if bridge is not None
+                            else frozenset(),
                         ) as projection:
                             async with aclosing(projection.events()) as events:
                                 async for event in events:
@@ -193,6 +205,9 @@ class CustomerRuntime(BaseRuntime):
                         # Keep completed pending until the next read-back.
         except TimeoutError:
             raise CustomerChannelError("customer_runtime_timeout") from None
+        finally:
+            if bridge is not None:
+                bridge.close()
 
     async def recover_display(self, agent, session_service, local_identity):
         """Append only missing completed display; never contact the Host."""

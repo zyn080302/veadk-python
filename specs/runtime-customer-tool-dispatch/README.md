@@ -17,7 +17,7 @@ Owns execution scheduling for validated Shared tool calls. It consumes [customer
 | CON-5 | Context exit revokes all submissions and requests cancellation once. Cleanup wait is positive/finite (default 10 seconds), covers owner and children; internal failure, context exit and repeated close share one deadline established by the first cleanup. `quiescent` is true only when all stopped. On cleanup_timeout quarantine the dispatcher/client and its execution context until quiescent. Executors must cooperate; no claim of forcibly stopping Python code. |
 | CON-6 | No raw exception text, credentials, event payloads or tool results in diagnostics. Tasks inherit invocation context; the caller must supply trustworthy, revocable identity and persistent session exclusion. This API does not establish those guarantees. |
 
-Verification: `tests/runtime/customer/test_dispatch.py` in the existing Harness release gate. [Design/evidence](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-tool-dispatch/2026-10-20-customer-tool-dispatch.md). Agent dispatch and business adoption are separate required integration stages, not implemented here.
+Verification: `tests/runtime/customer/test_dispatch.py` in the existing Harness release gate. [Design/evidence](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-tool-dispatch/2026-10-20-customer-tool-dispatch.md). Agent dispatch is integrated through CustomerRuntime; business adoption remains separate. Native integration follows runtime-customer CON-7 below.
 
 ## Usage
 
@@ -33,3 +33,5 @@ async def observe_run(client, request, executors):
 ```
 
 Consume observe_run with contextlib.aclosing so early exit also closes the dispatcher. After cleanup_timeout, use quiescent to quarantine execution context that has not stopped; never write forwarded events or task inputs to diagnostics.
+
+Native Runtime integration: a private Python local-event batch shares the bounded dispatcher queue. It is never parsed from remote JSON. Native result submission waits for the Runtime journal/yield acknowledgement; cancellation, queue overflow and journal failure stop submission. Native mode validates remote display for locally registered tool names but emits the local completed call/response pair instead; Host-only tool display is preserved. Local state is governed by [runtime-customer CON-7](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer/README.md). Existing explicit-executor display behavior is unchanged.

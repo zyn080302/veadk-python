@@ -37,6 +37,7 @@ class CustomerRuntimeConfig:
     tools: tuple[CustomerTool, ...] = ()
     skills: tuple[CustomerSkill, ...] = ()
     executors: Mapping[str, Executor] = field(default_factory=dict)
+    native_tools: bool = field(default=False, kw_only=True)
     headers: Callable[[], Mapping[str, str]] | None = None
     transport: httpx.AsyncBaseTransport | None = None
     total_timeout: float = 165
@@ -82,7 +83,12 @@ class CustomerRuntimeConfig:
             skills=copy.deepcopy(self.skills),
         )
         functions = dict(self.executors)
-        if set(functions) != {tool.name for tool in snapshot.tools} or any(
+        if type(self.native_tools) is not bool or (self.native_tools and functions):
+            raise ValueError("Native tools cannot use explicit executors")
+        if (
+            not self.native_tools
+            and set(functions) != {tool.name for tool in snapshot.tools}
+        ) or any(
             not inspect.iscoroutinefunction(fn)
             and not inspect.iscoroutinefunction(getattr(fn, "__call__", None))
             for fn in functions.values()
@@ -99,6 +105,8 @@ class CustomerRuntimeConfig:
         for key in ("run_id", "channel_id", "scope_id"):
             payload.pop(key)
         payload.update(endpoint=self.endpoint.rstrip("/"), engine_id=self.engine_id)
+        if self.native_tools:
+            payload["native_tools"] = True
         digest = hashlib.sha256(
             json.dumps(
                 payload, sort_keys=True, ensure_ascii=False, allow_nan=False
@@ -131,6 +139,15 @@ def check_customer_agent(agent, run_config=None):
         "run_processor",
     }
     fields = explicit_fields(agent) | frozenset(getattr(agent, "model_fields_set", ()))
+    if agent.customer_runtime_config.native_tools:
+        allowed.update(
+            {
+                "tools",
+                "before_tool_callback",
+                "after_tool_callback",
+                "on_tool_error_callback",
+            }
+        )
     for name in sorted(fields - allowed):
         if (
             name in {"rerun_on_resume", "wait_for_output"}

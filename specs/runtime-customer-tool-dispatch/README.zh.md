@@ -17,7 +17,7 @@ ID: `runtime-customer-tool-dispatch`; revision: 2026-10-20; status: active.
 | CON-5 | 退出上下文先撤销所有回传资格，再请求一次取消。清理等待正数且有限，默认 10 秒，覆盖调度和子任务；内部失败、上下文退出和重复关闭共用首次清理启动时的一个截止时间。仅全部停止后 quiescent 才为真；cleanup_timeout 后必须隔离调度器、客户端和执行上下文，直至 quiescent。工具需配合取消，不宣称强制停止 Python 代码。 |
 | CON-6 | 诊断不包含原始异常、凭证、事件或工具结果。任务继承当前调用上下文，但调用方仍须提供可信且可撤销的身份及持久会话互斥，本接口不建立这些保证。 |
 
-验证：现有 Harness 发布门禁中的 `tests/runtime/customer/test_dispatch.py`。[设计/证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-tool-dispatch/2026-10-20-customer-tool-dispatch.zh.md)。Agent 分发和业务接入仍是必需的后续集成阶段，本阶段尚未实现。
+验证：现有 Harness 发布门禁中的 `tests/runtime/customer/test_dispatch.py`。[设计/证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-tool-dispatch/2026-10-20-customer-tool-dispatch.zh.md)。Agent 分发已通过 CustomerRuntime 接通；业务装配仍单独推进。原生集成遵循下文 runtime-customer CON-7。
 
 ## 使用方式
 
@@ -33,3 +33,5 @@ async def observe_run(client, request, executors):
 ```
 
 消费 observe_run 时应使用 contextlib.aclosing，确保提前退出也关闭调度器。收到 cleanup_timeout 后依据 quiescent 隔离尚未停止的执行上下文；不要把回传事件或任务输入写入诊断日志。
+
+原生 Runtime 集成：私有 Python 本地事件批次共用调度器有界队列，绝不从远端 JSON 解析。原生结果提交等待 Runtime journal/yield 确认；取消、队列溢出或日志失败时停止提交。原生模式校验本地已注册工具名的远端展示，实际输出本地完成的 call/response 对；Host 自有工具展示保留。本地状态遵循 [runtime-customer CON-7](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer/README.zh.md)。既有显式 executor 的展示行为不变。
