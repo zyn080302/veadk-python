@@ -1,4 +1,4 @@
-"""Public managed customer channel client; runtime dispatch is a separate layer."""
+"""Public customer transport, tool, event and durable session components."""
 
 from .client import CustomerChannelClient
 from .dispatch import CustomerToolDispatcher
@@ -9,6 +9,12 @@ from .protocol import (
     CustomerSkill,
     CustomerTool,
 )
+from .session_store import (
+    CustomerSessionBinding,
+    CustomerSessionLease,
+    CustomerSessionStore,
+    CustomerTurnRecord,
+)
 
 __all__ = [
     "CustomerAdkEventStream",
@@ -18,4 +24,8 @@ __all__ = [
     "CustomerRunRequest",
     "CustomerSkill",
     "CustomerTool",
+    "CustomerSessionBinding",
+    "CustomerSessionLease",
+    "CustomerSessionStore",
+    "CustomerTurnRecord",
 ]
