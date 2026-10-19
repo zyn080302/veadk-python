@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from .cleanup import _run_cleanup
 from .protocol import CustomerChannelError
 
 _metadata = MetaData()
@@ -290,8 +291,7 @@ class CustomerSessionLease:
         return self
 
     async def __aexit__(self, *_):
-        with anyio.CancelScope(shield=True):
-            await self.close()
+        await self.close()
 
     @asynccontextmanager
     async def _bounded_lock(self):
@@ -609,6 +609,12 @@ class CustomerSessionLease:
 
     async def close(self):
         """Relinquish ownership without making uncertain execution reusable."""
+        try:
+            await _run_cleanup(self._close(), timeout=self._store.operation_timeout)
+        except TimeoutError:
+            raise CustomerChannelError("store_unavailable") from None
+
+    async def _close(self):
         if self._closed:
             return
         try:

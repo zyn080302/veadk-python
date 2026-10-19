@@ -14,6 +14,7 @@ from typing import Any
 import anyio
 
 from .client import CustomerChannelClient
+from .cleanup import _wait_cleanup
 from .protocol import CustomerChannelError, CustomerRunRequest
 
 Executor = Callable[[dict[str, Any], str], Awaitable[Any]]
@@ -139,9 +140,8 @@ class CustomerToolDispatcher:
             self._closed = True
             if not self._owner.done():
                 self._owner.cancel()
-        with anyio.CancelScope(shield=True):
-            waiting = {self._owner, *self._children}
-            _, pending = await asyncio.wait(waiting, timeout=self._begin_cleanup())
+        waiting = {self._owner, *self._children}
+        _, pending = await _wait_cleanup(waiting, timeout=self._begin_cleanup())
         if pending or not self.quiescent:
             raise CustomerChannelError("cleanup_timeout")
         if raise_run_error and not self._owner.cancelled():
@@ -315,13 +315,12 @@ class CustomerToolDispatcher:
                     for task in tasks:
                         self._cancel_task(task)
                     if tasks:
-                        with anyio.CancelScope(shield=True):
-                            _, pending = await asyncio.wait(
-                                tasks,
-                                timeout=min(
-                                    self._cleanup_timeout / 2, self._begin_cleanup()
-                                ),
-                            )
+                        _, pending = await _wait_cleanup(
+                            tasks,
+                            timeout=min(
+                                self._cleanup_timeout / 2, self._begin_cleanup()
+                            ),
+                        )
                         if pending:
                             raise CustomerChannelError("cleanup_timeout")
         finally:

@@ -45,3 +45,10 @@ await engine.dispose()
 
 
 `CustomerSessionStore.operation_timeout` exposes the database operation budget for lease sizing. `CustomerSessionLease.has_turns()` checks for any reserved attempt, including incomplete attempts, so a Runtime cannot recreate missing remote history. No table/schema change.
+
+
+## Repeated cancellation cleanup (2026-10-20)
+
+CON-3: Lease release resists repeated caller cancellation within the store operation budget, including lock wait; then cancellation propagates. Releasing an uncertain run still blocks reuse.
+
+[Design](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.md)

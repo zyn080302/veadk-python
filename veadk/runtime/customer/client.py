@@ -16,6 +16,7 @@ import httpx
 from jsonschema import Draft202012Validator
 from pydantic import SecretStr
 
+from .cleanup import _run_cleanup
 from .protocol import CHANNEL_PATH, PROTOCOL, CustomerChannelError, CustomerRunRequest
 from .sse import read_events
 
@@ -125,8 +126,9 @@ class CustomerChannelClient:
     async def aclose(self):
         self._closed = True
         try:
-            with anyio.move_on_after(self._cleanup_timeout, shield=True):
-                await self._http.aclose()
+            await _run_cleanup(self._http.aclose(), timeout=self._cleanup_timeout)
+        except TimeoutError:
+            pass
         finally:
             self._affinity = None
             self._headers_provider = None
@@ -359,25 +361,30 @@ class CustomerChannelClient:
             try:
                 if sent and not channel._terminal:
                     # Reserve part of the single cleanup budget for stream close.
-                    with anyio.move_on_after(self._cleanup_timeout * 0.8, shield=True):
-                        try:
-                            await self._json(
+                    try:
+                        await _run_cleanup(
+                            self._json(
                                 "POST",
                                 channel._message_path,
                                 {
                                     "type": "run.cancel",
                                     "run_id": snapshot.run_id,
                                 },
-                            )
-                        except CustomerChannelError:
-                            pass
+                            ),
+                            timeout=self._cleanup_timeout * 0.8,
+                        )
+                    except (CustomerChannelError, TimeoutError):
+                        pass
             finally:
                 try:
                     if response is not None:
-                        with anyio.move_on_after(
-                            max(0, cleanup_deadline - time.monotonic()), shield=True
-                        ):
-                            await response.aclose()
+                        try:
+                            await _run_cleanup(
+                                response.aclose(),
+                                timeout=max(0, cleanup_deadline - time.monotonic()),
+                            )
+                        except TimeoutError:
+                            pass
                 finally:
                     channel._pending.clear()
                     self._active = False

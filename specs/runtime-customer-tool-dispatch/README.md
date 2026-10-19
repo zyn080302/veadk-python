@@ -35,3 +35,10 @@ async def observe_run(client, request, executors):
 Consume observe_run with contextlib.aclosing so early exit also closes the dispatcher. After cleanup_timeout, use quiescent to quarantine execution context that has not stopped; never write forwarded events or task inputs to diagnostics.
 
 Native Runtime integration: a private Python local-event batch shares the bounded dispatcher queue. It is never parsed from remote JSON. Native result submission waits for the Runtime journal/yield acknowledgement; cancellation, queue overflow and journal failure stop submission. Native mode validates remote display for locally registered tool names but emits the local completed call/response pair instead; Host-only tool display is preserved. Local state is governed by [runtime-customer CON-7](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer/README.md). Existing explicit-executor display behavior is unchanged.
+
+
+## Repeated cancellation cleanup (2026-10-20)
+
+CON-5: Repeated caller cancellation must not skip the bounded join before client close. Defer cancellation propagation until the existing deadline or task completion; no deadline extension.
+
+[Design](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.md)

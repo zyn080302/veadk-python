@@ -13,7 +13,7 @@ ID: `runtime-customer-channel`; revision: 2026-10-20; status: active.
 | CON-3 | 生命周期 | 一个客户端绑定一个 (app,user,session)，最多一轮运行，控制面请求不能与运行或其他控制面请求竞争。调用者负责持久化和关闭客户端。只有成功 `run.completed` 且此前无错误事件、无待回传工具才表示成功；error/cancelled/EOF/非法事件抛带固定 code 的 `CustomerChannelError`。本地映射及 HTTP 状态不表示远端已持久化。 |
 | CON-4 | HTTP | 可信 HTTP(S) 入口，不含 userinfo/query/fragment；明文 HTTP 仅允许本机回环测试。明确请求头 provider，不使用环境代理、不重定向。`X-Session-Id` 为私有不透明亲和值，由合法响应更新，不进入事件或 state。单次 30 s、整轮 165 s、清理 5 s，可配置正有限期限。默认响应/事件上限 1 MiB、运行正文上限 2 MiB。不重试，包括结果不确定的工具回传。 |
 | CON-5 | 工具 | 暴露 `tool.call` 前核对 run/scope/catalog/name/executor/schema/deadline；最多 64 在途、每轮最多 1024 个不同调用。重复 ID 失败；tool.cancel 使待回传失效。HTTP 前消费结果，取消或传输失败不能重放。执行取消由后续适配器负责，transport 暴露 tool.cancel。 |
-| CON-6 | 清理 | 终态前退出上下文，清理期限内最多尝试一次 run.cancel，再关闭响应，即使取消未送达。不创建后台任务或无限队列。正常完成不取消。整轮期限包含下游消费时间，取消异常保持取消语义。 |
+| CON-6 | 清理 | 终态前退出上下文，清理期限内最多尝试一次 run.cancel，再关闭响应，即使取消未送达。清理底层任务有时间上限，不创建无限队列。正常完成不取消。整轮期限包含下游消费时间，取消异常保持取消语义。 |
 | CON-7 | 兼容 | 独立于普通 Studio 清单；现有分发、App、默认值、callback 和依赖不变。公开客户端配置不得从不可信请求头填充。凭证和远端正文不进入诊断异常。测试使用替身配置和 HTTP，真实入口验收单列。 |
 
 验证：`tests/runtime/customer/` → CON-1–CON-7; `.github/workflows/harness-sidecar-release-gate.yaml` 执行相同合同测试。
@@ -45,3 +45,10 @@ async def invoke(endpoint, header_provider, full_config: SecretStr, user_id, ses
 ## 持久 Runtime 集成新增接口（2026-10-20）
 
 `restore_session(app_name, user_id, session_id, affinity=SecretStr(...))` 在任何 HTTP 前一次性绑定新客户端。`session_exists(...)` 只检查该远端会话并返回布尔值，仅 HTTP 404 代表缺失，不枚举 Session 或返回历史。构造参数 `on_affinity` 为可选异步 callback：新私有亲和值保存后才替换当前值、允许后续请求构造 Header。callback 失败后客户端固定报 `affinity_persistence_failed`，取消仍传播。`aclose()` 清除 callback 和私有数据。这些接口为增量扩展，已有客户端不强制使用持久存储。
+
+
+## 重复取消清理 (2026-10-20)
+
+CON-6: run 取消、响应关闭与连接池关闭使用有界且明确拥有的底层任务，防御重复直接取消。无无界队列；原生成器与 AnyIO scope 保持原任务。清理后仍传播调用方取消。
+
+[设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.zh.md)

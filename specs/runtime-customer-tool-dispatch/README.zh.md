@@ -35,3 +35,10 @@ async def observe_run(client, request, executors):
 消费 observe_run 时应使用 contextlib.aclosing，确保提前退出也关闭调度器。收到 cleanup_timeout 后依据 quiescent 隔离尚未停止的执行上下文；不要把回传事件或任务输入写入诊断日志。
 
 原生 Runtime 集成：私有 Python 本地事件批次共用调度器有界队列，绝不从远端 JSON 解析。原生结果提交等待 Runtime journal/yield 确认；取消、队列溢出或日志失败时停止提交。原生模式校验本地已注册工具名的远端展示，实际输出本地完成的 call/response 对；Host 自有工具展示保留。本地状态遵循 [runtime-customer CON-7](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer/README.zh.md)。既有显式 executor 的展示行为不变。
+
+
+## 重复取消清理 (2026-10-20)
+
+CON-5: 调用方重复取消不能跳过关闭 client 前的有界等待。等待既有截止时间或任务完成后再传播取消，不延长预算。
+
+[设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.zh.md)

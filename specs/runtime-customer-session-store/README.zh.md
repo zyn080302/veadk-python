@@ -45,3 +45,10 @@ await engine.dispose()
 
 
 `CustomerSessionStore.operation_timeout` 公开数据库操作预算，供计算租约使用。`CustomerSessionLease.has_turns()` 检查是否有任何预留执行，包括未完成尝试，避免 Runtime 重建丢失的远端历史。不改变表/schema。
+
+
+## 重复取消清理 (2026-10-20)
+
+CON-3: 租约释放在 store 操作预算内（含锁等待）防御调用方重复取消，随后传播取消。释放状态不确定的 run 仍禁止复用。
+
+[设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.zh.md)

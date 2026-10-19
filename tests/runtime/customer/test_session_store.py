@@ -494,3 +494,49 @@ async def test_corrupt_journal_never_returns_raw_validation_error(stores):
             )
         with pytest.raises(CustomerChannelError, match="^journal_corrupt$"):
             await lease.read_completed("invocation-a")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [False, True])
+async def test_repeated_cancel_releases_lease_without_replaying(stores, running):
+    lease = await claim(stores[0])
+    started, cleaning, release = (asyncio.Event() for _ in range(3))
+    update = lease._session_update
+
+    async def paused_update(connection, **values):
+        if "owner" in values:
+            cleaning.set()
+            await release.wait()
+        return await update(connection, **values)
+
+    lease._session_update = paused_update
+
+    async def run_owned():
+        async with lease:
+            if running:
+                await lease.begin_turn("invocation-a", DIGEST)
+            started.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(run_owned())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        task.cancel()
+        await asyncio.wait_for(cleaning.wait(), 1)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert lease._closed
+        if running:
+            with pytest.raises(CustomerChannelError, match="session_recovery_required"):
+                await claim(stores[1])
+        else:
+            async with await claim(stores[1]):
+                pass
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await lease.close()
