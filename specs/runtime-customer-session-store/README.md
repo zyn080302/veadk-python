@@ -42,3 +42,6 @@ async with await store.claim(
     # Only after verified display persistence: await lease.acknowledge_display()
 await engine.dispose()
 ```
+
+
+`CustomerSessionStore.operation_timeout` exposes the database operation budget for lease sizing. `CustomerSessionLease.has_turns()` checks for any reserved attempt, including incomplete attempts, so a Runtime cannot recreate missing remote history. No table/schema change.

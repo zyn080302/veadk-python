@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import math
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from urllib.parse import quote, urlsplit
 
 import anyio
 import httpx
 from jsonschema import Draft202012Validator
+from pydantic import SecretStr
 
 from .protocol import CHANNEL_PATH, PROTOCOL, CustomerChannelError, CustomerRunRequest
 from .sse import read_events
@@ -30,6 +32,32 @@ def _encode(body, limit):
     return encoded
 
 
+def _validate_endpoint(endpoint):
+    if not isinstance(endpoint, str):
+        raise ValueError("Invalid customer endpoint")
+    try:
+        parsed = urlsplit(endpoint)
+        valid = (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and (
+                parsed.scheme == "https"
+                or parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+            )
+        )
+        valid = valid and not any(ord(c) <= 32 for c in endpoint)
+        # Force port validation here instead of leaking InvalidURL later.
+        parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Invalid customer endpoint") from None
+
+
 class CustomerChannelClient:
     """One HTTP pool and private affinity value per trusted business session.
 
@@ -44,33 +72,14 @@ class CustomerChannelClient:
         *,
         headers: Callable[[], Mapping[str, str]] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        on_affinity: Callable[[SecretStr], Awaitable[None]] | None = None,
         operation_timeout: float = 30,
         turn_timeout: float = 165,
         cleanup_timeout: float = 5,
         max_event_bytes: int = 1024 * 1024,
         max_request_bytes: int = 2 * 1024 * 1024,
     ):
-        try:
-            parsed = urlsplit(endpoint)
-            valid = (
-                parsed.scheme in {"http", "https"}
-                and parsed.hostname
-                and parsed.username is None
-                and parsed.password is None
-                and not parsed.query
-                and not parsed.fragment
-                and (
-                    parsed.scheme == "https"
-                    or parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-                )
-            )
-            valid = valid and not any(ord(c) <= 32 for c in endpoint)
-            # Force port validation here instead of leaking InvalidURL later.
-            parsed.port
-        except ValueError:
-            valid = False
-        if not valid:
-            raise ValueError("Invalid customer endpoint") from None
+        _validate_endpoint(endpoint)
         for value in (operation_timeout, turn_timeout, cleanup_timeout):
             if (
                 isinstance(value, bool)
@@ -85,6 +94,9 @@ class CustomerChannelClient:
         self._endpoint = endpoint.rstrip("/")
         self._headers_provider = headers
         self._affinity: str | None = None
+        self._on_affinity = on_affinity
+        self._affinity_lock = asyncio.Lock()
+        self._affinity_failed = False
         self._identity: tuple[str, str, str] | None = None
         self._active = False
         self._control_active = False
@@ -118,10 +130,17 @@ class CustomerChannelClient:
         finally:
             self._affinity = None
             self._headers_provider = None
+            self._on_affinity = None
+
+    async def _request_headers(self):
+        async with self._affinity_lock:
+            return self._headers()
 
     def _headers(self):
         if self._closed:
             raise CustomerChannelError("client_closed")
+        if self._affinity_failed:
+            raise CustomerChannelError("affinity_persistence_failed")
         try:
             headers = httpx.Headers(
                 self._headers_provider() if self._headers_provider else {}
@@ -136,18 +155,53 @@ class CustomerChannelClient:
         except Exception:
             raise CustomerChannelError("invalid_headers") from None
 
-    def _check_response(self, response):
+    def restore_session(self, app_name, user_id, session_id, *, affinity=None):
+        """Restore a trusted binding once, before any HTTP operation."""
+        if (
+            self._closed
+            or self._identity is not None
+            or self._active
+            or self._control_active
+        ):
+            raise CustomerChannelError("client_busy")
+        self._validate_identity(app_name, user_id, session_id)
+        if affinity is not None:
+            if not isinstance(affinity, SecretStr):
+                raise ValueError("Private affinity requires SecretStr")
+            self._validate_affinity(affinity.get_secret_value())
+        self._bind((app_name, user_id, session_id))
+        self._affinity = affinity.get_secret_value() if affinity is not None else None
+
+    @staticmethod
+    def _validate_affinity(affinity):
+        if (
+            not affinity
+            or len(affinity) > 8192
+            or any(ord(c) < 32 or ord(c) == 127 for c in affinity)
+        ):
+            raise CustomerChannelError("invalid_affinity")
+
+    async def _check_response(self, response):
         if not 200 <= response.status_code < 300:
             raise CustomerChannelError(f"http_status_{response.status_code}")
         affinity = response.headers.get("X-Session-Id")
         if affinity is not None:
-            if (
-                not affinity
-                or len(affinity) > 8192
-                or any(ord(c) < 32 or ord(c) == 127 for c in affinity)
-            ):
-                raise CustomerChannelError("invalid_affinity")
-            self._affinity = affinity
+            self._validate_affinity(affinity)
+            async with self._affinity_lock:
+                if self._affinity_failed:
+                    raise CustomerChannelError("affinity_persistence_failed")
+                if affinity != self._affinity:
+                    try:
+                        if self._on_affinity is not None:
+                            await self._on_affinity(SecretStr(affinity))
+                    except BaseException as error:
+                        self._affinity_failed = True
+                        if isinstance(error, Exception):
+                            raise CustomerChannelError(
+                                "affinity_persistence_failed"
+                            ) from None
+                        raise
+                    self._affinity = affinity
 
     def _bind(self, identity):
         if self._identity is not None and self._identity != identity:
@@ -161,10 +215,10 @@ class CustomerChannelClient:
                 async with self._http.stream(
                     method,
                     self._endpoint + path,
-                    headers=self._headers(),
+                    headers=await self._request_headers(),
                     content=content,
                 ) as response:
-                    self._check_response(response)
+                    await self._check_response(response)
                     data = bytearray()
                     async for chunk in response.aiter_bytes():
                         if len(data) + len(chunk) > self._event_limit:
@@ -216,7 +270,8 @@ class CustomerChannelClient:
             )
         }
 
-    async def create_session(self, app_name: str, user_id: str, session_id: str):
+    @staticmethod
+    def _validate_identity(app_name, user_id, session_id):
         for value, limit in ((app_name, 128), (user_id, 256), (session_id, 128)):
             if (
                 not isinstance(value, str)
@@ -225,6 +280,25 @@ class CustomerChannelClient:
                 or value in {".", ".."}
             ):
                 raise CustomerChannelError("invalid_session")
+
+    async def session_exists(self, app_name: str, user_id: str, session_id: str):
+        """Check one exact session; never return remote history to the caller."""
+        self._validate_identity(app_name, user_id, session_id)
+        with self._control_operation():
+            self._bind((app_name, user_id, session_id))
+            path = f"/managed/apps/{quote(app_name, safe='')}/users/{quote(user_id, safe='')}/sessions/{quote(session_id, safe='')}"
+            try:
+                result = await self._json("GET", path)
+            except CustomerChannelError as error:
+                if str(error) == "http_status_404":
+                    return False
+                raise
+        if result.get("id") != session_id:
+            raise CustomerChannelError("session_mismatch")
+        return True
+
+    async def create_session(self, app_name: str, user_id: str, session_id: str):
+        self._validate_identity(app_name, user_id, session_id)
         with self._control_operation():
             self._bind((app_name, user_id, session_id))
             path = f"/managed/apps/{quote(app_name, safe='')}/users/{quote(user_id, safe='')}/sessions"
@@ -253,7 +327,7 @@ class CustomerChannelClient:
                 http_request = self._http.build_request(
                     "POST",
                     self._endpoint + CHANNEL_PATH + "/http-runs",
-                    headers=self._headers(),
+                    headers=await self._request_headers(),
                     content=content,
                 )
                 sent = True
@@ -265,7 +339,7 @@ class CustomerChannelClient:
                 # Explicit HTTP rejection did not establish a channel.
                 if not 200 <= response.status_code < 300:
                     sent = False
-                self._check_response(response)
+                await self._check_response(response)
                 if (
                     response.headers.get("content-type", "").split(";")[0].strip()
                     != "text/event-stream"

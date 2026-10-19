@@ -1,0 +1,62 @@
+# Customer Runtime
+
+[English](README.md)
+
+组件：runtime-customer。修订：2026-10-20。状态：active。
+
+负责公开 customer Agent 执行边界，组合已有通信、调度、事件投影与持久存储。
+
+- CON-1：服务端构造 CustomerRuntimeConfig，含 endpoint、engine_id、remote_app、SecretStr agent_config、CustomerSessionStore、工具/Skill 声明及匹配异步执行器。它不是请求 schema，也不负责解析凭证；Agent 不序列化配置或 endpoint。
+- CON-2：Agent(runtime="customer") 跳过本地模型初始化，仅接受本地 name/description/身份/memory/run processor 和 Runtime 配置。原生模型/工具/Skill/回调/状态配置在明确桥接前拒绝；运行时重新校验 clone/修改。
+- CON-3：远端映射绑定本地 app/user/session 及 endpoint、配置、工具/Skill 修订摘要。私有亲和值恢复并持久更新后才允许后续 HTTP。定点查询 Session 不把历史读入模型；已有执行后远端 Session 丢失则阻止。
+- CON-4：远端操作前预留，只发送新文本；准备/执行/清理都有边界，不重试整轮。完整本地 Event 先记日志再输出，最终成功需要终态、ACK 和清理。下一轮核验 ADK 实际保存日志内容后，才解除待展示状态。
+- CON-5：recover_display(agent, session_service, local_identity) 获取同一租约，核验已保存前缀/内容、追加缺失展示并回读；不远端调用、不重放工具。结果不明、内容冲突/乱序及遗留占用需要其他恢复流程。
+- CON-6：HarnessApp 接受预建 customer Agent；请求只能确认 runtime="customer"，不能切换 endpoint/配置/引擎/模型/工具。HarnessConfig/环境创建仍仅 adk/codex。显式 max_llm_calls、不支持的插件/特性拒绝；Host 循环/token 预算仍需另外实现。
+
+身份须由上游鉴权。Header 来自服务端 callback，不能任意转发客户端 Header。数据库加密/访问/期限与可信工具结果处理归调用方；SQLite/离线 Host 测试不代表 PostgreSQL 或部署 Host 兼容。错误为固定码，取消传播。不自动接管租约、不保证分布式 exactly-once、不过滤正文凭证、不强停非合作工具。
+
+设计/任务/验证以[变更记录](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/runtime-customer/2026-10-20-customer-runtime.zh.md)为正本。测试：tests/runtime/customer/test_runtime.py 和现有 customer/Harness 门禁。不新增依赖、前端、部署或 CLI 工厂。
+
+
+## 服务端装配示例
+
+在异步应用工厂中使用当前 SDK 分支。endpoint 和完整 Host 配置必须由可信本地配置代码提供，不能放进请求 JSON。下文 `host_configuration` 是 `SecretStr`，不是 YAML 文件名。
+
+```python
+from veadk import Agent
+from veadk.cloud.harness_app.app import HarnessApp
+from veadk.memory.short_term_memory import ShortTermMemory
+from veadk.runtime.customer import CustomerRuntimeConfig, CustomerSessionStore
+
+# db_engine: caller-owned AsyncEngine with hide_parameters=True and safe logs.
+# adk_sessions: caller-owned ADK SessionService for display persistence.
+store = CustomerSessionStore(db_engine)
+await store.initialize()
+config = CustomerRuntimeConfig(
+    endpoint=customer_endpoint,
+    engine_id="customer-v1",
+    remote_app="managed_example",
+    agent_config=host_configuration,
+    store=store,
+    headers=trusted_headers_provider,
+    tools=tool_declarations,
+    executors=async_executors,
+)
+agent = Agent(
+    name="customer_agent",
+    runtime="customer",
+    customer_runtime_config=config,
+)
+app = HarnessApp(
+    agent, ShortTermMemory(session_service=adk_sessions), "example_app"
+).app
+```
+
+
+示例没有安装 `Agent.tools`/模型回调桥。显式提供匹配的异步执行器，调用方负责鉴权和结果过滤。不要配置本地 `max_llm_calls`、模型字段、插件或请求覆盖，本阶段不能在 Host 执行这些设置。标准 `/run`、`/run_sse` 支持文本输入；应用鉴权和部署不属于此示例。
+
+默认 total_timeout=165 秒、operation_timeout=10 秒、cleanup_timeout=10 秒、max_concurrency=8、event_queue_size=16，租约还覆盖有界清理/数据库释放。首次会话准备后必须取得亲和值。首轮定点 GET/创建 Session；续问依赖已核对的 Host 合同在推理前拒绝不存在的 Session，避免下载完整历史。endpoint、Host 配置/环境、引擎版本、工具/Skill 声明变化需要新本地 Session；Header 轮换值不参与绑定，调用方须保持账号/租户归属不变。
+
+展示保存失败时，在下一轮用户输入前仅通过可信服务端代码调用 `await get_runtime("customer").recover_display(agent, adk_sessions, ("example_app", user_id, session_id))`，返回追加事件数。已有事件必须是同一日志前缀；内容冲突或已有后续 invocation 则拒绝恢复。不会续跑未完成执行或释放进程崩溃遗留占用。恢复比较身份/内容/actions/usage，排除 ADK 自动生成的 node_info/output 记录。状态回调和插件仍不支持。
+
+Runner 兼容边界：本阶段验证 Google ADK Runner 和标准 Harness HTTP 路由。VeADK Runner.run() 默认传入 max_llm_calls=100，customer 会拒绝该显式本地预算；Host 预算或调用方适配完成前，不能把便捷 Runner.run() 入口视为已接通。

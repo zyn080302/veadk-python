@@ -40,3 +40,8 @@ async def invoke(endpoint, header_provider, full_config: SecretStr, user_id, ses
 ```
 
 调用者提供 Host 支持的完整配置和已授权入口；该片段本身不配置或调用模型。仅新会话调用创建接口；续轮复用客户端和会话，重新创建 CustomerRunRequest。工具和 Skill 须显式提供，并发工具执行和取消由适配器负责，不能记录请求/事件正文。复现本地离线证据使用所链接 PRD 的命令；CI 在隔离替身环境运行 `python -m pytest -q tests/runtime/customer`。
+
+
+## 持久 Runtime 集成新增接口（2026-10-20）
+
+`restore_session(app_name, user_id, session_id, affinity=SecretStr(...))` 在任何 HTTP 前一次性绑定新客户端。`session_exists(...)` 只检查该远端会话并返回布尔值，仅 HTTP 404 代表缺失，不枚举 Session 或返回历史。构造参数 `on_affinity` 为可选异步 callback：新私有亲和值保存后才替换当前值、允许后续请求构造 Header。callback 失败后客户端固定报 `affinity_persistence_failed`，取消仍传播。`aclose()` 清除 callback 和私有数据。这些接口为增量扩展，已有客户端不强制使用持久存储。

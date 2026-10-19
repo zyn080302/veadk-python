@@ -202,6 +202,10 @@ class _HarnessWebServer(AdkWebServer):
 
     async def get_runner_async(self, app_name: str) -> AdkRunner:
         runner = await super().get_runner_async(app_name)
+        if getattr(runner.agent, "runtime", None) == "customer":
+            if self._call_limit_plugin._get_limit() is not None:
+                raise ValueError("Customer Host does not enforce the local call limit")
+            return runner
         manager = runner.plugin_manager
         # No await between lookup and registration on the shared cached runner.
         if manager.get_plugin(self._call_limit_plugin.name) is None:

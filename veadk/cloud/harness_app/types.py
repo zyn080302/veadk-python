@@ -296,7 +296,7 @@ class HarnessOverrides(BaseModel):
         default="You are a helpful assistant.",
         description="System prompt / instruction.",
     )
-    runtime: Literal["adk", "codex"] = Field(
+    runtime: Literal["adk", "codex", "customer"] = Field(
         default="adk", description="Agent runtime backend."
     )
     registry_space_id: str = Field(

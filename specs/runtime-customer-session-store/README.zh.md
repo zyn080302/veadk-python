@@ -42,3 +42,6 @@ async with await store.claim(
     # Only after verified display persistence: await lease.acknowledge_display()
 await engine.dispose()
 ```
+
+
+`CustomerSessionStore.operation_timeout` 公开数据库操作预算，供计算租约使用。`CustomerSessionLease.has_turns()` 检查是否有任何预留执行，包括未完成尝试，避免 Runtime 重建丢失的远端历史。不改变表/schema。

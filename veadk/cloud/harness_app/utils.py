@@ -1601,6 +1601,22 @@ def spawn_harness_agent(
     ``download_dir`` is where any skills are downloaded; the caller owns it and
     should remove it once the invocation finishes.
     """
+    if (
+        base_agent.runtime == "customer"
+        or getattr(base_agent, "customer_runtime_config", None) is not None
+        or ("runtime" in overrides.model_fields_set and overrides.runtime == "customer")
+    ):
+        if (
+            base_agent.runtime != "customer"
+            or overrides.model_fields_set - {"runtime"}
+            or (
+                "runtime" in overrides.model_fields_set
+                and overrides.runtime != "customer"
+            )
+        ):
+            raise ValueError("Customer Harness configuration is server-owned")
+        return base_agent.clone()
+
     overrides = normalize_harness_overrides(overrides)
     set_fields = overrides.model_fields_set
 

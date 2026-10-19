@@ -56,6 +56,8 @@ def test_sidecar_release_gate_runs_backend_and_frontend_in_parallel() -> None:
     assert "tests/runtime/test_runtime_stream_cleanup.py" in backend_run
     triggers = workflow.get("on", workflow.get(True))
     for event in ("push", "pull_request"):
+        assert "veadk/runtime/__init__.py" in triggers[event]["paths"]
+        assert "veadk/runtime/compat.py" in triggers[event]["paths"]
         assert "veadk/runtime/customer/**" in triggers[event]["paths"]
         assert "tests/runtime/customer/**" in triggers[event]["paths"]
         assert "veadk/agent.py" in triggers[event]["paths"]

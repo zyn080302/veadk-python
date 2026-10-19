@@ -324,13 +324,18 @@ class Agent(LlmAgent):
     re-assigns every list field on the copy. Consumed by
     :func:`veadk.runtime.compat.explicit_fields`."""
 
-    runtime: Literal["adk", "codex", "piagent", "dsh"] = "adk"
+    runtime: Literal["adk", "codex", "piagent", "dsh", "customer"] = "adk"
     """Agent runtime backend. ``"adk"`` (default) uses Google ADK's built-in LLM
     flow. ``"codex"`` delegates the inner agent loop to the OpenAI Codex SDK.
     ``"piagent"`` delegates the inner agent loop to a local Pi coding agent
     binary through its RPC mode. ``"dsh"`` delegates the inner agent loop to the
     DeepSeek Harness SDK/runtime binary. Non-``adk`` runtimes are implemented
     under :mod:`veadk.runtime`."""
+
+    customer_runtime_config: Optional[Any] = Field(
+        default=None, exclude=True, repr=False
+    )
+    """Server-owned CustomerRuntimeConfig. Never accept from request JSON."""
 
     codex_runtime_config: Optional[Any] = None
     """Optional :class:`veadk.runtime.codex.config.CodexRuntimeConfig` (or a
@@ -366,6 +371,15 @@ class Agent(LlmAgent):
         # adds every assignment to ``model_fields_set``, so this is the only
         # point at which "the caller set this" is still knowable.
         self._veadk_explicit_fields = frozenset(self.model_fields_set)
+
+        if self.runtime == "customer" or self.customer_runtime_config is not None:
+            from veadk.runtime.customer.config import check_customer_agent
+
+            check_customer_agent(self)
+            super().model_post_init(None)
+            if self.run_processor is None:
+                self.run_processor = NoOpRunProcessor()
+            return
 
         super().model_post_init(None)  # for sub_agents init
 
@@ -658,6 +672,8 @@ class Agent(LlmAgent):
         Args:
             model_name (str): The new model name, without a provider prefix.
         """
+        if self.runtime == "customer" or self.customer_runtime_config is not None:
+            raise ValueError("Customer model configuration is server-owned")
         logger.info(f"Updating model to {model_name}")
         self.model_name = model_name
         self.model = self.model.model_copy(
@@ -880,6 +896,8 @@ class Agent(LlmAgent):
         external agent harness (e.g. the Claude Code SDK) back into the ADK event
         stream, so the surrounding ``Runner`` is unaffected.
         """
+        if self.customer_runtime_config is not None and self.runtime != "customer":
+            raise ValueError("A customer Agent cannot switch runtime")
         if self.runtime == "adk":
             # A transfer can close this wrapper before the LLM stream ends.
             # Close it in the same task so tracing contexts do not leak into

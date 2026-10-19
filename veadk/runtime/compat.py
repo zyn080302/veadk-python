@@ -498,6 +498,12 @@ def check_agent_runtime_support(
             order of :data:`SUPPORT_RULES`. ``warn``-policy violations are
             logged once per ``(agent identity, field)`` and never raise.
     """
+    if runtime == "customer":
+        from veadk.runtime.customer.config import check_customer_agent
+
+        check_customer_agent(agent, run_config)
+        return
+
     if not runtime or runtime == "adk":
         return
 

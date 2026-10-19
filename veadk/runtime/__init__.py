@@ -49,6 +49,11 @@ def get_runtime(name: str) -> BaseRuntime:
         NotImplementedError: If ``name`` is a known-but-unimplemented runtime.
         ValueError: If ``name`` is unknown.
     """
+    if name == "customer":
+        from veadk.runtime.customer import CustomerRuntime
+
+        return CustomerRuntime()
+
     if name == "codex":
         try:
             from veadk.runtime.codex import CodexRuntime

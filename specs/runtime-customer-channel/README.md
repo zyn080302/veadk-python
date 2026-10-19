@@ -40,3 +40,8 @@ async def invoke(endpoint, header_provider, full_config: SecretStr, user_id, ses
 ```
 
 The caller supplies a complete Host-supported configuration and an authorized endpoint; this snippet does not configure or call a model on its own. Call session creation only for a new session. For continuation, reuse the client and session but construct a new CustomerRunRequest. Supply tools/skills explicitly; concurrent tool execution and cancellation are the adapter's responsibility. Never log the request or event payload. To reproduce local offline evidence use the command in the linked PRD; CI runs `python -m pytest -q tests/runtime/customer` in its isolated fixture environment.
+
+
+## Durable Runtime integration additions (2026-10-20)
+
+`restore_session(app_name, user_id, session_id, affinity=SecretStr(...))` binds a fresh client once before HTTP. `session_exists(...)` checks that exact remote session and returns only a boolean; only HTTP 404 means missing. It never lists sessions or returns history. Constructor `on_affinity` is an optional async callback: new private affinity is persisted before it replaces the current value or later requests can construct their headers. Callback failure poisons the client with `affinity_persistence_failed`; cancellation still propagates. `aclose()` discards callback and private data. These are additive; existing clients need not supply durable storage.

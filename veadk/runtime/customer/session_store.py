@@ -150,6 +150,11 @@ class CustomerSessionStore:
         self._turn_limit = max_turn_bytes
         self._clock = time.time
 
+    @property
+    def operation_timeout(self):
+        """Database operation budget, including lock wait."""
+        return self._timeout
+
     @asynccontextmanager
     async def _transaction(self, *, claim=False):
         if (
@@ -413,6 +418,16 @@ class CustomerSessionLease:
             )
         self._pending_invocation_id = invocation_id
         return record
+
+    async def has_turns(self):
+        """Whether any remote attempt was reserved, including incomplete ones."""
+        async with self._change() as (connection, _):
+            result = await connection.execute(
+                select(_turns.c.invocation_id)
+                .where(_turns.c.session_key == self._key)
+                .limit(1)
+            )
+            return result.first() is not None
 
     def _journal_filter(self, invocation_id):
         return (
