@@ -57,3 +57,8 @@ CON-6: run 取消、响应关闭与连接池关闭使用有界且明确拥有的
 ## 原生协议扩展（2026-10-20）
 
 已实现，专项与全仓本机回归通过。[设计与证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md) 定义显式 protocol="native"、/apps + /run_sse、精确结果回显 ACK、跨 HTTP 期限和绑定隔离。Shared 默认行为不变。通道在既有展示投影前校验并规范化延迟工具和已验证回包回显。执行名额在等待 ACK 前释放，避免批次死锁；期限和 ACK 后 final 要求保持。store 表结构和未完成轮次隔离不变。不声称完整 Skill/附件、崩溃恢复或生产验收。
+
+
+## 原生附件扩展（2026-10-20）
+
+SDK 实现、全仓回归及固定 Host 源码联调已验证；业务固定制品验收待完成：[customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.zh.md)。原生输入增加有界原始媒体与不解释的元数据；Shared 仍只接受文本。Runtime 使用独立 8 MiB 原生首包预算；client max_initial_request_bytes=None 继承 max_request_bytes。工具批次默认仍为 2 MiB、输出事件 1 MiB。原输入保留在 ADK/Host 历史；journal/恢复表结构与输出内容不变。精确限制与验收以链接设计为准。

@@ -8,7 +8,7 @@ Design/evidence: [customer-adk-events](/Users/bytedance/Workspaces/VolcenginePro
 
 ## Responsibility and public entry
 
-`from veadk.runtime.customer import CustomerAdkEventStream`. Owns one `CustomerToolDispatcher` context and converts its observed `run.event` records into ADK display Events. Dispatcher owns execution/ACK/cancellation; Runner owns local persistence; Host owns reasoning history. No Agent runtime registration, business identity, model loop, tool callback/state bridge, replay, session migration, attachments, interactive tool authorization or multi-agent support is provided by this component.
+`from veadk.runtime.customer import CustomerAdkEventStream`. Owns one `CustomerToolDispatcher` context and converts its observed `run.event` records into ADK display Events. Dispatcher owns execution/ACK/cancellation; Runner owns local persistence; Host owns reasoning history. No Agent runtime registration, business identity, model loop, tool callback/state bridge, replay, session migration, media output, interactive tool authorization or multi-agent support is provided by this component.
 
 ```python
 async with CustomerAdkEventStream(
@@ -24,7 +24,7 @@ async with CustomerAdkEventStream(
 
 | ID | Contract |
 | --- | --- |
-| CON-1 | Constructor snapshots a nonempty text-only user Content and validates local author/invocation/optional branch. Context and `events()` are each single-use; enter first, consume and exit in the same asyncio task. Exceptions propagate; remote-derived diagnostics contain fixed codes only. |
+| CON-1 | Constructor snapshots a nonempty user Content (Shared text-only; native input follows runtime-customer CON-8) and validates local author/invocation/optional branch. Context and `events()` are each single-use; enter first, consume and exit in the same asyncio task. Exceptions propagate; remote-derived diagnostics contain fixed codes only. |
 | CON-2 | Initial identical user echo is discarded once. Different/repeated/late user events fail. All output uses local author/invocation/branch and fresh Event ID/time. Remote actions/state/metadata/routing/auth/signatures are never copied. This does not sanitize arbitrary business text or tool values: executors/Host must already redact secrets. |
 | CON-3 | Only text with optional thought flag, complete functionCall/functionResponse and five nonnegative integer usage counters (promptTokenCount, candidatesTokenCount, totalTokenCount, cachedContentTokenCount, thoughtsTokenCount, each at most 2^53-1) are projected. Snake case aliases also accepted, ambiguous aliases rejected. No usage is copied from partial snapshots. Unknown content parts or malformed shapes fail. Pure thought/usage events are partial display only; they are not final answers. |
 | CON-4 | Complete function IDs must be nonempty strings up to 128 chars; names up to 64 match each response. Map to fresh local IDs; at most 64 open/1024 total calls. Display never executes tools, does not correlate with channel request_id and must not create another local tool display stream. Duplicate/orphan responses, duplicate call IDs, partial tool fragments, long-running/auth/confirmation events and success with open calls fail explicitly. Remote callback state is not applied locally. |
@@ -47,3 +47,8 @@ Native Runtime integration: a private Python local-event batch shares the bounde
 ## Native protocol extension (2026-10-20)
 
 Implemented and verified by targeted/full local regression. [Design and evidence](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.md) defines protocol="native" opt-in, /apps + /run_sse, exact result-echo ACK, multi-HTTP deadlines and binding isolation. Shared defaults remain unchanged. The channel validates and normalizes deferred calls/verified response echoes before existing display projection. Execution permits end before ACK waiting to avoid batch deadlock; deadlines and final-after-ACK remain. Store schema and incomplete-turn quarantine remain unchanged. No claim of full Skill/attachment support, crash recovery or production acceptance.
+
+
+## Native attachment extension (2026-10-20)
+
+SDK implementation, full regression and fixed Host source integration verified; fixed business artifact acceptance pending: [customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.md). Native input gains bounded original media and opaque metadata; Shared remains text-only. Runtime uses a separate 8 MiB native initial envelope; client max_initial_request_bytes=None inherits max_request_bytes. Tool batches remain 2 MiB and output events 1 MiB by default. Original input stays in ADK/Host history; journal/recovery schemas and output content are unchanged. The linked design owns exact limits and acceptance.

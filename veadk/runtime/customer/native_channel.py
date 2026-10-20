@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 from .cleanup import _run_cleanup
 from .client import _encode
 from .protocol import CustomerChannelError
+from .messages import validate_user_message
 from .sse import read_events
 
 
@@ -53,7 +54,9 @@ def _native_payload(request, message):
 @asynccontextmanager
 async def _native_run(client, request):
     # Validate and size-check before submitting any remote effect.
-    _encode(_native_payload(request, request.new_message), client._request_limit)
+    message = validate_user_message(request.new_message, attachments=True)
+    request = request.model_copy(update={"new_message": message})
+    _encode(_native_payload(request, message), client._initial_request_limit)
     channel = _NativeChannel(client, request)
     client._active = True
     try:
@@ -95,6 +98,7 @@ class _NativeChannel:
             invocation_id=request.run_id,
             new_message=request.new_message,
             branch=None,
+            attachments=True,
         )
         self._response = None
         self._closed = False
@@ -122,10 +126,11 @@ class _NativeChannel:
         ) or any(future.cancelled() for _, future in self._submitted.values()):
             raise CustomerChannelError("stale_tool_result")
 
-    async def _step(self, message):
+    async def _step(self, message, *, initial):
         client = self._client
         content = _encode(
-            _native_payload(self._request, message), client._request_limit
+            _native_payload(self._request, message),
+            client._initial_request_limit if initial else client._request_limit,
         )
         try:
             req = client._http.build_request(
@@ -260,8 +265,9 @@ class _NativeChannel:
             raise CustomerChannelError("stream_unavailable")
         self._reading = True
         message = self._request.new_message
+        initial = True
         while True:
-            async with aclosing(self._step(message)) as events:
+            async with aclosing(self._step(message, initial=initial)) as events:
                 async for raw in events:
                     normalized, calls = self._normalize(raw)
                     yield {
@@ -297,6 +303,7 @@ class _NativeChannel:
                 _native_payload(self._request, message), self._client._request_limit
             )
             self._expected = copy.deepcopy(message)
+            initial = False
 
     async def submit_result(
         self, request_id, *, content=None, status="success", error=""

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .dispatch import CustomerToolDispatcher, _LocalToolEvents, _LocalToolFailure
 from .protocol import CustomerChannelError
+from .messages import validate_user_message
 
 
 def _field(data, camel, snake):
@@ -36,7 +37,9 @@ def _json_size(data):
 
 
 class _Projector:
-    def __init__(self, *, author, invocation_id, new_message, branch):
+    def __init__(
+        self, *, author, invocation_id, new_message, branch, attachments=False
+    ):
         if (
             not _identifier(author, 128)
             or author == "user"
@@ -45,25 +48,11 @@ class _Projector:
         ):
             raise ValueError("Invalid local event identity")
         try:
-            _json_size(new_message)
-            if (
-                not isinstance(new_message, dict)
-                or set(new_message) != {"role", "parts"}
-                or new_message["role"] != "user"
-                or not isinstance(new_message["parts"], list)
-                or not new_message["parts"]
-                or not all(
-                    isinstance(p, dict)
-                    and set(p) == {"text"}
-                    and isinstance(p["text"], str)
-                    for p in new_message["parts"]
-                )
-                or not any(p["text"] for p in new_message["parts"])
-            ):
-                raise ValueError
+            message = validate_user_message(new_message, attachments=attachments)
         except (ValueError, CustomerChannelError):
-            raise ValueError("Expected a nonempty text user message") from None
-        self.message = copy.deepcopy(new_message)
+            raise ValueError("Unsupported user message") from None
+        self.message = message
+        self.attachments = attachments
         self.identity = dict(author=author, invocation_id=invocation_id, branch=branch)
         self.count = 0
         self.seen = set()
@@ -106,6 +95,11 @@ class _Projector:
             self.seen.add(event_id)
         content = raw.get("content")
         if raw.get("author") == "user":
+            if self.attachments:
+                try:
+                    content = validate_user_message(content, attachments=True)
+                except CustomerChannelError:
+                    raise CustomerChannelError("unexpected_user_event") from None
             if self.count != 1 or partial or content != self.message:
                 raise CustomerChannelError("unexpected_user_event")
             return None
@@ -309,6 +303,7 @@ class CustomerAdkEventStream:
             invocation_id=invocation_id,
             new_message=new_message,
             branch=branch,
+            attachments=dispatcher._client._protocol == "native",
         )
         self._dispatcher = dispatcher
         self._owner = None

@@ -80,6 +80,7 @@ class CustomerChannelClient:
         cleanup_timeout: float = 5,
         max_event_bytes: int = 1024 * 1024,
         max_request_bytes: int = 2 * 1024 * 1024,
+        max_initial_request_bytes: int | None = None,
     ):
         _validate_endpoint(endpoint)
         if protocol not in ("shared", "native"):
@@ -93,7 +94,9 @@ class CustomerChannelClient:
                 or value <= 0
             ):
                 raise ValueError("Timeouts must be positive finite numbers")
-        for value in (max_event_bytes, max_request_bytes):
+        if max_initial_request_bytes is None:
+            max_initial_request_bytes = max_request_bytes
+        for value in (max_event_bytes, max_request_bytes, max_initial_request_bytes):
             if type(value) is not int or value <= 0:
                 raise ValueError("Byte limits must be positive integers")
         self._endpoint = endpoint.rstrip("/")
@@ -111,6 +114,7 @@ class CustomerChannelClient:
         self._cleanup_timeout = cleanup_timeout
         self._event_limit = max_event_bytes
         self._request_limit = max_request_bytes
+        self._initial_request_limit = max_initial_request_bytes
         self._http = httpx.AsyncClient(
             transport=transport,
             timeout=operation_timeout,

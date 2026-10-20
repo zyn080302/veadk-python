@@ -15,6 +15,7 @@ from .client import CustomerChannelClient
 from .config import check_customer_agent
 from .dispatch import CustomerToolDispatcher
 from .events import CustomerAdkEventStream
+from .messages import NATIVE_INITIAL_REQUEST_BYTES, validate_user_message
 from .protocol import CustomerChannelError, CustomerRunRequest
 
 
@@ -63,23 +64,12 @@ def _identity(ctx):
     return ctx.session.app_name, ctx.session.user_id, ctx.session.id
 
 
-def _new_message(ctx):
+def _new_message(ctx, *, attachments=False):
     try:
         message = ctx.user_content.model_dump(mode="json", exclude_none=True)
-        if (
-            set(message) != {"role", "parts"}
-            or message["role"] != "user"
-            or not message["parts"]
-            or any(
-                set(part) != {"text"} or not isinstance(part["text"], str)
-                for part in message["parts"]
-            )
-            or not any(part["text"].strip() for part in message["parts"])
-        ):
-            raise ValueError
+        return validate_user_message(message, attachments=attachments)
     except Exception:
         raise CustomerChannelError("unsupported_user_message") from None
-    return message
 
 
 class CustomerRuntime(BaseRuntime):
@@ -92,7 +82,7 @@ class CustomerRuntime(BaseRuntime):
         config = replace(agent.customer_runtime_config)
         if getattr(ctx.plugin_manager, "plugins", ()):
             raise CustomerChannelError("unsupported_customer_plugins")
-        message = _new_message(ctx)
+        message = _new_message(ctx, attachments=config.protocol == "native")
         identity = _identity(ctx)
         bridge = None
         try:
@@ -131,6 +121,9 @@ class CustomerRuntime(BaseRuntime):
                         operation_timeout=config.operation_timeout,
                         turn_timeout=config.total_timeout,
                         cleanup_timeout=config.cleanup_timeout,
+                        max_initial_request_bytes=NATIVE_INITIAL_REQUEST_BYTES
+                        if config.protocol == "native"
+                        else None,
                     ) as client:
                         client.restore_session(
                             binding.remote_app,
@@ -138,6 +131,24 @@ class CustomerRuntime(BaseRuntime):
                             binding.remote_session,
                             affinity=lease.affinity,
                         )
+                        request = CustomerRunRequest(
+                            app_name=binding.remote_app,
+                            user_id=binding.remote_user,
+                            session_id=binding.remote_session,
+                            new_message=message,
+                            agent_config=config.agent_config,
+                            environment=dict(config.environment),
+                            tools=config.tools,
+                            skills=config.skills,
+                        )
+                        if config.protocol == "native":
+                            from .client import _encode
+                            from .native_channel import _native_payload
+
+                            _encode(
+                                _native_payload(request, message),
+                                client._initial_request_limit,
+                            )
                         digest = hashlib.sha256(
                             json.dumps(
                                 message, sort_keys=True, ensure_ascii=False
@@ -160,18 +171,12 @@ class CustomerRuntime(BaseRuntime):
                         # contract; no GET that downloads reasoning history.
                         if config.protocol == "shared" and lease.affinity is None:
                             raise CustomerChannelError("missing_affinity")
-                        request = CustomerRunRequest(
-                            app_name=binding.remote_app,
-                            user_id=binding.remote_user,
-                            session_id=binding.remote_session,
-                            new_message=message,
-                            agent_config=config.agent_config,
-                            environment=dict(config.environment),
-                            tools=config.tools,
-                            skills=config.skills,
-                            run_id=turn.run_id,
-                            channel_id=turn.channel_id,
-                            scope_id=turn.scope_id,
+                        request = request.model_copy(
+                            update={
+                                "run_id": turn.run_id,
+                                "channel_id": turn.channel_id,
+                                "scope_id": turn.scope_id,
+                            }
                         )
                         dispatcher = CustomerToolDispatcher(
                             client,

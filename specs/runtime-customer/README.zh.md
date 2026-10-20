@@ -9,7 +9,7 @@
 - CON-1：服务端构造 CustomerRuntimeConfig，含 endpoint、engine_id、remote_app、SecretStr agent_config、CustomerSessionStore、工具/Skill 声明及匹配异步执行器。它不是请求 schema，也不负责解析凭证；Agent 不序列化配置或 endpoint。
 - CON-2：Agent(runtime="customer") 跳过本地模型初始化，仅接受本地 name/description/身份/memory/run processor 和 Runtime 配置。原生工具和工具回调需要 native_tools=True（CON-7）；模型/Agent 回调、Skill 和其他原生配置仍拒绝；运行时重新校验 clone/修改。
 - CON-3：远端映射绑定本地 app/user/session 及 endpoint、配置、工具/Skill 修订摘要。私有亲和值恢复并持久更新后才允许后续 HTTP。定点查询 Session 不把历史读入模型；已有执行后远端 Session 丢失则阻止。
-- CON-4：远端操作前预留，只发送新文本；准备/执行/清理都有边界，不重试整轮。完整本地 Event 先记日志再输出，最终成功需要终态、ACK 和清理。下一轮核验 ADK 实际保存日志内容后，才解除待展示状态。
+- CON-4：远端操作前预留，只发送新用户 Content（原生媒体见 CON-8）；准备/执行/清理都有边界，不重试整轮。完整本地 Event 先记日志再输出，最终成功需要终态、ACK 和清理。下一轮核验 ADK 实际保存日志内容后，才解除待展示状态。
 - CON-5：recover_display(agent, session_service, local_identity) 获取同一租约，核验已保存前缀/内容、追加缺失展示并回读；不远端调用、不重放工具。结果不明、内容冲突/乱序及遗留占用需要其他恢复流程。
 - CON-6：HarnessApp 接受预建 customer Agent；请求只能确认 runtime="customer"，不能切换 endpoint/配置/引擎/模型/工具。HarnessConfig/环境创建仍仅 adk/codex。显式 max_llm_calls、不支持的插件/特性拒绝；Host 循环/token 预算仍需另外实现。
 
@@ -75,3 +75,10 @@ CON-7：native_tools=True 将已声明异步 Agent.tools 和原生工具回调�
 已实现，专项与全仓本机回归通过。[设计与证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md) 定义显式 protocol="native"、/apps + /run_sse、精确结果回显 ACK、跨 HTTP 期限和绑定隔离。Shared 默认行为不变。通道在既有展示投影前校验并规范化延迟工具和已验证回包回显。执行名额在等待 ACK 前释放，避免批次死锁；期限和 ACK 后 final 要求保持。store 表结构和未完成轮次隔离不变。不声称完整 Skill/附件、崩溃恢复或生产验收。
 
 连接原生 Host 时，在 CustomerRuntimeConfig 设置 protocol="native"。agent_config 必须为 SecretStr(JSON AgentConfig)，environment 必须为空。AgentConfig 字段由 Host 校验。native_tools=True 独立启用两种协议下的本地 Agent.tools/回调。底层调用方等待 submit_result ACK 时须并发读取事件；CustomerToolDispatcher 已负责此行为。native 不要求或伪造 affinity；Shared 仍要求该值。
+
+
+## 原生附件扩展（2026-10-20）
+
+SDK 实现、全仓回归及固定 Host 源码联调已验证；业务固定制品验收待完成：[customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.zh.md)。原生输入增加有界原始媒体与不解释的元数据；Shared 仍只接受文本。Runtime 使用独立 8 MiB 原生首包预算；client max_initial_request_bytes=None 继承 max_request_bytes。工具批次默认仍为 2 MiB、输出事件 1 MiB。原输入保留在 ADK/Host 历史；journal/恢复表结构与输出内容不变。精确限制与验收以链接设计为准。
+
+CON-8：原生仅接受 user Content，最多 8 parts/3 个内联 blob；类型 PNG/JPEG/WebP/PDF，单 blob 4 MiB、解码总量 5 MiB、文本总量 1 MiB、消息 JSON 7 MiB。接受规范标准/URL-safe Base64 并规范化为标准 Base64；校验文件头与可选 display_name（1–180 字符）。元数据是不解释的 JSON 对象（总量 16 KiB、深度 8、单消息 256 个值）。接受无冲突 snake/camel 别名。允许仅附件；URI/fileData、thought/工具字段、未知字段、非法/空负载在 Host I/O 前报 unsupported_user_message。Shared 仍只接受文本。不记录输入或将其带入错误。SDK 不渲染 PDF，业务 Host 负责转换模型请求副本。原 ADK 用户事件保留附件，恢复 journal 仍只存 assistant/tool 投影事件。测试：tests/runtime/customer/test_native_attachments.py。

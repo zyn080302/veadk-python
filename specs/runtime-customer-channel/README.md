@@ -57,3 +57,8 @@ CON-6: Run cancellation, response close and pool close use bounded owned leaf ta
 ## Native protocol extension (2026-10-20)
 
 Implemented and verified by targeted/full local regression. [Design and evidence](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.md) defines protocol="native" opt-in, /apps + /run_sse, exact result-echo ACK, multi-HTTP deadlines and binding isolation. Shared defaults remain unchanged. The channel validates and normalizes deferred calls/verified response echoes before existing display projection. Execution permits end before ACK waiting to avoid batch deadlock; deadlines and final-after-ACK remain. Store schema and incomplete-turn quarantine remain unchanged. No claim of full Skill/attachment support, crash recovery or production acceptance.
+
+
+## Native attachment extension (2026-10-20)
+
+SDK implementation, full regression and fixed Host source integration verified; fixed business artifact acceptance pending: [customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.md). Native input gains bounded original media and opaque metadata; Shared remains text-only. Runtime uses a separate 8 MiB native initial envelope; client max_initial_request_bytes=None inherits max_request_bytes. Tool batches remain 2 MiB and output events 1 MiB by default. Original input stays in ADK/Host history; journal/recovery schemas and output content are unchanged. The linked design owns exact limits and acceptance.
