@@ -2,7 +2,7 @@
 
 [English](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.md)
 
-变更 ID：customer-native-channel。创建/修订：2026-10-20。状态：approved；实现与本机回归通过，交付检查进行中。
+变更 ID：customer-native-channel。创建/修订：2026-10-20。状态：implemented；本机验证通过，已推送用户独立分支。
 
 ## 背景与范围
 
@@ -38,7 +38,7 @@
 | FR-3/4 | T-2：有校验的跨 HTTP 状态机 | AC-2：多轮工具、Host 内部工具、精确 ACK、畸形/重复/迟到/消费不明失败 | pass：33 项专项与固定 Host HTTP 联调 |
 | FR-5/6 | T-3：期限和有界调度 | AC-3：工具多于名额、延迟回显、超时/取消/清理/背压不重放且不误报成功 | pass：33 项专项与固定 Host HTTP 联调 |
 | FR-7 | T-4：Runtime/Harness 集成 | AC-4：本地持久化、同 Session 续问、协议隔离、原生回调；实际固定 Host 本机 HTTP | pass：33 项专项与固定 Host HTTP 联调 |
-| 全部 | T-5：核对与交付 | AC-5：双语审查、专项/全仓回归、原 pre-commit、独立分支推送 | 全仓回归与原 pre-commit pass；推送待执行 |
+| 全部 | T-5：核对与交付 | AC-5：双语审查、专项/全仓回归、原 pre-commit、独立分支推送 | pass：全仓回归、原 hooks 与独立分支推送核验 |
 
 通过隔离本机包装器执行：python3 /Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/.codex/run_offline_tests.py tests/runtime/customer。最终共享合同回归使用该包装器加 -p xdist.plugin -n 2 -m "not codex_smoke and not piagent_smoke"。原 pre-commit：python3 /Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/.codex/run_native_precommit.py。包装器隔离 HOME 和替身；测试不得使用实际凭证或非本机服务。固定 Host 使用独立锁定环境和业务门禁，不能静默互换 SDK/Host 依赖。执行后记录实际源码版本和命令。替身通过不代表部署可用。
 
@@ -46,10 +46,12 @@
 
 review-spec 不可用，已直接审查接口职责、别名歧义、真实 ACK、工具参数校验、有界内存、跨步期限、取消和双语等价性。发现：持有执行名额等待 ACK 会导致批次死锁，以 FR-6 解决；ADK 的长时 final 不是业务终态，以 FR-3/5 解决；缺失回显不能当成提交成功，以 FR-4 解决。无阻塞设计问题；实际 Host 集成仍须验证事件格式。
 
-用户授权：已有按蓝图完成适配/性能优化及验证阶段提交/推送的要求覆盖本实现，不新增审批、合并或部署权限。SDK 仅推用户 fork skyeyes-user/feat/skyeyes-harness-20261020。新协议显式启用。关闭原生 Host 连接不证明回滚，不确定轮次继续阻止执行，后续恢复仍需完成。此变更不声称完整 Skill/附件或真实云/客户验收。本机门禁通过，独立分支推送待执行；不声称生产交付完成。
+用户授权：已有按蓝图完成适配/性能优化及验证阶段提交/推送的要求覆盖本实现，不新增审批、合并或部署权限。SDK 仅推用户 fork skyeyes-user/feat/skyeyes-harness-20261020。新协议显式启用。关闭原生 Host 连接不证明回滚，不确定轮次继续阻止执行，后续恢复仍需完成。此变更不声称完整 Skill/附件或真实云/客户验收。本机门禁与独立分支推送已核验；不声称生产交付完成。
 
 ## 验证检查点
 
 父提交 5a01c438 加本次改动：最初 21 项用例在实现前全部失败（13.99 秒）。JSON 标量类型和多事件工具批次回归另复现两项失败。POST 前取消/过期复现两项失败（3.51 秒），已在发送前检查修复。最新专项 33 项通过（4.47 秒）。最后的发送前检查修正之前，customer/清理/Harness 回归 349 项通过（32.28 秒）。固定真实 Host 与实际 SDK Runtime 分别使用独立依赖环境，三项测试通过，覆盖标准 /run 和 /run_sse、原业务 MCP、回调状态、同 Session 续问、真实 SSE 断线后阻止不确定会话且不重放工具。模型/MCP 是本机确定性替身，不声称云端/客户验收。最终全仓门禁通过：7864 passed、50 skipped、4 xfailed、6 subtests passed（404.24 秒，2 workers），覆盖最后发送前检查修正；跳过/预期失败不作为对应能力已通过的证据。
 
 最终原 pre-commit 五项通过；38 条绝对文档链接、双语 FR/T/AC/CON 编号、diff whitespace 通过。已再次 fetch 官方 main（402a3da9）和用户独立分支（5a01c438），均为 HEAD 祖先，已同步基线未变化。运行时代码未在最终全仓回归后修改。
+
+实现提交 `bcadbbb3965270485dfdba4b5e0ae1a80a8100f3` 已推送到用户 fork 的 `feat/skyeyes-harness-20261020`，`ls-remote` 与本地完全一致。本次文档收尾不修改已验证源码；新业务固定 wheel、完整业务装配与真实客户验收继续推进，未合并或部署。

@@ -2,7 +2,7 @@
 
 [中文](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md)
 
-Change ID: customer-native-channel. Created/revised: 2026-10-20. Status: approved; implementation and local regression verified, delivery checks in progress.
+Change ID: customer-native-channel. Created/revised: 2026-10-20. Status: implemented; verified locally and pushed to the independent user branch.
 
 ## Background and scope
 
@@ -38,7 +38,7 @@ Affected source: veadk/runtime/customer/config.py, client.py, native_channel.py 
 | FR-3/4 | T-2: validated multi-HTTP state machine | AC-2: multiple rounds, Host-only tools, exact ACK, malformed/duplicate/late/ambiguous failure | pass: 33 targeted cases and fixed Host HTTP integration |
 | FR-5/6 | T-3: deadlines and bounded scheduling | AC-3: more calls than slots, delayed echo, timeout/cancel/cleanup/backpressure without replay or false success | pass: 33 targeted cases and fixed Host HTTP integration |
 | FR-7 | T-4: Runtime/Harness integration | AC-4: local persistence, same-session follow-up, protocol isolation, native callbacks; actual fixed Host over local HTTP | pass: 33 targeted cases and fixed Host HTTP integration |
-| all | T-5: reconcile and deliver | AC-5: bilingual review, targeted/full regression, original pre-commit, independent branch push | full regression and original pre-commit pass; push pending |
+| all | T-5: reconcile and deliver | AC-5: bilingual review, targeted/full regression, original pre-commit, independent branch push | pass: full regression, original hooks and verified independent branch push |
 
 Run tests through the isolated local wrapper: python3 /Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/.codex/run_offline_tests.py tests/runtime/customer. Final shared-contract regression uses that wrapper with -p xdist.plugin -n 2 -m "not codex_smoke and not piagent_smoke". Original pre-commit: python3 /Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/.codex/run_native_precommit.py. These wrappers isolate HOME and fixtures; tests must not use actual credentials or non-loopback services. Fixed Host uses its separate locked environment and the business gate; SDK and Host dependencies must not be silently interchanged. Record actual source revisions and commands after execution. No fixture pass proves deployed readiness.
 
@@ -46,10 +46,12 @@ Run tests through the isolated local wrapper: python3 /Users/bytedance/Workspace
 
 Direct design review performed because review-spec is unavailable. Checked interface ownership, alias ambiguity, real ACK semantics, tool schema validation, bounded memory, cross-step deadlines, cancellation and bilingual equivalence. Finding: holding execution permits during ACK can deadlock a batch; resolved by FR-6. Finding: ADK final on long-running calls is not a business terminal; resolved by FR-3/5. Finding: a missing echo must not be treated as a successful submission; resolved by FR-4. No blocking design issue remains; real Host integration must verify the selected event shape.
 
-User authorization: existing instruction to complete adaptation/performance according to the blueprint and commit/push validated milestones covers this implementation; no new approval, merge or deployment authority is inferred. Allowed SDK push only to user fork skyeyes-user/feat/skyeyes-harness-20261020. New config is opt-in. Native Host close does not prove rollback; uncertain turns stay blocked and later recovery remains required. Complete Skill/attachments and actual cloud/customer tests are not claimed by this change. Local gates passed; independent branch push remains pending. No production completion claim.
+User authorization: existing instruction to complete adaptation/performance according to the blueprint and commit/push validated milestones covers this implementation; no new approval, merge or deployment authority is inferred. Allowed SDK push only to user fork skyeyes-user/feat/skyeyes-harness-20261020. New config is opt-in. Native Host close does not prove rollback; uncertain turns stay blocked and later recovery remains required. Complete Skill/attachments and actual cloud/customer tests are not claimed by this change. Local gates and independent branch push passed. No production completion claim.
 
 ## Verification checkpoint
 
 Parent 5a01c438 plus this change: initial 21 cases failed before implementation (13.99 s). JSON scalar-type and split-event batch regressions reproduced two further failures. Cancellation/expiry before POST reproduced two failures (3.51 s), fixed by pre-send checks. Latest targeted suite: 33 passed (4.47 s). Before the final pre-send correction, customer/cleanup/Harness regression: 349 passed (32.28 s). Fixed real Host and actual SDK Runtime in separate dependency environments: three tests passed for standard /run and /run_sse, original business MCP, callback state, same-session follow-up and actual SSE disconnect with uncertain-session blocking and no tool replay. Model/MCP are deterministic loopback substitutes; cloud/customer acceptance is not claimed. Final full regression passed: 7864 passed, 50 skipped, 4 xfailed, 6 subtests passed (404.24 s, 2 workers), including the final pre-send correction. Skips/expected failures do not prove those behaviors.
 
 Final original pre-commit: all five hooks passed; 38 absolute document links, paired FR/T/AC/CON identifiers and diff whitespace passed. Re-fetched official main (402a3da9) and user branch (5a01c438); both remain HEAD ancestors and the synchronized base is unchanged. Runtime code did not change after final full regression.
+
+Implementation commit `bcadbbb3965270485dfdba4b5e0ae1a80a8100f3` was pushed to `feat/skyeyes-harness-20261020` on the user fork; `ls-remote` exactly matched local HEAD. This documentation reconciliation does not change tested source. New business wheel adoption, full business assembly and real customer acceptance remain in progress; no merge or deployment.
