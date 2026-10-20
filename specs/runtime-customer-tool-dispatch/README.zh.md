@@ -42,3 +42,8 @@ async def observe_run(client, request, executors):
 CON-5: 调用方重复取消不能跳过关闭 client 前的有界等待。等待既有截止时间或任务完成后再传播取消，不延长预算。
 
 [设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.zh.md)
+
+
+## 原生协议扩展（2026-10-20）
+
+已实现，专项与全仓本机回归通过。[设计与证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md) 定义显式 protocol="native"、/apps + /run_sse、精确结果回显 ACK、跨 HTTP 期限和绑定隔离。Shared 默认行为不变。通道在既有展示投影前校验并规范化延迟工具和已验证回包回显。执行名额在等待 ACK 前释放，避免批次死锁；期限和 ACK 后 final 要求保持。store 表结构和未完成轮次隔离不变。不声称完整 Skill/附件、崩溃恢复或生产验收。

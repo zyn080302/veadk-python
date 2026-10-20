@@ -1,0 +1,55 @@
+# Native customer channel
+
+[中文](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md)
+
+Change ID: customer-native-channel. Created/revised: 2026-10-20. Status: approved; implementation and local regression verified, delivery checks in progress.
+
+## Background and scope
+
+The existing CustomerRuntime supports managed Shared HTTP only. The pinned customer candidate 588179428751d6f311ec9cad2b623f2fd257d1d7 on Host 4d7c505940fe183576f36340cf063c06566ab843 exposes /run_sse with harness_config and /apps Session APIs. Host returns deferred functionCall events, closes that HTTP stream, and echoes functionResponse input on the next request. ADK considers deferred calls final for a step; that is not a completed business turn. Host does not promise affinity, executor revision checks or client-side tool deadlines. Prior pinned Host/MCP testing used a test driver, not CustomerRuntime.
+
+Goal: integrate that protocol through the existing public customer Runtime and standard Harness, preserving local async tools/callbacks, durable turn exclusion, display journal and cancellation. This stage does not complete the overall adaptation goal: binary Skill/attachment support, shared account quota/cooldown, abandoned execution recovery, production database/identity and original customer A/B remain required work. No default entrypoint switch, merge or deployment is included here.
+
+## Requirements and scenarios
+
+- FR-1: CustomerRuntimeConfig and CustomerChannelClient accept keyword-only protocol="shared"|"native", default shared. Shared wire and binding digests remain unchanged. Native binding differs even with identical configuration. Native agent_config is a SecretStr containing a nonempty JSON AgentConfig object; environment must be empty. Reject invalid protocol/config before HTTP. Never log configuration or validation inputs.
+- FR-2: Native uses exact /apps session GET/create and /run_sse. No Shared capability/cancel route or fabricated affinity. Optional real affinity may still be persisted. Serialize tools without Shared-only source; skills/thinking use harness_config.run_config. Send only the new input or exact tool responses, never downloaded history.
+- FR-3: Validate all events before exposing executable calls. Deferred IDs must exactly identify locally declared calls in that event; verify names, arguments and local declaration revision/deadline. Host-internal tools stay display-only. Duplicate IDs, partial tool fragments, malformed events, unrequested user echoes and content after final fail. Bounded existing event/call limits apply. Deferred calls take precedence over any final predicate.
+- FR-4: Collect one response per deferred call; serialize and consume once. Send the next request only after EOF and all current results. submit_result completes only after the next stream echoes the exact ordered input (ID, name and JSON response), validated as an event. Missing/changed/duplicate echo or ambiguous delivery fails without retry. Local staging is not ACK. JSON dictionaries remain exact; other JSON results use a result wrapper; failures expose a fixed error object. Do not persist secrets or response buffers beyond the turn.
+- FR-5: One turn deadline spans every HTTP, executor queue, result wait and stream consumption. Separate operation limits bound headers; existing stream idle timeout applies. Cancellation revokes all submissions and closes actual streams/pool using bounded cancellation-resistant cleanup; there is no native cancel API. Remote rollback or exactly-once after crash is not promised. EOF without a final or with unresolved Host tools fails; no final is published until validated EOF, result ACK and local cleanup.
+- FR-6: max_concurrency bounds executor execution, not the subsequent ACK wait. Given more deferred calls than execution slots, all calls execute within limits and one ordered response batch progresses; timeout/backpressure cancels rather than deadlocks. Maximum outstanding results remains 64, total calls 1024; per-response and aggregate request size limits apply.
+- FR-7: Standard Harness /run and /run_sse use the actual Runtime, native async tool bridge and persisted session mapping. First turn GET/create and follow-up avoid history downloads. Incomplete execution remains blocked in the store; completed display recovery retains existing behavior. Protocol switching on an existing session fails before Host I/O.
+
+## Design and ownership
+
+Compose a private native channel with the existing CustomerChannelClient HTTP pool and dispatcher. Do not inherit the Shared wire state machine or duplicate the model loop. A native serializer translates only server-owned configuration. The native channel drives multiple HTTP steps and maps them to existing internal run.event/tool.call/run.completed envelopes. It validates through the existing strict event projector before dispatch; normal output is projected again with the caller's local identity. This bounded extra validation protects standalone channel users as well as Runtime users.
+
+Normalize longRunningToolIds only after exact local-call checks. Normalize a verified tool-result user echo to a private assistant author for display projection; preserve event ID/content and ignore untrusted remote state as before. Initial matching text echo remains optional. No unverified user content is rewritten. All pending results get real ACK only after validated echo. Local tool journal events remain the only source of callback state. Shared public payloads and projection rules are unchanged.
+
+Reuse the session store schema and reservation-before-effects; add native protocol to config binding only. No public Session name expansion is necessary (managed_* is accepted by native Host). Release the dispatcher execution semaphore before awaiting result ACK. Keep deadlines, error precedence and owned task cleanup unchanged. No new dependency or frontend code.
+
+Affected source: veadk/runtime/customer/config.py, client.py, native_channel.py (new), runtime.py, dispatch.py. Tests: tests/runtime/customer/test_native_channel.py (new), existing customer/Runtime/Harness tests; pinned Host integration in the authorized business workspace. Component contracts: runtime-customer CON-1/3/4, runtime-customer-channel CON-1/3/4/5/6, runtime-customer-tool-dispatch CON-1/4, runtime-customer-adk-events CON-2/4/5. Store schema unchanged; its consumer binding and uncertainty requirements still apply.
+
+## Tasks and acceptance
+
+| Requirement | Task | Acceptance | Evidence |
+| --- | --- | --- | --- |
+| FR-1/2 | T-1: serializer/config/routes | AC-1: native paths/config, invalid inputs, unchanged Shared defaults/binding | pass: 33 targeted cases and fixed Host HTTP integration |
+| FR-3/4 | T-2: validated multi-HTTP state machine | AC-2: multiple rounds, Host-only tools, exact ACK, malformed/duplicate/late/ambiguous failure | pass: 33 targeted cases and fixed Host HTTP integration |
+| FR-5/6 | T-3: deadlines and bounded scheduling | AC-3: more calls than slots, delayed echo, timeout/cancel/cleanup/backpressure without replay or false success | pass: 33 targeted cases and fixed Host HTTP integration |
+| FR-7 | T-4: Runtime/Harness integration | AC-4: local persistence, same-session follow-up, protocol isolation, native callbacks; actual fixed Host over local HTTP | pass: 33 targeted cases and fixed Host HTTP integration |
+| all | T-5: reconcile and deliver | AC-5: bilingual review, targeted/full regression, original pre-commit, independent branch push | full regression and original pre-commit pass; push pending |
+
+Run tests through the isolated local wrapper: python3 /Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/.codex/run_offline_tests.py tests/runtime/customer. Final shared-contract regression uses that wrapper with -p xdist.plugin -n 2 -m "not codex_smoke and not piagent_smoke". Original pre-commit: python3 /Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/.codex/run_native_precommit.py. These wrappers isolate HOME and fixtures; tests must not use actual credentials or non-loopback services. Fixed Host uses its separate locked environment and the business gate; SDK and Host dependencies must not be silently interchanged. Record actual source revisions and commands after execution. No fixture pass proves deployed readiness.
+
+## Review, authorization and risks
+
+Direct design review performed because review-spec is unavailable. Checked interface ownership, alias ambiguity, real ACK semantics, tool schema validation, bounded memory, cross-step deadlines, cancellation and bilingual equivalence. Finding: holding execution permits during ACK can deadlock a batch; resolved by FR-6. Finding: ADK final on long-running calls is not a business terminal; resolved by FR-3/5. Finding: a missing echo must not be treated as a successful submission; resolved by FR-4. No blocking design issue remains; real Host integration must verify the selected event shape.
+
+User authorization: existing instruction to complete adaptation/performance according to the blueprint and commit/push validated milestones covers this implementation; no new approval, merge or deployment authority is inferred. Allowed SDK push only to user fork skyeyes-user/feat/skyeyes-harness-20261020. New config is opt-in. Native Host close does not prove rollback; uncertain turns stay blocked and later recovery remains required. Complete Skill/attachments and actual cloud/customer tests are not claimed by this change. Local gates passed; independent branch push remains pending. No production completion claim.
+
+## Verification checkpoint
+
+Parent 5a01c438 plus this change: initial 21 cases failed before implementation (13.99 s). JSON scalar-type and split-event batch regressions reproduced two further failures. Cancellation/expiry before POST reproduced two failures (3.51 s), fixed by pre-send checks. Latest targeted suite: 33 passed (4.47 s). Before the final pre-send correction, customer/cleanup/Harness regression: 349 passed (32.28 s). Fixed real Host and actual SDK Runtime in separate dependency environments: three tests passed for standard /run and /run_sse, original business MCP, callback state, same-session follow-up and actual SSE disconnect with uncertain-session blocking and no tool replay. Model/MCP are deterministic loopback substitutes; cloud/customer acceptance is not claimed. Final full regression passed: 7864 passed, 50 skipped, 4 xfailed, 6 subtests passed (404.24 s, 2 workers), including the final pre-send correction. Skips/expected failures do not prove those behaviors.
+
+Final original pre-commit: all five hooks passed; 38 absolute document links, paired FR/T/AC/CON identifiers and diff whitespace passed. Re-fetched official main (402a3da9) and user branch (5a01c438); both remain HEAD ancestors and the synchronized base is unchanged. Runtime code did not change after final full regression.

@@ -280,9 +280,11 @@ class CustomerToolDispatcher:
                         return
                     if time.monotonic() >= deadline:
                         raise CustomerChannelError("tool_timeout")
-                    await channel.submit_result(
-                        request_id, content=result, status=status, error=error
-                    )
+                # Native batches must finish executing before their shared ACK.
+                # Waiting for that ACK must not occupy an execution permit.
+                await channel.submit_result(
+                    request_id, content=result, status=status, error=error
+                )
         except TimeoutError:
             raise CustomerChannelError("tool_timeout") from None
 

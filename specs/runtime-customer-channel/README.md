@@ -4,7 +4,7 @@
 
 ID: `runtime-customer-channel`; revision: 2026-10-20; status: active.
 
-This component owns the public client for the managed customer Shared HTTP protocol. It does not execute tools, create a second model loop, or select a business identity. Callers use `CustomerChannelClient` as an async context manager, probe `capabilities()`, explicitly `create_session(app_name, user_id, session_id)`, and enter `run(CustomerRunRequest)` to consume `events()` and `submit_result()`. Use one client per trusted business session; reuse its HTTP pool and affinity for continuation. `Agent(runtime="customer")` is not implemented by this milestone.
+This component owns the public client for customer Shared and native HTTP protocols. It does not execute tools, create a second model loop, or select a business identity. Callers use `CustomerChannelClient` as an async context manager, probe `capabilities()`, explicitly `create_session(app_name, user_id, session_id)`, and enter `run(CustomerRunRequest)` to consume `events()` and `submit_result()`. Use one client per trusted business session; reuse its HTTP pool and affinity for continuation. `Agent(runtime="customer")` is implemented by the higher-level CustomerRuntime composing this client. The table and example describe the default Shared protocol; native differences are specified in the extension below.
 
 | ID | Area | Contract |
 | --- | --- | --- |
@@ -52,3 +52,8 @@ The caller supplies a complete Host-supported configuration and an authorized en
 CON-6: Run cancellation, response close and pool close use bounded owned leaf tasks to withstand repeated direct cancellation. No unbounded queues; original generators and AnyIO scopes remain in their owning task. Caller cancellation still propagates after cleanup.
 
 [Design](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.md)
+
+
+## Native protocol extension (2026-10-20)
+
+Implemented and verified by targeted/full local regression. [Design and evidence](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.md) defines protocol="native" opt-in, /apps + /run_sse, exact result-echo ACK, multi-HTTP deadlines and binding isolation. Shared defaults remain unchanged. The channel validates and normalizes deferred calls/verified response echoes before existing display projection. Execution permits end before ACK waiting to avoid batch deadlock; deadlines and final-after-ACK remain. Store schema and incomplete-turn quarantine remain unchanged. No claim of full Skill/attachment support, crash recovery or production acceptance.

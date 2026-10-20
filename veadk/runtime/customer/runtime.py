@@ -124,6 +124,7 @@ class CustomerRuntime(BaseRuntime):
                     # Validation/client construction is local, before reservation.
                     async with CustomerChannelClient(
                         config.endpoint,
+                        protocol=config.protocol,
                         headers=config.headers,
                         transport=config.transport,
                         on_affinity=lease.set_affinity,
@@ -157,7 +158,7 @@ class CustomerRuntime(BaseRuntime):
                                 )
                         # Continuations use the Host's session-required run
                         # contract; no GET that downloads reasoning history.
-                        if lease.affinity is None:
+                        if config.protocol == "shared" and lease.affinity is None:
                             raise CustomerChannelError("missing_affinity")
                         request = CustomerRunRequest(
                             app_name=binding.remote_app,

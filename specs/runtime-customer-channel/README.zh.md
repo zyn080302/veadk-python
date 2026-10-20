@@ -4,7 +4,7 @@
 
 ID: `runtime-customer-channel`; revision: 2026-10-20; status: active.
 
-本组件负责 managed customer Shared HTTP 公开客户端，不执行工具、不创建第二个模型循环、不选择业务身份。调用者以异步上下文使用 `CustomerChannelClient`，通过 `capabilities()` 查询能力、`create_session(app_name, user_id, session_id)` 显式建会话，再进入 `run(CustomerRunRequest)` 消费 `events()`、调用 `submit_result()`。一个可信业务会话使用一个客户端，续轮复用 HTTP 池和亲和信息。本阶段尚未实现 `Agent(runtime="customer")`。
+本组件负责 customer Shared 与原生 HTTP 公开客户端，不执行工具、不创建第二个模型循环、不选择业务身份。调用者以异步上下文使用 `CustomerChannelClient`，通过 `capabilities()` 查询能力、`create_session(app_name, user_id, session_id)` 显式建会话，再进入 `run(CustomerRunRequest)` 消费 `events()`、调用 `submit_result()`。一个可信业务会话使用一个客户端，续轮复用 HTTP 池和亲和信息。`Agent(runtime="customer")` 已由上层 CustomerRuntime 组合本客户端实现。下表及示例描述默认 Shared 协议；原生差异见末尾扩展。
 
 | ID | 范围 | 合同 |
 | --- | --- | --- |
@@ -52,3 +52,8 @@ async def invoke(endpoint, header_provider, full_config: SecretStr, user_id, ses
 CON-6: run 取消、响应关闭与连接池关闭使用有界且明确拥有的底层任务，防御重复直接取消。无无界队列；原生成器与 AnyIO scope 保持原任务。清理后仍传播调用方取消。
 
 [设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.zh.md)
+
+
+## 原生协议扩展（2026-10-20）
+
+已实现，专项与全仓本机回归通过。[设计与证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md) 定义显式 protocol="native"、/apps + /run_sse、精确结果回显 ACK、跨 HTTP 期限和绑定隔离。Shared 默认行为不变。通道在既有展示投影前校验并规范化延迟工具和已验证回包回显。执行名额在等待 ACK 前释放，避免批次死锁；期限和 ACK 后 final 要求保持。store 表结构和未完成轮次隔离不变。不声称完整 Skill/附件、崩溃恢复或生产验收。

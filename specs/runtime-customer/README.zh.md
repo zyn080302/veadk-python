@@ -55,7 +55,7 @@ app = HarnessApp(
 
 示例没有安装 `Agent.tools`/模型回调桥。显式提供匹配的异步执行器，调用方负责鉴权和结果过滤。不要配置本地 `max_llm_calls`、模型字段、插件或请求覆盖，本阶段不能在 Host 执行这些设置。标准 `/run`、`/run_sse` 支持文本输入；应用鉴权和部署不属于此示例。
 
-默认 total_timeout=165 秒、operation_timeout=10 秒、cleanup_timeout=10 秒、max_concurrency=8、event_queue_size=16，租约还覆盖有界清理/数据库释放。首次会话准备后必须取得亲和值。首轮定点 GET/创建 Session；续问依赖已核对的 Host 合同在推理前拒绝不存在的 Session，避免下载完整历史。endpoint、Host 配置/环境、引擎版本、工具/Skill 声明变化需要新本地 Session；Header 轮换值不参与绑定，调用方须保持账号/租户归属不变。
+默认 total_timeout=165 秒、operation_timeout=10 秒、cleanup_timeout=10 秒、max_concurrency=8、event_queue_size=16，租约还覆盖有界清理/数据库释放。Shared 首次会话准备后必须取得亲和值；native 不要求或伪造该值。首轮定点 GET/创建 Session；续问依赖已核对的 Host 合同在推理前拒绝不存在的 Session，避免下载完整历史。endpoint、Host 配置/环境、引擎版本、工具/Skill 声明变化需要新本地 Session；Header 轮换值不参与绑定，调用方须保持账号/租户归属不变。
 
 展示保存失败时，在下一轮用户输入前仅通过可信服务端代码调用 `await get_runtime("customer").recover_display(agent, adk_sessions, ("example_app", user_id, session_id))`，返回追加事件数。已有事件必须是同一日志前缀；内容冲突或已有后续 invocation 则拒绝恢复。不会续跑未完成执行或释放进程崩溃遗留占用。恢复比较身份/内容/actions/usage，排除 ADK 自动生成的 node_info/output 记录。原生工具状态回调遵循 CON-7；插件仍不支持。
 
@@ -68,3 +68,10 @@ CON-7：native_tools=True 将已声明异步 Agent.tools 和原生工具回调�
 原生工具用法：构建 native_tools=True、匹配 CustomerTool 声明、executors={} 的 CustomerRuntimeConfig；给 Agent 传入异步 Python 函数、异步 FunctionTool/BaseTool 实例和 before_tool_callback/after_tool_callback/on_tool_error_callback。声明比较忽略 schema title/description 注解，将对象缺省 additionalProperties 规范为 False。Toolset、同步函数在 Host I/O 前拒绝。Host 配置与工具元数据仍由服务端管理；工具实现或回调变化时，提升 engine_id/executor_revision。
 
 原生调用在单轮内串行，不受 max_concurrency 并行数影响。每次使用隔离状态，通过 ToolContext.state 赋值/update 发布 JSON 增量；未生成 delta 的嵌套原地修改不提交。仅无前缀的 Session 键和 temp: 受支持，app:/user: 写入和其他非空 actions（含 skip_summarization）失败。temp: 仅本轮有效。结果返回 Host 前经过同一个有界队列及先 journal 后 yield 路径，这不代表 ADK 已持久保存。本地已注册工具名的 Host 展示仍校验，但不重复显示；Host 自有工具展示保留，不触发本地执行。复制状态和串行执行有成本，此桥不宣称性能提升。工具/服务/追踪是调用方管理的受信依赖，不是沙箱代码；工具不得把凭证放入结果、状态或遥测。既有共享/外部副作用无法撤回。
+
+
+## 原生协议扩展（2026-10-20）
+
+已实现，专项与全仓本机回归通过。[设计与证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md) 定义显式 protocol="native"、/apps + /run_sse、精确结果回显 ACK、跨 HTTP 期限和绑定隔离。Shared 默认行为不变。通道在既有展示投影前校验并规范化延迟工具和已验证回包回显。执行名额在等待 ACK 前释放，避免批次死锁；期限和 ACK 后 final 要求保持。store 表结构和未完成轮次隔离不变。不声称完整 Skill/附件、崩溃恢复或生产验收。
+
+连接原生 Host 时，在 CustomerRuntimeConfig 设置 protocol="native"。agent_config 必须为 SecretStr(JSON AgentConfig)，environment 必须为空。AgentConfig 字段由 Host 校验。native_tools=True 独立启用两种协议下的本地 Agent.tools/回调。底层调用方等待 submit_result ACK 时须并发读取事件；CustomerToolDispatcher 已负责此行为。native 不要求或伪造 affinity；Shared 仍要求该值。

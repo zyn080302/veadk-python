@@ -37,6 +37,7 @@ class CustomerRuntimeConfig:
     tools: tuple[CustomerTool, ...] = ()
     skills: tuple[CustomerSkill, ...] = ()
     executors: Mapping[str, Executor] = field(default_factory=dict)
+    protocol: str = field(default="shared", kw_only=True)
     native_tools: bool = field(default=False, kw_only=True)
     headers: Callable[[], Mapping[str, str]] | None = None
     transport: httpx.AsyncBaseTransport | None = None
@@ -51,6 +52,8 @@ class CustomerRuntimeConfig:
         from .client import _validate_endpoint
 
         _validate_endpoint(self.endpoint)
+        if self.protocol not in ("shared", "native"):
+            raise ValueError("Invalid customer protocol")
         if not isinstance(self.store, CustomerSessionStore):
             raise ValueError("CustomerSessionStore is required")
         if not isinstance(self.engine_id, str) or not 0 < len(self.engine_id) <= 128:
@@ -82,6 +85,10 @@ class CustomerRuntimeConfig:
             tools=copy.deepcopy(self.tools),
             skills=copy.deepcopy(self.skills),
         )
+        if self.protocol == "native":
+            from .native_channel import _native_payload
+
+            _native_payload(snapshot, snapshot.new_message)
         functions = dict(self.executors)
         if type(self.native_tools) is not bool or (self.native_tools and functions):
             raise ValueError("Native tools cannot use explicit executors")
@@ -107,6 +114,8 @@ class CustomerRuntimeConfig:
         payload.update(endpoint=self.endpoint.rstrip("/"), engine_id=self.engine_id)
         if self.native_tools:
             payload["native_tools"] = True
+        if self.protocol != "shared":
+            payload["protocol"] = self.protocol
         digest = hashlib.sha256(
             json.dumps(
                 payload, sort_keys=True, ensure_ascii=False, allow_nan=False

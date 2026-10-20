@@ -71,6 +71,7 @@ class CustomerChannelClient:
         self,
         endpoint: str,
         *,
+        protocol: str = "shared",
         headers: Callable[[], Mapping[str, str]] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         on_affinity: Callable[[SecretStr], Awaitable[None]] | None = None,
@@ -81,6 +82,9 @@ class CustomerChannelClient:
         max_request_bytes: int = 2 * 1024 * 1024,
     ):
         _validate_endpoint(endpoint)
+        if protocol not in ("shared", "native"):
+            raise ValueError("Invalid customer protocol")
+        self._protocol = protocol
         for value in (operation_timeout, turn_timeout, cleanup_timeout):
             if (
                 isinstance(value, bool)
@@ -251,6 +255,8 @@ class CustomerChannelClient:
             self._control_active = False
 
     async def capabilities(self):
+        if self._protocol == "native":
+            raise CustomerChannelError("unsupported_protocol")
         with self._control_operation():
             result = await self._json("GET", CHANNEL_PATH + "/capabilities")
         if (
@@ -288,7 +294,8 @@ class CustomerChannelClient:
         self._validate_identity(app_name, user_id, session_id)
         with self._control_operation():
             self._bind((app_name, user_id, session_id))
-            path = f"/managed/apps/{quote(app_name, safe='')}/users/{quote(user_id, safe='')}/sessions/{quote(session_id, safe='')}"
+            prefix = "/managed" if self._protocol == "shared" else ""
+            path = f"{prefix}/apps/{quote(app_name, safe='')}/users/{quote(user_id, safe='')}/sessions/{quote(session_id, safe='')}"
             try:
                 result = await self._json("GET", path)
             except CustomerChannelError as error:
@@ -303,7 +310,8 @@ class CustomerChannelClient:
         self._validate_identity(app_name, user_id, session_id)
         with self._control_operation():
             self._bind((app_name, user_id, session_id))
-            path = f"/managed/apps/{quote(app_name, safe='')}/users/{quote(user_id, safe='')}/sessions"
+            prefix = "/managed" if self._protocol == "shared" else ""
+            path = f"{prefix}/apps/{quote(app_name, safe='')}/users/{quote(user_id, safe='')}/sessions"
             result = await self._json("POST", path, {"sessionId": session_id})
         if result.get("id") != session_id:
             raise CustomerChannelError("session_mismatch")
@@ -319,6 +327,12 @@ class CustomerChannelClient:
             copy.deepcopy(request.model_dump())
         )
         self._bind((snapshot.app_name, snapshot.user_id, snapshot.session_id))
+        if self._protocol == "native":
+            from .native_channel import _native_run
+
+            async with _native_run(self, snapshot) as channel:
+                yield channel
+            return
         content = _encode(snapshot.to_wire(), self._request_limit)
         channel = _Channel(self, snapshot)
         self._active = True
