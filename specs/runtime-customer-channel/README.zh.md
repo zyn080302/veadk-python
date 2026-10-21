@@ -2,7 +2,7 @@
 
 [Counterpart](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer-channel/README.md)
 
-ID: `runtime-customer-channel`; revision: 2026-10-20; status: active.
+ID: `runtime-customer-channel`; revision: 2026-10-21; status: active.
 
 本组件负责 customer Shared 与原生 HTTP 公开客户端，不执行工具、不创建第二个模型循环、不选择业务身份。调用者以异步上下文使用 `CustomerChannelClient`，通过 `capabilities()` 查询能力、`create_session(app_name, user_id, session_id)` 显式建会话，再进入 `run(CustomerRunRequest)` 消费 `events()`、调用 `submit_result()`。一个可信业务会话使用一个客户端，续轮复用 HTTP 池和亲和信息。`Agent(runtime="customer")` 已由上层 CustomerRuntime 组合本客户端实现。下表及示例描述默认 Shared 协议；原生差异见末尾扩展。
 
@@ -62,3 +62,10 @@ CON-6: run 取消、响应关闭与连接池关闭使用有界且明确拥有的
 ## 原生附件扩展（2026-10-20）
 
 SDK 实现、全仓回归及固定 Host 源码联调已验证；业务固定制品验收待完成：[customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.zh.md)。原生输入增加有界原始媒体与不解释的元数据；Shared 仍只接受文本。Runtime 使用独立 8 MiB 原生首包预算；client max_initial_request_bytes=None 继承 max_request_bytes。工具批次默认仍为 2 MiB、输出事件 1 MiB。原输入保留在 ADK/Host 历史；journal/恢复表结构与输出内容不变。精确限制与验收以链接设计为准。
+
+
+## 原生流超时修复（2026-10-21，SDK 回归已验证）
+
+CON-4/CON-6：原生响应头、连接/写入/连接池保留 operation_timeout；原生 SSE 正文受跨全部 HTTP 步骤及本地工具的单一 turn_timeout 限制。JSON 控制操作的完整响应仍受 operation_timeout 限制。调用者取消与有界清理保持，不重试运行/结果。要求真实回环 HTTP 首段正文/分片间隔/ACK/响应头/控制操作/整轮期限/取消回归。
+
+[Design / 设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-native-stream-timeout/2026-10-21-customer-native-stream-timeout.zh.md)

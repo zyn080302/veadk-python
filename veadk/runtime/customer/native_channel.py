@@ -138,6 +138,9 @@ class _NativeChannel:
                 client._endpoint + "/run_sse",
                 headers=await client._request_headers(),
                 content=content,
+                # Headers retain the short scope below; SSE body waits belong
+                # to the single turn deadline in _native_run, across all steps.
+                timeout=httpx.Timeout(client._operation_timeout, read=None),
             )
             if self._expected is not None:
                 self._check_submissions()

@@ -2,7 +2,7 @@
 
 [Counterpart](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/specs/runtime-customer-channel/README.zh.md)
 
-ID: `runtime-customer-channel`; revision: 2026-10-20; status: active.
+ID: `runtime-customer-channel`; revision: 2026-10-21; status: active.
 
 This component owns the public client for customer Shared and native HTTP protocols. It does not execute tools, create a second model loop, or select a business identity. Callers use `CustomerChannelClient` as an async context manager, probe `capabilities()`, explicitly `create_session(app_name, user_id, session_id)`, and enter `run(CustomerRunRequest)` to consume `events()` and `submit_result()`. Use one client per trusted business session; reuse its HTTP pool and affinity for continuation. `Agent(runtime="customer")` is implemented by the higher-level CustomerRuntime composing this client. The table and example describe the default Shared protocol; native differences are specified in the extension below.
 
@@ -62,3 +62,10 @@ Implemented and verified by targeted/full local regression. [Design and evidence
 ## Native attachment extension (2026-10-20)
 
 SDK implementation, full regression and fixed Host source integration verified; fixed business artifact acceptance pending: [customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.md). Native input gains bounded original media and opaque metadata; Shared remains text-only. Runtime uses a separate 8 MiB native initial envelope; client max_initial_request_bytes=None inherits max_request_bytes. Tool batches remain 2 MiB and output events 1 MiB by default. Original input stays in ADK/Host history; journal/recovery schemas and output content are unchanged. The linked design owns exact limits and acceptance.
+
+
+## Native stream timeout correction (2026-10-21, SDK regression verified)
+
+CON-4/CON-6: Native response headers, connect/write/pool retain operation_timeout; native SSE body reads use the single turn_timeout covering all HTTP steps and local tools. Control JSON operations retain operation_timeout for their complete response. Caller cancellation and bounded cleanup remain; no run/result retries. Real loopback first-body/chunk-gap/ACK/header/control/deadline/cancellation regressions are required.
+
+[Design / 设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-native-stream-timeout/2026-10-21-customer-native-stream-timeout.md)

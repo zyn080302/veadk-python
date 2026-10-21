@@ -82,3 +82,10 @@ CON-7：native_tools=True 将已声明异步 Agent.tools 和原生工具回调�
 SDK 实现、全仓回归及固定 Host 源码联调已验证；业务固定制品验收待完成：[customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.zh.md)。原生输入增加有界原始媒体与不解释的元数据；Shared 仍只接受文本。Runtime 使用独立 8 MiB 原生首包预算；client max_initial_request_bytes=None 继承 max_request_bytes。工具批次默认仍为 2 MiB、输出事件 1 MiB。原输入保留在 ADK/Host 历史；journal/恢复表结构与输出内容不变。精确限制与验收以链接设计为准。
 
 CON-8：原生仅接受 user Content，最多 8 parts/3 个内联 blob；类型 PNG/JPEG/WebP/PDF，单 blob 4 MiB、解码总量 5 MiB、文本总量 1 MiB、消息 JSON 7 MiB。接受规范标准/URL-safe Base64 并规范化为标准 Base64；校验文件头与可选 display_name（1–180 字符）。元数据是不解释的 JSON 对象（总量 16 KiB、深度 8、单消息 256 个值）。接受无冲突 snake/camel 别名。允许仅附件；URI/fileData、thought/工具字段、未知字段、非法/空负载在 Host I/O 前报 unsupported_user_message。Shared 仍只接受文本。不记录输入或将其带入错误。SDK 不渲染 PDF，业务 Host 负责转换模型请求副本。原 ADK 用户事件保留附件，恢复 journal 仍只存 assistant/tool 投影事件。测试：tests/runtime/customer/test_native_attachments.py。
+
+
+## 原生流期限归属（2026-10-21，SDK 回归已验证）
+
+CON-4：原生正文读取使用通道统一整轮期限；operation_timeout 限制控制操作及运行响应头。见 runtime-customer-channel CON-4/CON-6。Runtime 默认值和外层 total_timeout 不变。
+
+[Design / 设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-native-stream-timeout/2026-10-21-customer-native-stream-timeout.zh.md)
