@@ -88,3 +88,7 @@ CON-8: Native accepts user Content only, up to 8 parts/3 inline blobs; PNG/JPEG/
 CON-4: Native body reading uses the channel single-turn deadline; operation_timeout bounds control operations and run response headers. See runtime-customer-channel CON-4/CON-6. Runtime defaults and outer total_timeout remain unchanged.
 
 [Design / 设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-native-stream-timeout/2026-10-21-customer-native-stream-timeout.md)
+
+## Display publication ordering (2026-10-21, proposed)
+
+CON-4/CON-5: Runtime assigns new durable projected/native events local publication timestamps immediately before journal append/yield, strictly increasing at microsecond resolution after prior display history. This is not an executor-duration timestamp. Saved-prefix/content checks and old conflicted histories remain unchanged; recovery uses original journal timestamps and never replays tools. No schema, public signature, or configuration change. Acceptance is pending the real DatabaseSessionService regression and installed/Devbox verification in [customer-display-order](../../prd-spec/bugfixes/customer-display-order/2026-10-21-customer-display-order.md).

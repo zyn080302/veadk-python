@@ -89,3 +89,7 @@ CON-8：原生仅接受 user Content，最多 8 parts/3 个内联 blob；类型 
 CON-4：原生正文读取使用通道统一整轮期限；operation_timeout 限制控制操作及运行响应头。见 runtime-customer-channel CON-4/CON-6。Runtime 默认值和外层 total_timeout 不变。
 
 [Design / 设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-native-stream-timeout/2026-10-21-customer-native-stream-timeout.zh.md)
+
+## 展示事件发布顺序（2026-10-21，提议）
+
+CON-4/CON-5：Runtime 在日志追加/yield 前为新产生的持久投影/本地工具事件赋本地发布时间，以微秒精度严格晚于已有展示历史。它不是工具执行耗时。保存前缀/完整内容检查与已有冲突历史处理不变；恢复使用日志原时间，不重放工具。不改变数据结构、公开签名或配置。验收仍待 [customer-display-order](../../prd-spec/bugfixes/customer-display-order/2026-10-21-customer-display-order.zh.md) 的真实 DatabaseSessionService 回归及安装/Devbox 验证。

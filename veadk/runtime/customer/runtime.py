@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from contextlib import aclosing
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import anyio
 
@@ -23,6 +25,21 @@ def _event_payload(event):
     # ADK stamps workflow bookkeeping after the Runtime yields. It does not
     # own the projected identity, display content, actions or usage accounting.
     return event.model_dump(mode="json", exclude={"node_info", "output"})
+
+
+class _DisplayClock:
+    """Order local publication at the database's datetime resolution."""
+
+    def __init__(self, session):
+        self.last = datetime.fromtimestamp(
+            max((event.timestamp for event in session.events), default=0),
+            tz=timezone.utc,
+        )
+
+    def next_timestamp(self):
+        now = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        self.last = max(now, self.last + timedelta(microseconds=1))
+        return self.last.timestamp()
 
 
 async def _read_session(service, identity, timeout):
@@ -103,6 +120,7 @@ class CustomerRuntime(BaseRuntime):
                     await _acknowledge_if_saved(
                         lease, ctx.session_service, identity, config.operation_timeout
                     )
+                    display_clock = _DisplayClock(ctx.session)
                     has_turns = await lease.has_turns()
                     if not has_turns and any(
                         event.author != "user"
@@ -203,6 +221,11 @@ class CustomerRuntime(BaseRuntime):
                             async with aclosing(projection.events()) as events:
                                 async for event in events:
                                     if not event.partial:
+                                        # Async producers construct events before
+                                        # their batches can be published. Stamp
+                                        # once here so DB readback and the journal
+                                        # retain exactly the same display order.
+                                        event.timestamp = display_clock.next_timestamp()
                                         await lease.append_event(event)
                                         if event.turn_complete:
                                             await lease.complete_turn()
