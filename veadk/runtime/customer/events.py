@@ -36,6 +36,23 @@ def _json_size(data):
         raise CustomerChannelError("adk_event_too_large")
 
 
+def _display_metadata(raw):
+    metadata = _field(raw, "customMetadata", "custom_metadata")
+    if not isinstance(metadata, dict) or "skyeyes_output_purpose" not in metadata:
+        return None
+    purpose = metadata["skyeyes_output_purpose"]
+    if (
+        not isinstance(purpose, dict)
+        or set(purpose) != {"version", "purpose"}
+        or type(purpose["version"]) is not int
+        or purpose["version"] != 1
+        or purpose["purpose"] != "final_answer"
+    ):
+        raise CustomerChannelError("invalid_output_purpose")
+    # Display only: never copy approval, identity, executable state or secrets.
+    return {"skyeyes_output_purpose": {"version": 1, "purpose": "final_answer"}}
+
+
 class _Projector:
     def __init__(
         self, *, author, invocation_id, new_message, branch, attachments=False
@@ -70,6 +87,7 @@ class _Projector:
         _json_size(raw)
         if not isinstance(raw, dict):
             raise CustomerChannelError("invalid_adk_event")
+        metadata = _display_metadata(raw)
         if any(
             raw.get(k)
             for k in (
@@ -95,6 +113,8 @@ class _Projector:
             self.seen.add(event_id)
         content = raw.get("content")
         if raw.get("author") == "user":
+            if metadata is not None:
+                raise CustomerChannelError("invalid_output_purpose")
             if self.attachments:
                 try:
                     content = validate_user_message(content, attachments=True)
@@ -105,6 +125,12 @@ class _Projector:
             return None
         self._check_interactive(raw)
         parts, role = self._content(content, partial)
+        if metadata is not None and (
+            role != "model"
+            or not parts
+            or any(p.text is None or p.thought for p in parts)
+        ):
+            raise CustomerChannelError("invalid_output_purpose")
         usage = self._usage(raw) if not partial else None
         if self.final is not None and content is not None:
             is_final = not partial and not any(
@@ -122,6 +148,7 @@ class _Projector:
             else None,
             usage_metadata=usage,
             partial=partial,
+            custom_metadata=metadata,
         )
         has_tools = any(p.function_call or p.function_response for p in parts)
         has_answer = any(p.text is not None and not p.thought for p in parts)

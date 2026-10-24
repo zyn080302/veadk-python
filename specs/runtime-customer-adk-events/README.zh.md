@@ -25,7 +25,7 @@ async with CustomerAdkEventStream(
 | ID | 合同 |
 | --- | --- |
 | CON-1 | 构造时快照非空的纯文本用户 Content，校验本地 author/invocation/可选 branch。上下文和 `events()` 均只能使用一次；必须先进入，再在同一 asyncio 任务中消费/退出。异常传播；远端输入相关诊断仅含固定代码。 |
-| CON-2 | 只丢弃开头一次完全匹配的用户回显；不同/重复/迟到用户事件失败。输出使用本地 author/invocation/branch 及新 Event ID/时间。不复制远端 actions/state/metadata/路由/鉴权/签名。这不是业务正文或工具值脱敏器：执行器/Host 必须提前过滤密钥。 |
+| CON-2 | 只丢弃开头一次完全匹配的用户回显；不同/重复/迟到用户事件失败。输出使用本地 author/invocation/branch 及新 Event ID/时间。不复制远端 actions/state/路由/鉴权/签名及任意 metadata；仅允许保留 CON-7 的展示用途白名单。这不是业务正文或工具值脱敏器：执行器/Host 必须提前过滤密钥。 |
 | CON-3 | 仅转换 text 及可选 thought、完整 functionCall/functionResponse、五项非负整数用量（promptTokenCount、candidatesTokenCount、totalTokenCount、cachedContentTokenCount、thoughtsTokenCount，每项最多 2^53-1）。也接受 snake case，歧义别名拒绝。partial 快照不复制用量。不认识的内容类型或错误结构失败。纯 thought/用量事件仅作 partial 展示，不是最终答案。 |
 | CON-4 | 完整 function ID 必须非空且最多 128 字符，名称最多 64 字符并与响应一致。映射新本地 ID，最多 64 个待响应/1024 个总调用。展示不执行工具、不关联通道 request_id，也不能再生成另一套本地工具展示流。重复/孤立响应、重复调用 ID、partial 工具片段、长任务/鉴权/确认事件及成功时未闭合调用明确失败。远端回调状态不应用于本地。 |
 | CON-5 | 暂存完整普通答案，不从 partial 拼造最终答案。要求恰好一个最终答案，其后不能有内容（可有纯用量事件）。仅在调度器成功且上下文清理成功后输出。错误/中断/取消/EOF/ACK/清理失败都丢弃暂存答案。空内容仅在明确 turnComplete=true 时算最终答案。最终输出 turn_complete=true，此前输出均不为真。 |
@@ -52,3 +52,10 @@ async with CustomerAdkEventStream(
 ## 原生附件扩展（2026-10-20）
 
 SDK 实现、全仓回归及固定 Host 源码联调已验证；业务固定制品验收待完成：[customer-native-attachments](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-attachments/2026-10-20-customer-native-attachments.zh.md)。原生输入增加有界原始媒体与不解释的元数据；Shared 仍只接受文本。Runtime 使用独立 8 MiB 原生首包预算；client max_initial_request_bytes=None 继承 max_request_bytes。工具批次默认仍为 2 MiB、输出事件 1 MiB。原输入保留在 ADK/Host 历史；journal/恢复表结构与输出内容不变。精确限制与验收以链接设计为准。
+
+
+## 批准后的最终正文用途（2026-10-24，提议）
+
+CON-7：仅复制 `customMetadata.skyeyes_output_purpose`（或无歧义 `custom_metadata`），构建新对象，恰好包含 `version: 1`（整数，不是 bool/float）和 `purpose: "final_answer"`。标注要求非空的模型正文 parts，不得含 thought 或工具；用户回显和无内容事件不能携带标注。非法保留值或不兼容内容以 `invalid_output_purpose` 失败；冲突别名以 `invalid_adk_event` 失败。其他 metadata 继续排除。标注仅用于展示，不改变身份、工具权限、actions、终态/清理规则或最终文本生成。批准归受信配置的 Host 负责，不由 SDK 推断。没有标注的既有调用方保持原行为。
+
+设计与待执行验证：[customer-final-answer-purpose](../../prd-spec/bugfixes/customer-final-answer-purpose/2026-10-24-customer-final-answer-purpose.zh.md)。测试：`tests/runtime/customer/test_output_purpose.py`，以及原事件/Runtime 回归。业务交付前须验证新安装 SDK 制品及下游 Host/HTTP/历史/页面链路。
