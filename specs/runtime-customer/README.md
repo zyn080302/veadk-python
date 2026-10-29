@@ -95,4 +95,6 @@ CON-4/CON-5: Runtime assigns new durable projected/native events local publicati
 
 ## Confirmed cancellation (2026-10-29, offline verification)
 
+Implemented CON-4/CON-5 amendment, verified by the affected 407-case offline suite and identical pre-fix regressions (7 failures / 7 passes): exact `transport_error` exits may invoke the optional server-owned cancellation confirmer after quiescent cleanup. Communication errors do not authorize recovery: the hook must independently prove actual disconnect and remote stop, and existing owner/history checks still apply. Preserve the original exception; all other error codes and unconfirmed failures remain quarantined. [Design](../../prd-spec/bugfixes/customer-disconnect-transport/2026-10-29-customer-disconnect-transport.md).
+
 Implemented amendment; targeted offline tests pass and full SDK/installed consumer/live acceptance remain pending: optional server-only confirmation after Dispatcher/HTTP cleanup, owner-bound cancelled terminal journal and verified display acknowledgement; defaults keep incomplete execution blocked. No force unlock or tool replay. [Design](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.md) owns interfaces, task ordering, failure conditions and acceptance. Approved 2026-10-29; verification checkpoint is in the linked design.

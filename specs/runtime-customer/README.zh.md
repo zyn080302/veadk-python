@@ -96,4 +96,6 @@ CON-4/CON-5：Runtime 在日志追加/yield 前为新产生的持久投影/本�
 
 ## 确认后的取消恢复（2026-10-29，离线验证）
 
+已实现的 CON-4/CON-5 补充，受影响离线套件407项通过，同份修复前回归7失败/7通过：精确 `transport_error` 出口在任务停止并清理后，可进入可选服务端取消确认回调。通信错误不能授权恢复：回调必须独立证明真实断连和远端停止，既有所有者/历史检查继续有效。保留原异常；其他错误码及未确认失败继续保护会话。[设计](../../prd-spec/bugfixes/customer-disconnect-transport/2026-10-29-customer-disconnect-transport.zh.md)。
+
 契约变更已实现；定点离线测试通过，完整SDK/安装消费者/真实验收待完成：Dispatcher/HTTP 清理后的可选服务端确认、绑定 owner 的取消终态 journal 与回读确认展示；默认继续阻止不完整执行。不强制解锁、不重放工具。[设计](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.zh.md)维护接口、任务顺序、失败边界与验收。2026-10-29已批准；验证检查点见链接设计。

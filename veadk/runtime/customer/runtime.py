@@ -288,7 +288,19 @@ class CustomerRuntime(BaseRuntime):
                                         yield event
                             # ADK's consumer can persist after this task finishes.
                             # Keep completed pending until the next read-back.
-                    except (asyncio.CancelledError, GeneratorExit):
+                    except (
+                        asyncio.CancelledError,
+                        GeneratorExit,
+                        CustomerChannelError,
+                    ) as error:
+                        # A disconnect may reach this boundary as an HTTP
+                        # transport failure. Only the trusted confirmer can
+                        # prove cancellation; other channel failures retain
+                        # their existing quarantine behavior.
+                        if isinstance(error, CustomerChannelError) and error.args != (
+                            "transport_error",
+                        ):
+                            raise
                         if bridge is not None:
                             bridge.close()
                         if journal_write is not None and not journal_write.done():
