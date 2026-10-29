@@ -47,3 +47,7 @@ CON-5: Repeated caller cancellation must not skip the bounded join before client
 ## Native protocol extension (2026-10-20)
 
 Implemented and verified by targeted/full local regression. [Design and evidence](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.md) defines protocol="native" opt-in, /apps + /run_sse, exact result-echo ACK, multi-HTTP deadlines and binding isolation. Shared defaults remain unchanged. The channel validates and normalizes deferred calls/verified response echoes before existing display projection. Execution permits end before ACK waiting to avoid batch deadlock; deadlines and final-after-ACK remain. Store schema and incomplete-turn quarantine remain unchanged. No claim of full Skill/attachment support, crash recovery or production acceptance.
+
+## Confirmed cancellation (2026-10-29, offline verification)
+
+Implemented amendment; targeted offline tests pass and full SDK/installed consumer/live acceptance remain pending: optional server-only confirmation after Dispatcher/HTTP cleanup, owner-bound cancelled terminal journal and verified display acknowledgement; defaults keep incomplete execution blocked. No force unlock or tool replay. [Design](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.md) owns interfaces, task ordering, failure conditions and acceptance. Approved 2026-10-29; verification checkpoint is in the linked design.

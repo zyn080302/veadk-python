@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import time
 from contextlib import aclosing
 from dataclasses import replace
+from typing import AsyncGenerator, TYPE_CHECKING, cast
 from datetime import datetime, timedelta, timezone
 
 import anyio
@@ -14,11 +17,17 @@ import anyio
 from veadk.runtime.base_runtime import BaseRuntime
 
 from .client import CustomerChannelClient
-from .config import check_customer_agent
+from .cleanup import _retrieve, _run_cleanup, _wait_cleanup
+from .cancellation import CustomerCancellationContext, cancellation_events
+from .config import CustomerRuntimeConfig, check_customer_agent
 from .dispatch import CustomerToolDispatcher
 from .events import CustomerAdkEventStream
 from .messages import NATIVE_INITIAL_REQUEST_BYTES, validate_user_message
 from .protocol import CustomerChannelError, CustomerRunRequest
+
+
+if TYPE_CHECKING:
+    from google.adk.events import Event
 
 
 def _event_payload(event):
@@ -77,6 +86,41 @@ async def _acknowledge_if_saved(lease, service, identity, timeout):
     await lease.acknowledge_display()
 
 
+async def _settle_cancellation(config, lease, ctx, context, author, initial_history):
+    if await config.confirm_cancellation(context) is not True:
+        return
+    journal = await lease.read_running(context.invocation_id)
+    session = await _read_session(
+        ctx.session_service, context.local_identity, config.operation_timeout
+    )
+    prefix = _saved_prefix(journal, session)
+    expected = [*initial_history, *[_event_payload(e) for e in journal[:prefix]]]
+    if [_event_payload(e) for e in session.events] != expected:
+        raise CustomerChannelError("cancellation_history_conflict")
+    clock = _DisplayClock(session)
+    for event in journal:
+        clock.last = max(
+            clock.last, datetime.fromtimestamp(event.timestamp, tz=timezone.utc)
+        )
+    additions = cancellation_events(
+        journal,
+        author=author,
+        invocation_id=context.invocation_id,
+        next_timestamp=clock.next_timestamp,
+    )
+    for event in additions:
+        event.branch = ctx.branch
+        await lease.append_event(event)
+    # A crash from here leaves a recoverable display-only terminal journal.
+    await lease.cancel_turn(context.turn)
+    for event in [*journal[prefix:], *additions]:
+        with anyio.fail_after(config.operation_timeout):
+            await ctx.session_service.append_event(session=session, event=event)
+    await _acknowledge_if_saved(
+        lease, ctx.session_service, context.local_identity, config.operation_timeout
+    )
+
+
 def _identity(ctx):
     return ctx.session.app_name, ctx.session.user_id, ctx.session.id
 
@@ -94,9 +138,9 @@ class CustomerRuntime(BaseRuntime):
 
     name = "customer"
 
-    async def run_async(self, agent, ctx):
+    async def run_async(self, agent, ctx) -> AsyncGenerator[Event, None]:
         check_customer_agent(agent, getattr(ctx, "run_config", None))
-        config = replace(agent.customer_runtime_config)
+        config = replace(cast(CustomerRuntimeConfig, agent.customer_runtime_config))
         if getattr(ctx.plugin_manager, "plugins", ()):
             raise CustomerChannelError("unsupported_customer_plugins")
         message = _new_message(ctx, attachments=config.protocol == "native")
@@ -130,108 +174,166 @@ class CustomerRuntime(BaseRuntime):
                         raise CustomerChannelError("legacy_session_requires_migration")
                     binding = lease.binding
                     # Validation/client construction is local, before reservation.
-                    async with CustomerChannelClient(
-                        config.endpoint,
-                        protocol=config.protocol,
-                        headers=config.headers,
-                        transport=config.transport,
-                        on_affinity=lease.set_affinity,
-                        operation_timeout=config.operation_timeout,
-                        turn_timeout=config.total_timeout,
-                        cleanup_timeout=config.cleanup_timeout,
-                        max_initial_request_bytes=NATIVE_INITIAL_REQUEST_BYTES
-                        if config.protocol == "native"
-                        else None,
-                    ) as client:
-                        client.restore_session(
-                            binding.remote_app,
-                            binding.remote_user,
-                            binding.remote_session,
-                            affinity=lease.affinity,
-                        )
-                        request = CustomerRunRequest(
-                            app_name=binding.remote_app,
-                            user_id=binding.remote_user,
-                            session_id=binding.remote_session,
-                            new_message=message,
-                            agent_config=config.agent_config,
-                            environment=dict(config.environment),
-                            tools=config.tools,
-                            skills=config.skills,
-                        )
-                        if config.protocol == "native":
-                            from .client import _encode
-                            from .native_channel import _native_payload
-
-                            _encode(
-                                _native_payload(request, message),
-                                client._initial_request_limit,
-                            )
-                        digest = hashlib.sha256(
-                            json.dumps(
-                                message, sort_keys=True, ensure_ascii=False
-                            ).encode()
-                        ).hexdigest()
-                        turn = await lease.begin_turn(ctx.invocation_id, digest)
-                        if not has_turns:
-                            exists = await client.session_exists(
+                    initial_history = [_event_payload(e) for e in ctx.session.events]
+                    dispatcher = turn = journal_write = None
+                    try:
+                        async with CustomerChannelClient(
+                            config.endpoint,
+                            protocol=config.protocol,
+                            headers=config.headers,
+                            transport=config.transport,
+                            on_affinity=lease.set_affinity,
+                            operation_timeout=config.operation_timeout,
+                            turn_timeout=config.total_timeout,
+                            cleanup_timeout=config.cleanup_timeout,
+                            max_initial_request_bytes=NATIVE_INITIAL_REQUEST_BYTES
+                            if config.protocol == "native"
+                            else None,
+                        ) as client:
+                            client.restore_session(
                                 binding.remote_app,
                                 binding.remote_user,
                                 binding.remote_session,
+                                affinity=lease.affinity,
                             )
-                            if not exists:
-                                await client.create_session(
+                            request = CustomerRunRequest(
+                                app_name=binding.remote_app,
+                                user_id=binding.remote_user,
+                                session_id=binding.remote_session,
+                                new_message=message,
+                                agent_config=config.agent_config,
+                                environment=dict(config.environment),
+                                tools=config.tools,
+                                skills=config.skills,
+                            )
+                            if config.protocol == "native":
+                                from .client import _encode
+                                from .native_channel import _native_payload
+
+                                _encode(
+                                    _native_payload(request, message),
+                                    client._initial_request_limit,
+                                )
+                            digest = hashlib.sha256(
+                                json.dumps(
+                                    message, sort_keys=True, ensure_ascii=False
+                                ).encode()
+                            ).hexdigest()
+                            turn = await lease.begin_turn(ctx.invocation_id, digest)
+                            if not has_turns:
+                                exists = await client.session_exists(
                                     binding.remote_app,
                                     binding.remote_user,
                                     binding.remote_session,
                                 )
-                        # Continuations use the Host's session-required run
-                        # contract; no GET that downloads reasoning history.
-                        if config.protocol == "shared" and lease.affinity is None:
-                            raise CustomerChannelError("missing_affinity")
-                        request = request.model_copy(
-                            update={
-                                "run_id": turn.run_id,
-                                "channel_id": turn.channel_id,
-                                "scope_id": turn.scope_id,
-                            }
-                        )
-                        dispatcher = CustomerToolDispatcher(
-                            client,
-                            request,
-                            bridge.executors
-                            if bridge is not None
-                            else config.executors,
-                            max_concurrency=config.max_concurrency,
-                            event_queue_size=config.event_queue_size,
-                            cleanup_timeout=config.cleanup_timeout,
-                        )
+                                if not exists:
+                                    await client.create_session(
+                                        binding.remote_app,
+                                        binding.remote_user,
+                                        binding.remote_session,
+                                    )
+                            # Continuations use the Host's session-required run
+                            # contract; no GET that downloads reasoning history.
+                            if config.protocol == "shared" and lease.affinity is None:
+                                raise CustomerChannelError("missing_affinity")
+                            request = request.model_copy(
+                                update={
+                                    "run_id": turn.run_id,
+                                    "channel_id": turn.channel_id,
+                                    "scope_id": turn.scope_id,
+                                }
+                            )
+                            dispatcher = CustomerToolDispatcher(
+                                client,
+                                request,
+                                bridge.executors
+                                if bridge is not None
+                                else config.executors,
+                                max_concurrency=config.max_concurrency,
+                                event_queue_size=config.event_queue_size,
+                                cleanup_timeout=config.cleanup_timeout,
+                            )
+                            if bridge is not None:
+                                bridge.sink = dispatcher._emit_local
+                            async with CustomerAdkEventStream(
+                                dispatcher,
+                                author=agent.name,
+                                invocation_id=ctx.invocation_id,
+                                new_message=message,
+                                branch=ctx.branch,
+                                local_tools=frozenset(bridge.tools)
+                                if bridge is not None
+                                else frozenset(),
+                            ) as projection:
+                                async with aclosing(projection.events()) as events:
+                                    async for event in events:
+                                        if not event.partial:
+                                            # Async producers construct events before
+                                            # their batches can be published. Stamp
+                                            # once here so DB readback and the journal
+                                            # retain exactly the same display order.
+                                            event.timestamp = (
+                                                display_clock.next_timestamp()
+                                            )
+                                            # Finish an accepted complete event's
+                                            # local transaction before cancellation
+                                            # settlement can read its journal.
+                                            journal_write = asyncio.create_task(
+                                                lease.append_event(event)
+                                            )
+                                            journal_write.add_done_callback(_retrieve)
+                                            await asyncio.shield(journal_write)
+                                            if event.turn_complete:
+                                                await lease.complete_turn()
+                                        yield event
+                            # ADK's consumer can persist after this task finishes.
+                            # Keep completed pending until the next read-back.
+                    except (asyncio.CancelledError, GeneratorExit):
                         if bridge is not None:
-                            bridge.sink = dispatcher._emit_local
-                        async with CustomerAdkEventStream(
-                            dispatcher,
-                            author=agent.name,
-                            invocation_id=ctx.invocation_id,
-                            new_message=message,
-                            branch=ctx.branch,
-                            local_tools=frozenset(bridge.tools)
-                            if bridge is not None
-                            else frozenset(),
-                        ) as projection:
-                            async with aclosing(projection.events()) as events:
-                                async for event in events:
-                                    if not event.partial:
-                                        # Async producers construct events before
-                                        # their batches can be published. Stamp
-                                        # once here so DB readback and the journal
-                                        # retain exactly the same display order.
-                                        event.timestamp = display_clock.next_timestamp()
-                                        await lease.append_event(event)
-                                        if event.turn_complete:
-                                            await lease.complete_turn()
-                                    yield event
-                        # ADK's consumer can persist after this task finishes.
-                        # Keep completed pending until the next read-back.
+                            bridge.close()
+                        if journal_write is not None and not journal_write.done():
+                            try:
+                                await _wait_cleanup(
+                                    {journal_write}, timeout=config.cleanup_timeout
+                                )
+                            finally:
+                                if not journal_write.done():
+                                    journal_write.cancel()
+                        if (
+                            config.confirm_cancellation is not None
+                            and turn is not None
+                            and dispatcher is not None
+                            and dispatcher.quiescent
+                            and (
+                                journal_write is None
+                                or (
+                                    journal_write.done()
+                                    and not journal_write.cancelled()
+                                    and journal_write.exception() is None
+                                )
+                            )
+                        ):
+                            context = CustomerCancellationContext(
+                                identity, ctx.invocation_id, binding, turn
+                            )
+                            try:
+                                await _run_cleanup(
+                                    _settle_cancellation(
+                                        config,
+                                        lease,
+                                        ctx,
+                                        context,
+                                        agent.name,
+                                        initial_history,
+                                    ),
+                                    timeout=config.cleanup_timeout,
+                                )
+                            except Exception:
+                                # Failed or ambiguous cleanup retains quarantine.
+                                logging.getLogger(__name__).warning(
+                                    "cancellation_settlement_failed"
+                                )
+                        raise
         except TimeoutError:
             raise CustomerChannelError("customer_runtime_timeout") from None
         finally:
@@ -241,7 +343,7 @@ class CustomerRuntime(BaseRuntime):
     async def recover_display(self, agent, session_service, local_identity):
         """Append only missing completed display; never contact the Host."""
         check_customer_agent(agent)
-        config = replace(agent.customer_runtime_config)
+        config = replace(cast(CustomerRuntimeConfig, agent.customer_runtime_config))
         try:
             with anyio.fail_after(config.total_timeout):
                 async with await config.store.claim(

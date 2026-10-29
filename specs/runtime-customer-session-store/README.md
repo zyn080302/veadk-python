@@ -52,3 +52,11 @@ await engine.dispose()
 CON-3: Lease release resists repeated caller cancellation within the store operation budget, including lock wait; then cancellation propagates. Releasing an uncertain run still blocks reuse.
 
 [Design](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.md)
+
+## Confirmed cancellation (2026-10-29, offline verification)
+
+Implemented amendment; targeted offline tests pass and full SDK/installed consumer/live acceptance remain pending: optional server-only confirmation after Dispatcher/HTTP cleanup, owner-bound cancelled terminal journal and verified display acknowledgement; defaults keep incomplete execution blocked. No force unlock or tool replay. [Design](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.md) owns interfaces, task ordering, failure conditions and acceptance. Approved 2026-10-29; verification checkpoint is in the linked design.
+
+Cancellation integration: `cancellation_settled(local_identity, invocation_id, record, *, engine_id)` is read-only. It proves an exact cancelled run is acknowledged and its SDK owner relinquished while the caller still holds outer business ownership. No takeover or history replay.
+
+Cancellation cleanup failure must preserve the original `CancelledError`/`GeneratorExit`. The lease logs a fixed code and keeps unconfirmed ownership quarantined; it does not authorize reuse or publish a replacement error to a disconnected consumer. Non-cancelled exit failures still propagate.

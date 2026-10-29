@@ -1,6 +1,7 @@
 """Public customer transport, tool, event and durable session components."""
 
 from .client import CustomerChannelClient
+from .cancellation import CustomerCancellationContext
 from .config import CustomerRuntimeConfig
 from .runtime import CustomerRuntime
 from .dispatch import CustomerToolDispatcher
@@ -19,6 +20,7 @@ from .session_store import (
 )
 
 __all__ = [
+    "CustomerCancellationContext",
     "CustomerRuntime",
     "CustomerRuntimeConfig",
     "CustomerAdkEventStream",

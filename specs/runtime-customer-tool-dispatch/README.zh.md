@@ -47,3 +47,7 @@ CON-5: 调用方重复取消不能跳过关闭 client 前的有界等待。等�
 ## 原生协议扩展（2026-10-20）
 
 已实现，专项与全仓本机回归通过。[设计与证据](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/features/customer-native-channel/2026-10-20-customer-native-channel.zh.md) 定义显式 protocol="native"、/apps + /run_sse、精确结果回显 ACK、跨 HTTP 期限和绑定隔离。Shared 默认行为不变。通道在既有展示投影前校验并规范化延迟工具和已验证回包回显。执行名额在等待 ACK 前释放，避免批次死锁；期限和 ACK 后 final 要求保持。store 表结构和未完成轮次隔离不变。不声称完整 Skill/附件、崩溃恢复或生产验收。
+
+## 确认后的取消恢复（2026-10-29，离线验证）
+
+契约变更已实现；定点离线测试通过，完整SDK/安装消费者/真实验收待完成：Dispatcher/HTTP 清理后的可选服务端确认、绑定 owner 的取消终态 journal 与回读确认展示；默认继续阻止不完整执行。不强制解锁、不重放工具。[设计](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.zh.md)维护接口、任务顺序、失败边界与验收。2026-10-29已批准；验证检查点见链接设计。

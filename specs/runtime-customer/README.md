@@ -92,3 +92,7 @@ CON-4: Native body reading uses the channel single-turn deadline; operation_time
 ## Display publication ordering (2026-10-21, proposed)
 
 CON-4/CON-5: Runtime assigns new durable projected/native events local publication timestamps immediately before journal append/yield, strictly increasing at microsecond resolution after prior display history. This is not an executor-duration timestamp. Saved-prefix/content checks and old conflicted histories remain unchanged; recovery uses original journal timestamps and never replays tools. No schema, public signature, or configuration change. Acceptance is pending the real DatabaseSessionService regression and installed/Devbox verification in [customer-display-order](../../prd-spec/bugfixes/customer-display-order/2026-10-21-customer-display-order.md).
+
+## Confirmed cancellation (2026-10-29, offline verification)
+
+Implemented amendment; targeted offline tests pass and full SDK/installed consumer/live acceptance remain pending: optional server-only confirmation after Dispatcher/HTTP cleanup, owner-bound cancelled terminal journal and verified display acknowledgement; defaults keep incomplete execution blocked. No force unlock or tool replay. [Design](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.md) owns interfaces, task ordering, failure conditions and acceptance. Approved 2026-10-29; verification checkpoint is in the linked design.

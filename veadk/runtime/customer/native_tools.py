@@ -7,6 +7,7 @@ import copy
 import inspect
 import json
 import time
+from typing import Any, Awaitable, Callable, cast
 
 import anyio
 from uuid import uuid4
@@ -40,7 +41,7 @@ def _json_copy(value):
 
 
 def _schema(value):
-    def normalize(node):
+    def normalize(node: Any) -> Any:
         if isinstance(node, list):
             return [normalize(item) for item in node]
         if not isinstance(node, dict):
@@ -109,6 +110,8 @@ def _collect(agent, declarations):
             raise _LocalToolFailure("unsupported_native_tool")
         try:
             declaration = entry._get_declaration()
+            if declaration is None:
+                raise ValueError
             spec = _function_declaration_to_tool_param(declaration)["function"]
             name = spec["name"]
             parameters = spec.get("parameters", {"type": "object", "properties": {}})
@@ -135,7 +138,7 @@ class _NativeToolBridge:
         self._state = _json_copy(ctx.session.state)
         self._lock = asyncio.Lock()
         self._closed = False
-        self.sink = None
+        self.sink: Callable[..., Awaitable[None]] | None = None
         self.executors = {
             name: self._executor(tool) for name, tool in self.tools.items()
         }
@@ -209,7 +212,8 @@ class _NativeToolBridge:
                         or responses[0].id != call_id
                         or responses[0].name != tool.name
                         or response.long_running_tool_ids
-                        or len(response.content.parts) != 1
+                        or response.content is None
+                        or len(response.content.parts or []) != 1
                         or any(
                             getattr(responses[0], key) is not None
                             for key in type(responses[0]).model_fields
@@ -238,7 +242,9 @@ class _NativeToolBridge:
                         }
                     ),
                 )
-                await self.sink(request_id, (call_event, response_event))
+                await cast(Callable[..., Awaitable[None]], self.sink)(
+                    request_id, (call_event, response_event)
+                )
                 self._check_active()
                 self._state.update(copy.deepcopy(delta))
                 return _ToolResult(payload, status, error)

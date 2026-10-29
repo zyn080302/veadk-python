@@ -93,3 +93,7 @@ CON-4：原生正文读取使用通道统一整轮期限；operation_timeout 限
 ## 展示事件发布顺序（2026-10-21，提议）
 
 CON-4/CON-5：Runtime 在日志追加/yield 前为新产生的持久投影/本地工具事件赋本地发布时间，以微秒精度严格晚于已有展示历史。它不是工具执行耗时。保存前缀/完整内容检查与已有冲突历史处理不变；恢复使用日志原时间，不重放工具。不改变数据结构、公开签名或配置。验收仍待 [customer-display-order](../../prd-spec/bugfixes/customer-display-order/2026-10-21-customer-display-order.zh.md) 的真实 DatabaseSessionService 回归及安装/Devbox 验证。
+
+## 确认后的取消恢复（2026-10-29，离线验证）
+
+契约变更已实现；定点离线测试通过，完整SDK/安装消费者/真实验收待完成：Dispatcher/HTTP 清理后的可选服务端确认、绑定 owner 的取消终态 journal 与回读确认展示；默认继续阻止不完整执行。不强制解锁、不重放工具。[设计](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.zh.md)维护接口、任务顺序、失败边界与验收。2026-10-29已批准；验证检查点见链接设计。

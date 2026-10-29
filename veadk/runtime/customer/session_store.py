@@ -181,6 +181,31 @@ class CustomerSessionStore:
         async with self._transaction() as connection:
             await connection.run_sync(_metadata.create_all)
 
+    async def cancellation_settled(
+        self, local_identity, invocation_id, record, *, engine_id
+    ):
+        """Read-only proof for a caller that still owns its outer session guard."""
+        key = _key(local_identity)
+        async with self._transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(_turns.c.status)
+                    .join(_sessions, _sessions.c.key == _turns.c.session_key)
+                    .where(
+                        _sessions.c.key == key,
+                        _sessions.c.engine_id == engine_id,
+                        _sessions.c.owner.is_(None),
+                        _sessions.c.status == "idle",
+                        _sessions.c.current_invocation.is_(None),
+                        _turns.c.invocation_id == invocation_id,
+                        _turns.c.run_id == record.run_id,
+                        _turns.c.channel_id == record.channel_id,
+                        _turns.c.scope_id == record.scope_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return row == "cancelled"
+
     async def claim(
         self,
         local_identity: tuple[str, str, str],
@@ -235,7 +260,7 @@ class CustomerSessionStore:
                         if row["deadline"] > now
                         else "session_recovery_required"
                     )
-                if row["status"] not in {"idle", "completed"}:
+                if row["status"] not in {"idle", "completed", "cancelled"}:
                     raise CustomerChannelError("session_recovery_required")
                 values = dict(row)
                 values.update(
@@ -290,8 +315,17 @@ class CustomerSessionLease:
             raise CustomerChannelError("lease_closed")
         return self
 
-    async def __aexit__(self, *_):
-        await self.close()
+    async def __aexit__(self, exc_type, *_):
+        try:
+            await self.close()
+        except Exception:
+            if exc_type is None or not issubclass(
+                exc_type, (asyncio.CancelledError, GeneratorExit)
+            ):
+                raise
+            # ADK must not enqueue a replacement error after its consumer has
+            # stopped. An unconfirmed release retains the persisted owner.
+            logging.getLogger(__name__).warning("customer_session_cleanup_failed")
 
     @asynccontextmanager
     async def _bounded_lock(self):
@@ -396,7 +430,7 @@ class CustomerSessionLease:
                     if previous["input_digest"] == input_digest
                     else "invocation_conflict"
                 )
-            if session["status"] == "completed":
+            if session["status"] in {"completed", "cancelled"}:
                 raise CustomerChannelError("display_recovery_required")
             if session["status"] != "idle":
                 raise CustomerChannelError("session_recovery_required")
@@ -563,14 +597,63 @@ class CustomerSessionLease:
             )
             await self._session_update(connection, status="completed")
 
+    async def cancel_turn(self, record: CustomerTurnRecord):
+        """Record interruption only for the live original reserved run."""
+        async with self._change() as (connection, session):
+            invocation = session["current_invocation"]
+            turn = await self._turn(connection, invocation)
+            if (
+                session["status"] != "running"
+                or turn is None
+                or any(
+                    turn[field] != getattr(record, field)
+                    for field in ("run_id", "channel_id", "scope_id")
+                )
+            ):
+                raise CustomerChannelError("invalid_turn_state")
+            payload = (
+                await connection.execute(
+                    select(_journal.c.payload)
+                    .where(*self._journal_filter(invocation))
+                    .order_by(_journal.c.position.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            last = self._decode(payload) if payload is not None else None
+            if (
+                last is None
+                or not last.interrupted
+                or not last.turn_complete
+                or last.error_code != "customer_turn_cancelled"
+            ):
+                raise CustomerChannelError("missing_cancellation_terminal")
+            await connection.execute(
+                update(_turns)
+                .where(*self._turn_filter(invocation))
+                .values(status="cancelled")
+            )
+            await self._session_update(connection, status="cancelled")
+
+    async def read_running(self, invocation_id: str):
+        """Read this owner's incomplete journal for cancellation settlement."""
+        return await self._read_journal(invocation_id, {"running"})
+
     async def read_completed(self, invocation_id: str):
         """Recover only display Events, never remote execution or tool calls."""
+        return await self._read_journal(invocation_id, {"completed", "cancelled"})
+
+    async def _read_journal(self, invocation_id, statuses):
         if not _identifier(invocation_id, 256):
             raise ValueError("Invalid invocation identity")
         async with self._change() as (connection, _):
             turn = await self._turn(connection, invocation_id)
-            if turn is None or turn["status"] != "completed":
+            if turn is None or turn["status"] not in statuses:
                 raise CustomerChannelError("turn_not_completed")
+            if (
+                turn["event_count"] == turn["event_bytes"] == 0
+                and turn["status"] == "running"
+            ):
+                return []
             if (
                 not 0 < turn["event_count"] <= self._store._count_limit
                 or not 0 < turn["event_bytes"] <= self._store._turn_limit
@@ -600,7 +683,7 @@ class CustomerSessionLease:
     async def acknowledge_display(self):
         """Permit another turn only after verifying local Session persistence."""
         async with self._change() as (connection, session):
-            if session["status"] != "completed":
+            if session["status"] not in {"completed", "cancelled"}:
                 raise CustomerChannelError("invalid_turn_state")
             await self._session_update(
                 connection, status="idle", current_invocation=None

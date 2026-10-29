@@ -7,7 +7,7 @@ import hashlib
 import inspect
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from .dispatch import Executor
 from .protocol import CustomerRunRequest, CustomerSkill, CustomerTool
 from .session_store import CustomerSessionStore
+from .cancellation import CustomerCancellationContext
 
 
 @dataclass(frozen=True, repr=False)
@@ -46,6 +47,9 @@ class CustomerRuntimeConfig:
     cleanup_timeout: float = 10
     max_concurrency: int = 8
     event_queue_size: int = 16
+    confirm_cancellation: (
+        Callable[[CustomerCancellationContext], Awaitable[bool]] | None
+    ) = field(default=None, kw_only=True, repr=False)
     _binding_id: str = field(init=False)
 
     def __post_init__(self):
@@ -75,6 +79,15 @@ class CustomerRuntimeConfig:
                 raise ValueError("Invalid runtime capacity")
         if self.headers is not None and not callable(self.headers):
             raise ValueError("Headers require a server callback")
+        if self.confirm_cancellation is not None and not (
+            inspect.iscoroutinefunction(self.confirm_cancellation)
+            or inspect.iscoroutinefunction(
+                getattr(self.confirm_cancellation, "__call__", None)
+            )
+        ):
+            raise ValueError(
+                "Cancellation confirmation requires a server asynchronous callback"
+            )
         snapshot = CustomerRunRequest(
             app_name=self.remote_app,
             user_id="validation",
@@ -185,5 +198,5 @@ def check_customer_agent(agent, run_config=None):
         supported = {"streaming_mode"}
         if getattr(run_config, "custom_metadata", None) is None:
             supported.add("custom_metadata")
-        if set(getattr(run_config, "model_fields_set", ())) - supported:
+        if set[str](getattr(run_config, "model_fields_set", ())) - supported:
             raise ValueError("Unsupported customer RunConfig option")

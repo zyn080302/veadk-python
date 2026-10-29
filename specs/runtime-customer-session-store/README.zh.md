@@ -52,3 +52,11 @@ await engine.dispose()
 CON-3: 租约释放在 store 操作预算内（含锁等待）防御调用方重复取消，随后传播取消。释放状态不确定的 run 仍禁止复用。
 
 [设计](/Users/bytedance/Workspaces/VolcengineProjects/veadk-python.worktrees/skyeyes-harness-20261020/prd-spec/bugfixes/customer-repeated-cancellation/2026-10-20-customer-repeated-cancellation.zh.md)
+
+## 确认后的取消恢复（2026-10-29，离线验证）
+
+契约变更已实现；定点离线测试通过，完整SDK/安装消费者/真实验收待完成：Dispatcher/HTTP 清理后的可选服务端确认、绑定 owner 的取消终态 journal 与回读确认展示；默认继续阻止不完整执行。不强制解锁、不重放工具。[设计](../../prd-spec/bugfixes/customer-confirmed-cancellation/2026-10-29-customer-confirmed-cancellation.zh.md)维护接口、任务顺序、失败边界与验收。2026-10-29已批准；验证检查点见链接设计。
+
+取消接入：`cancellation_settled(local_identity, invocation_id, record, *, engine_id)` 为只读查询。调用方仍持有外层业务占用时，确认精确取消 run 已完成历史确认并释放 SDK owner；不抢占、不重放历史。
+
+取消清理失败须保留原始 `CancelledError`/`GeneratorExit`。租约只记录固定码，保持未确认的占用隔离；不授权复用，不向已断开的消费者发布替代错误。非取消退出的失败仍传播。
