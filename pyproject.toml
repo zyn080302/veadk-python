@@ -75,15 +75,26 @@ github-cicd = [
 ]
 codex = [
     # The SDK pins its matching `openai-codex-cli-bin` (the Codex binary)
-    # exactly, so the binary is not listed here. Bump both together by bumping
-    # this pin.
-    "openai-codex==0.159.2",
+    # exactly, so the binary is not listed here. CLI 0.164.0 is separately
+    # released and selected by trusted deployments with VEADK_CODEX_BIN.
+    "openai-codex==0.163.0",
     # The Responses->chat shim (veadk/runtime/codex/proxy.py) imports these at
     # module level. They resolve transitively through google-adk today, but adk
     # has already moved other web deps behind extras on 2.x, so declare them
     # here rather than rely on that.
     "fastapi",
     "uvicorn",
+]
+dsh = [
+    # The SDK depends on its matching `deepseek-harness-runtime-bin` wheel,
+    # which carries the bundled `dsh` executable for supported platforms.
+    "deepseek-harness-sdk==0.1.5rc1",
+]
+deepseek-harness = [
+    # Backward-compatible extra alias for early DeepSeek Harness runtime users.
+    # The SDK depends on its matching `deepseek-harness-runtime-bin` wheel,
+    # which carries the bundled `dsh` executable for supported platforms.
+    "deepseek-harness-sdk==0.1.5rc1",
 ]
 extensions = [
     "redis>=5.0",                                           # For Redis database
@@ -161,7 +172,12 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "veadk" = ["**/*"]
-"frontend.server" = ["templates/**/*.tmpl", "templates/**/.*.tmpl", "skills/consts.json"]
+"frontend.server" = [
+    "templates/**/*.tmpl",
+    "templates/**/.*.tmpl",
+    "skills/consts.json",
+    "mpa/contracts/mpa-p0/*.json",
+]
 
 # Derive the package version from the latest git tag (e.g. tag "0.5.36"
 # publishes version 0.5.36). No version string is hardcoded anywhere; release

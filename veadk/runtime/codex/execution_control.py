@@ -64,7 +64,12 @@ class TurnRequests:
         for task in tasks:
             loop = task.get_loop()
             if not loop.is_closed():
-                loop.call_soon_threadsafe(task.cancel)
+
+                def cancel_once(task=task) -> None:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+
+                loop.call_soon_threadsafe(cancel_once)
         return tasks
 
     @staticmethod
@@ -86,7 +91,17 @@ class TurnRequests:
                         asyncio.run_coroutine_threadsafe(join(task), loop)
                     )
                 )
-        await asyncio.gather(*waits)
+        # Shield executor finally blocks from repeated cancellation of teardown.
+        drain = asyncio.gather(*waits)
+        cancelled = False
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                cancelled = True
+        drain.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 class TurnInterrupt:

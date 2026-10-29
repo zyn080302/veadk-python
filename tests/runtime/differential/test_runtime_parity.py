@@ -40,7 +40,7 @@ exclusion with no paired assertion is a hole, not a simplification.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import pytest
@@ -179,11 +179,6 @@ def _assert_output_key_from_session(adk, codex) -> None:
     assert codex.session_state.get("answer") == "The sky is blue."
 
 
-def _assert_output_key_joins_multi_text(adk, codex) -> None:
-    assert adk.session_state.get("answer") == "Part one. Part two."
-    assert codex.session_state.get("answer") == "Part one. Part two."
-
-
 def _assert_temperature_reaches_backend(adk, codex) -> None:
     assert adk.calls[0].temperature == 0.1
     assert codex.calls[0].temperature == 0.1
@@ -283,13 +278,6 @@ PARITY_ROWS: tuple[Row, ...] = (
         agent_kwargs=_kwargs(tools=[record_fact], output_key="answer"),
         expected_usage=(10, 4),
         extra_assert=_assert_output_key_from_session,
-    ),
-    Row(
-        id="output_key_multi_text",
-        plan=(Round(texts=("Part one. ", "Part two."), usage=(10, 4)),),
-        agent_kwargs=_kwargs(output_key="answer"),
-        expected_usage=(10, 4),
-        extra_assert=_assert_output_key_joins_multi_text,
     ),
     Row(
         id="before_after_model_callbacks",
@@ -415,6 +403,42 @@ async def _run_pair(parity_runner, row: Row):
         capture_spans=row.capture_spans,
     )
     return adk, codex
+
+
+@pytest.mark.asyncio
+async def test_output_key_uses_each_runtime_message_contract(parity_runner, compare):
+    """ADK text parts join; Codex selects the last completed message item.
+
+    The scripted Responses backend emits two distinct message IDs, rather
+    than two deltas of a single item. Pin both final text and persisted state,
+    then retain all other parity assertions after normalizing this difference.
+    Official collector and real CLI selection are also tested by the terminal
+    integrity and smoke suites; this test covers the downstream output_key.
+    """
+    row = Row(
+        id="output_key_multi_text",
+        plan=(Round(texts=("Part one. ", "Part two."), usage=(10, 4)),),
+        agent_kwargs=_kwargs(output_key="answer"),
+        expected_usage=(10, 4),
+    )
+    adk, codex = await _run_pair(parity_runner, row)
+    assert adk.error is None and codex.error is None
+    assert adk.final_text == "Part one. Part two."
+    assert adk.state_delta == {"answer": "Part one. Part two."}
+    assert adk.session_state == {"answer": "Part one. Part two."}
+    assert codex.final_text == "Part two."
+    assert codex.state_delta == {"answer": "Part two."}
+    assert codex.session_state == {"answer": "Part two."}
+    compare(
+        adk,
+        replace(
+            codex,
+            final_text=adk.final_text,
+            state_delta=adk.state_delta,
+            session_state=adk.session_state,
+        ),
+        expected_usage=row.expected_usage,
+    )
 
 
 @pytest.mark.asyncio

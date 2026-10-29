@@ -58,6 +58,8 @@ import json
 import os
 import platform
 import shutil
+import sys
+import subprocess
 import tempfile
 import time
 import uuid
@@ -65,6 +67,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from veadk.runtime.codex.config import configured_codex_binary
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -76,6 +80,9 @@ _SANDBOX_PROBE_MARKER = "veadk-codex-sandbox-probe-ok"
 #: which of these comes back says whether the sandbox is actually enforcing.
 _WRITE_ALLOWED_MARKER = "veadk-codex-write-allowed"
 _WRITE_DENIED_MARKER = "veadk-codex-write-denied"
+#: The same probe outside the workspace, which `read_only` denies everywhere.
+_OUTSIDE_WRITE_ALLOWED_MARKER = "veadk-codex-outside-write-allowed"
+_OUTSIDE_WRITE_DENIED_MARKER = "veadk-codex-outside-write-denied"
 #: Path the probe tries to create, relative to the turn's workspace (cwd).
 _WRITE_PROBE_FILE = "veadk-codex-write-probe"
 #: Passed to the ADK tool by the stub backend and recorded by the tool body.
@@ -91,6 +98,8 @@ _RUN_TIMEOUT_SECONDS = 60.0
 
 def _codex_binary() -> Path | None:
     """Resolve the Codex CLI the SDK would spawn, or None if unavailable."""
+    if selected := configured_codex_binary():
+        return Path(selected)
     try:
         from codex_cli_bin import bundled_codex_path  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001 - the bin package is an optional extra
@@ -288,7 +297,10 @@ _PROBE_SCRIPT = (
     f"/bin/echo {_SANDBOX_PROBE_MARKER}; "
     f"if /usr/bin/touch ./{_WRITE_PROBE_FILE} 2>/dev/null; "
     f"then /bin/echo {_WRITE_ALLOWED_MARKER}; "
-    f"else /bin/echo {_WRITE_DENIED_MARKER}; fi"
+    f"else /bin/echo {_WRITE_DENIED_MARKER}; fi; "
+    f"if /usr/bin/touch /tmp/{_WRITE_PROBE_FILE}-$$ 2>/dev/null; "
+    f"then /bin/echo {_OUTSIDE_WRITE_ALLOWED_MARKER}; "
+    f"else /bin/echo {_OUTSIDE_WRITE_DENIED_MARKER}; fi"
 )
 
 
@@ -319,6 +331,22 @@ def _sandbox_probe_call(tools: Any) -> tuple[str, dict[str, Any]] | None:
         if properties.get("command", {}).get("type") == "array":
             return name, {"command": ["/bin/sh", "-c", _PROBE_SCRIPT]}
     return None
+
+
+@pytest.mark.codex_smoke
+def test_selected_codex_binary_reports_expected_version() -> None:
+    if os.getenv("CODEX_RUN_SMOKE") != "1":
+        pytest.skip("set CODEX_RUN_SMOKE=1 to spawn the real Codex binary")
+    reason = _skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    binary = _codex_binary()
+    result = subprocess.run(
+        [str(binary), "--version"], capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 0
+    expected = "0.164.0" if configured_codex_binary() else "0.163.0"
+    assert result.stdout.strip() == f"codex-cli {expected}"
 
 
 @pytest.mark.codex_smoke
@@ -460,9 +488,21 @@ async def test_real_codex_binary_completes_one_tool_using_turn(monkeypatch) -> N
         "the OS sandbox did not establish, or refused to run a trivial "
         f"read-only command. Codex reported: {probe_output!r}"
     )
-    assert _WRITE_DENIED_MARKER in probe_output, (
+    assert _OUTSIDE_WRITE_DENIED_MARKER in probe_output, (
         "sandbox='read_only' did not actually block a write from inside the "
         f"sandbox. Codex reported: {probe_output!r}"
+    )
+    # The session's own workspace: read-only, except on Linux, where Codex's
+    # sandbox cannot reach a read grant beneath the denied temp dir and VeADK
+    # grants it write instead (`runtime._nested_read_access`). Revisit when
+    # Codex fixes that; until then Linux must keep the workaround.
+    own_marker = (
+        _WRITE_ALLOWED_MARKER
+        if sys.platform.startswith("linux")
+        else _WRITE_DENIED_MARKER
+    )
+    assert own_marker in probe_output, (
+        f"unexpected own-workspace write result. Codex reported: {probe_output!r}"
     )
 
     # -- the ADK tool path over a real socket ------------------------------
@@ -512,9 +552,18 @@ async def test_real_codex_binary_completes_one_tool_using_turn(monkeypatch) -> N
     # process-owned root or landing in the working directory.
     workspace = next(iter(new_workspaces))
     assert workspace.parent == workspace_root
-    assert not (workspace / _WRITE_PROBE_FILE).exists(), (
-        "the read-only sandbox let Codex create a file in the workspace"
-    )
+    # Same platform split as `own_marker` above: the file shows the write
+    # really happened (Linux workaround) or really did not (elsewhere).
+    write_probe = workspace / _WRITE_PROBE_FILE
+    if sys.platform.startswith("linux"):
+        assert write_probe.exists(), (
+            "the Linux workaround should let Codex write its own workspace: "
+            "Codex cannot read-grant a path beneath the denied temp dir"
+        )
+    else:
+        assert not write_probe.exists(), (
+            "the read-only sandbox let Codex create a file in the workspace"
+        )
     cwd_after = {name for name in os.listdir(os.getcwd()) if name[0] != "."}
     assert cwd_after == cwd_before, (
         "the turn created entries in the working directory: "
@@ -526,14 +575,19 @@ async def test_real_codex_binary_completes_one_tool_using_turn(monkeypatch) -> N
 def _codex_homes(temp_root: Path) -> set[Path]:
     """Invocation-scoped CODEX_HOME dirs, excluding the workspace root.
 
-    ``_prepare_codex_home`` and ``_SESSION_WORKSPACE_ROOT`` share the
-    ``veadk-codex-`` prefix; only the former must be gone after a turn.
+    ``_prepare_codex_home`` creates homes inside a ``veadk-codex-homes-*``
+    root; the roots, like ``_SESSION_WORKSPACE_ROOT``, outlive a turn.
     """
-    return {
-        path
-        for path in temp_root.glob("veadk-codex-*")
-        if path.is_dir() and not path.name.startswith("veadk-codex-workspaces-")
-    }
+    homes: set[Path] = set()
+    for path in temp_root.glob("veadk-codex-*"):
+        if not path.is_dir() or path.name.startswith("veadk-codex-workspaces-"):
+            continue
+        if path.name.startswith("veadk-codex-homes-"):
+            # A process-owned root; the homes are its subdirectories.
+            homes.update(home for home in path.iterdir() if home.is_dir())
+        else:
+            homes.add(path)
+    return homes
 
 
 def _tool_names(requests: list[dict[str, Any]]) -> list[str]:
@@ -582,16 +636,19 @@ async def test_real_codex_binary_fails_turn_when_shim_is_unreachable() -> None:
 
     from veadk.runtime.codex.model_provider import shim_route
 
+    workspace = tempfile.mkdtemp(prefix="veadk-codex-smoke-dead-shim-")
     home = runtime_module._prepare_codex_home(
         shim_route(f"http://127.0.0.1:{dead_port}", ""),
         "smoke-model",
         CodexRuntimeConfig(),
+        workspace=workspace,
     )
-    workspace = tempfile.mkdtemp(prefix="veadk-codex-smoke-dead-shim-")
 
     async def _turn_status() -> str:
         config = CodexConfig(
-            cwd=workspace, env=codex_subprocess_env(home, "smoke-token")
+            codex_bin=configured_codex_binary(),
+            cwd=workspace,
+            env=codex_subprocess_env(home, "smoke-token"),
         )
         async with AsyncCodex(config=config) as codex:
             thread = await codex.thread_start(
@@ -742,7 +799,7 @@ async def test_real_codex_shell_cannot_see_the_model_key() -> None:
         extra_headers={"X-Api-Key": header_secret},
     )
     home = runtime_module._prepare_codex_home(
-        route, "smoke-model", CodexRuntimeConfig()
+        route, "smoke-model", CodexRuntimeConfig(), workspace=tempfile.gettempdir()
     )
     with open(os.path.join(home, "config.toml"), encoding="utf-8") as f:
         config_text = f.read()
@@ -750,7 +807,11 @@ async def test_real_codex_shell_cannot_see_the_model_key() -> None:
     env = codex_subprocess_env(home, "")
     env.update(route.env)
     try:
-        async with AsyncCodex(config=CodexConfig(cwd=workspace, env=env)) as codex:
+        async with AsyncCodex(
+            config=CodexConfig(
+                codex_bin=configured_codex_binary(), cwd=workspace, env=env
+            )
+        ) as codex:
             thread = await codex.thread_start(
                 model="smoke-model",
                 model_provider=route.provider_id,

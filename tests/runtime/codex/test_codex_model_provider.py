@@ -32,6 +32,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from veadk.runtime.codex.config import configured_codex_binary
 from pydantic import ValidationError
 
 from veadk.runtime.codex.config import CodexRuntimeConfig
@@ -449,7 +451,11 @@ async def test_real_codex_honours_direct_route_thread_config() -> None:
         env.update(route.env)
 
         async def _run() -> Any:
-            async with AsyncCodex(config=CodexConfig(cwd=workspace, env=env)) as codex:
+            async with AsyncCodex(
+                config=CodexConfig(
+                    codex_bin=configured_codex_binary(), cwd=workspace, env=env
+                )
+            ) as codex:
                 thread = await codex.thread_start(
                     model="stub-model",
                     model_provider=route.provider_id,

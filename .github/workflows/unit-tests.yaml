@@ -59,6 +59,9 @@ jobs:
         uv sync --all-extras
         uv pip install -e .
 
+    - name: Require Codex terminal integrity before release
+      run: uv run --extra dev --extra codex python scripts/check_codex_terminal_integrity.py
+
     - name: Run unit tests with pytest
       run: |
         source .venv/bin/activate
@@ -130,6 +133,12 @@ jobs:
         source .venv/bin/activate
         uv sync --all-extras
         uv pip install -e .
+
+    - name: Install the selected Codex CLI
+      run: |
+        npm install --prefix "$RUNNER_TEMP/veadk-codex" --no-save @openai/codex@0.164.0
+        echo "VEADK_CODEX_BIN=$RUNNER_TEMP/veadk-codex/node_modules/.bin/codex" >> "$GITHUB_ENV"
+        test "$("$RUNNER_TEMP/veadk-codex/node_modules/.bin/codex" --version)" = "codex-cli 0.164.0"
 
     - name: Run the Codex end-to-end smoke test
       env:

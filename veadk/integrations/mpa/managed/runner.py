@@ -22,10 +22,13 @@ from .config import (
     load_profile,
     with_creation_images,
     with_creation_resources,
+    with_creation_scaling,
     with_creation_tos,
 )
-from .diagnostics import classify_error, diagnostic_scope, report
+from .diagnostics import diagnostic_scope, report_failure
 from .iam import IamError
+from .names import NameCheckError
+from .openviking import OpenVikingError
 from .service import provision
 
 
@@ -46,6 +49,7 @@ def run():
             region=data["region"],
             provider=data.get("provider", "volcengine"),
         )
+        profile = with_creation_scaling(profile, data.get("maxInstance"))
         profile = with_creation_images(profile, data.get("images", {}))
         profile = with_creation_resources(profile, data.get("resources", {}))
         profile = with_creation_tos(profile, data.get("tos", {}))
@@ -55,6 +59,7 @@ def run():
                     profile,
                     agent_id=data["agentId"],
                     runtime_name=data.get("name", ""),
+                    expected_account=data.get("expectedAccount", ""),
                     owner=data["owner"],
                     studio_runtime_owner=data.get("studioRuntimeOwner"),
                     description=data["description"],
@@ -78,9 +83,13 @@ def run():
         )
         return 0
     except Exception as error:
-        report("provision", classify_error(error))
+        report_failure("provision", error)
         # Error text can contain SDK request payloads, URLs and credentials.
-        emit(error=error.key if isinstance(error, IamError) else "creationFailed")
+        emit(
+            error=error.key
+            if isinstance(error, (IamError, OpenVikingError, NameCheckError))
+            else "creationFailed"
+        )
         return 1
 
 

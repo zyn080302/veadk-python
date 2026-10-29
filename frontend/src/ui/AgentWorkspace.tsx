@@ -1,3 +1,4 @@
+import { MpaImageUpdates } from "./mpa-images/MpaImageUpdates";
 import {
   useEffect,
   useMemo,
@@ -101,10 +102,11 @@ import { Markdown } from "./Markdown";
 import { ResourceDetailLayout } from "./ResourceCollection";
 import { StudioConfirmDialog } from "./StudioConfirmDialog";
 import { TextShimmer } from "./text-shimmer/TextShimmer";
+import { CollaboratorManager } from "./collaborating-agents/CollaboratingAgents";
 import "./AgentWorkspace.css";
 
 type WorkspaceView = "library" | "evaluation";
-type AgentSection = "basic" | "profileConfig" | "sessionConfig" | "usage" | "diagnostics" | "evaluations" | "optimizations" | "integrations" | "versions";
+type AgentSection = "basic" | "images" | "collaborators" | "profileConfig" | "sessionConfig" | "usage" | "diagnostics" | "evaluations" | "optimizations" | "integrations" | "versions";
 type IntegrationProtocol = "api-server" | "a2a";
 type EvaluationSection = "config" | "history";
 type CaseKind = "good" | "bad";
@@ -131,6 +133,8 @@ type DeleteConfirmTarget =
       confirmLabel: string;
       canConfirm?: boolean;
       agent: AgentEntry;
+      previewLoading?: boolean;
+      previewFailed?: boolean;
     }
   | {
       kind: "draft";
@@ -306,6 +310,8 @@ function evaluationText(value: string, t: TFunction): string {
 
 const AGENT_SECTIONS: AgentSection[] = [
   "basic",
+  "images",
+  "collaborators",
   "profileConfig",
   "sessionConfig",
   "usage",
@@ -487,9 +493,20 @@ function MpaDeletePreviewDetails({
               {t(`agentWorkspace.mpaDeleteStage.${stage.stage}`, {
                 count: stage.count,
               })}
+              {stage.resourceId && <span> ({stage.resourceId})</span>}
             </li>
           ))}
         </ol>
+      )}
+      {Boolean(preview.retainedResources?.length) && (
+        <div>
+          <strong>{t("agentWorkspace.mpaDeleteRetained")}</strong>
+          <ul>{preview.retainedResources?.map((item) => (
+            <li key={`${item.stage}:${item.resourceId}`}>
+              {item.resourceId} — {t(`agentWorkspace.mpaDeleteRetainedReason.${item.reason}`, { defaultValue: item.reason })}
+            </li>
+          ))}</ul>
+        </div>
       )}
     </div>
   );
@@ -1836,6 +1853,7 @@ export interface AgentWorkspaceProps {
   canCreate: boolean;
   canUpdate: boolean;
   canViewUsage?: boolean;
+  canManageCollaborators?: boolean;
   loadingAgents?: boolean;
   agentsError?: string;
   deploymentTasks?: DeploymentTaskUpdate[];
@@ -1872,6 +1890,7 @@ export function AgentWorkspace({
   canCreate,
   canUpdate,
   canViewUsage = false,
+  canManageCollaborators = false,
   loadingAgents = false,
   agentsError = "",
   deploymentTasks = [],
@@ -1945,6 +1964,8 @@ export function AgentWorkspace({
   const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(() => new Set());
   const [deletingAgents, setDeletingAgents] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const deletePreviewAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => deletePreviewAbortRef.current?.abort(), []);
   const [deleteConfirmTarget, setDeleteConfirmTarget] =
     useState<DeleteConfirmTarget | null>(null);
   const [feedbackCases, setFeedbackCases] = useState<AgentCase[]>([]);
@@ -2107,8 +2128,15 @@ export function AgentWorkspace({
     selectedAgentInfo?.appName || selectedAgent?.runtimeApp || selectedAgent?.app || "";
   const selectedAgentCategory: AgentCategory =
     selectedAgent?.agentCategory ?? "general";
-  // MPA details expose only Basic, including restored/external focus.
-  const section = selectedAgentCategory === "mpa" ? "basic" : requestedSection;
+  const collaboratorsAvailable = selectedAgentCategory === "mpa" &&
+    Boolean(selectedAgent?.runtimeId) && canManageCollaborators;
+  // Gate restored/external focus as well as the visible navigation.
+  const imagesAvailable = selectedAgentCategory === "mpa" && Boolean(selectedAgent?.runtimeId) && canUpdate;
+  const section = requestedSection === "images"
+    ? imagesAvailable ? "images" : "basic"
+    : requestedSection === "collaborators"
+    ? collaboratorsAvailable ? "collaborators" : "basic"
+    : selectedAgentCategory === "mpa" ? "basic" : requestedSection;
   const runtimeDetailForSelectedAgent = runtimeDetail?.runtimeId === selectedAgent?.runtimeId
     ? runtimeDetail
     : null;
@@ -2120,6 +2148,8 @@ export function AgentWorkspace({
     selectedAgent?.runtimeId ??
     "";
   const visibleAgentSectionIds = AGENT_SECTIONS.filter((item) => {
+    if (item === "images") return imagesAvailable;
+    if (item === "collaborators") return collaboratorsAvailable;
     if (selectedAgentCategory === "mpa") return item === "basic";
     if (item === "profileConfig") return false;
     if (item === "usage") return canViewUsage && selectedAgent?.runtimeId;
@@ -2129,7 +2159,7 @@ export function AgentWorkspace({
   });
   const visibleAgentSections = visibleAgentSectionIds.map((id) => ({
     id,
-    label: t(`agentWorkspace.sections.${id}`),
+    label: id === "images" ? t("mpaImages:title") : id === "collaborators" ? t("collaboratingAgents:title") : t(`agentWorkspace.sections.${id}`),
   }));
   const agentUsageRequestKey = JSON.stringify([
     selectedAgent?.runtimeId ?? "",
@@ -3808,6 +3838,11 @@ export function AgentWorkspace({
 
   const confirmDeleteTarget = async () => {
     if (!deleteConfirmTarget || deletingAgents) return;
+    if (deleteConfirmTarget.kind === "agent" && deleteConfirmTarget.previewFailed) {
+      await deleteSingleAgent(deleteConfirmTarget.agent);
+      return;
+    }
+    if (deleteConfirmTarget.canConfirm === false) return;
     setDeletingAgents(true);
     setDeleteError("");
     try {
@@ -3848,11 +3883,26 @@ export function AgentWorkspace({
 
   const deleteSingleAgent = async (agent: AgentEntry) => {
     if (!onDeleteAgents || agent.canDelete !== true || deletingAgents) return;
+    deletePreviewAbortRef.current?.abort();
     setDeleteError("");
     let preview: MpaAgentDeletePreview | null = null;
     if (agent.agentCategory === "mpa") {
+      const controller = new AbortController();
+      deletePreviewAbortRef.current = controller;
+      setDeleteConfirmTarget({
+        kind: "agent", agent,
+        title: t("agentWorkspace.deleteAgentTitle"),
+        description: <p role="status">{t("agentWorkspace.mpaDeleteChecking")}</p>,
+        confirmLabel: t("agentWorkspace.mpaDeleteChecking"),
+        canConfirm: false, previewLoading: true,
+      });
       if (!agent.runtimeId || !agent.region) {
         setDeleteError(t("agentWorkspace.errors.loadMpaDeletePreview"));
+        setDeleteConfirmTarget((current) => current?.kind === "agent" ? {
+          ...current, previewLoading: false, previewFailed: true, canConfirm: true,
+          confirmLabel: t("agentWorkspace.mpaDeleteRetryPreview"),
+          description: t("agentWorkspace.errors.loadMpaDeletePreview"),
+        } : current);
         return;
       }
       try {
@@ -3860,9 +3910,17 @@ export function AgentWorkspace({
           mpaInstanceId: agent.mpaInstanceId ?? agent.runtimeId,
           runtimeId: agent.runtimeId,
           region: agent.region,
+          signal: controller.signal,
         });
+        if (controller.signal.aborted || deletePreviewAbortRef.current !== controller) return;
       } catch (cause) {
+        if (controller.signal.aborted || deletePreviewAbortRef.current !== controller) return;
         setDeleteError(cause instanceof Error ? cause.message : String(cause));
+        setDeleteConfirmTarget((current) => current?.kind === "agent" ? {
+          ...current, previewLoading: false, previewFailed: true, canConfirm: true,
+          confirmLabel: t("agentWorkspace.mpaDeleteRetryPreview"),
+          description: t("agentWorkspace.mpaDeletePreviewFailed"),
+        } : current);
         return;
       }
     }
@@ -4378,6 +4436,22 @@ export function AgentWorkspace({
               </div>
             )}
             <div className="aw-content">
+              {section === "images" && imagesAvailable && selectedAgent?.runtimeId && (
+                <section className="aw-section">
+                  <h3>{t("mpaImages:title")}</h3>
+                  <MpaImageUpdates runtimeId={selectedAgent.runtimeId} region={selectedAgent.region ?? "cn-beijing"} />
+                </section>
+              )}
+              {section === "collaborators" && collaboratorsAvailable && selectedAgent?.runtimeId && (
+                <section className="aw-section">
+                  <h3>{t("collaboratingAgents:title")}</h3>
+                  <CollaboratorManager
+                    key={`${selectedAgent.region ?? "cn-beijing"}:${selectedAgent.runtimeId}`}
+                    runtimeId={selectedAgent.runtimeId}
+                    region={selectedAgent.region ?? "cn-beijing"}
+                  />
+                </section>
+              )}
               {section === "basic" && (
                 <div className="aw-basic-stack">
                   {detailAgentInfoUnsupported && (
@@ -5334,11 +5408,17 @@ export function AgentWorkspace({
         variant="danger"
         title={deleteConfirmTarget.title}
         description={deleteConfirmTarget.description}
+        error={deleteError || undefined}
         confirmLabel={deletingAgents ? t("common.deleting") : deleteConfirmTarget.confirmLabel}
         closeLabel={t("agentWorkspace.closeDeleteConfirmation")}
         busy={deletingAgents}
         confirmDisabled={deleteConfirmTarget.canConfirm === false}
-        onCancel={() => setDeleteConfirmTarget(null)}
+        onCancel={() => {
+          deletePreviewAbortRef.current?.abort();
+          deletePreviewAbortRef.current = null;
+          setDeleteConfirmTarget(null);
+          setDeleteError("");
+        }}
         onConfirm={() => void confirmDeleteTarget()}
       />
     )}

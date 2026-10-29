@@ -80,6 +80,7 @@ def _message(text: str, role: str = "user") -> dict:
 def _text_response(text: str, response_id: str = "resp") -> dict:
     return {
         "id": response_id,
+        "status": "completed",
         "model": "model",
         "output": [
             {
@@ -96,6 +97,7 @@ def _text_response(text: str, response_id: str = "resp") -> dict:
 def _tool_response(name: str, response_id: str, call_id: str) -> dict:
     return {
         "id": response_id,
+        "status": "completed",
         "model": "model",
         "output": [
             {
@@ -332,6 +334,7 @@ async def test_streamed_function_call_survives_synthesis(monkeypatch) -> None:
         return {
             "id": "resp",
             "model": "model",
+            "status": "completed",
             "output": [
                 {
                     "id": "msg",
@@ -430,6 +433,7 @@ async def test_response_completed_output_equals_the_streamed_items(
         return {
             "id": "resp",
             "model": "model",
+            "status": "completed",
             "output": [
                 {
                     "id": "msg",
@@ -1079,6 +1083,8 @@ async def test_backend_error_is_recorded_so_the_turn_cannot_finish_silently(
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["message"] == "Backend rejected the request."
+    assert "not supported" not in json.dumps(response.json())
     assert "sk-secret-key" not in json.dumps(response.json())
     recorded = shim.turn_error(token)
     assert isinstance(recorded, litellm_exceptions.BadRequestError), recorded

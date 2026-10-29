@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from google.adk.sessions.session import Session
@@ -25,12 +27,54 @@ from google.genai import types
 
 pytest.importorskip("openai_codex")
 
-from openai_codex import ApprovalMode, Sandbox  # noqa: E402
+from openai_codex import ApprovalMode  # noqa: E402
 
 from veadk.runtime.codex.config import CodexRuntimeConfig  # noqa: E402
 from veadk.runtime.codex.runtime import CodexRuntime  # noqa: E402
 from veadk.runtime.codex.runtime import _TOOL_AVAILABILITY_NOTE  # noqa: E402
 from veadk.runtime.codex.runtime import _prepare_workspace  # noqa: E402
+
+
+def test_existing_empty_workspace_is_not_a_reset(tmp_path):
+    from types import SimpleNamespace
+    from veadk.runtime.codex.runtime import _prepare_workspace_state
+
+    ctx: Any = SimpleNamespace(
+        session=SimpleNamespace(app_name="app", user_id="user", id="session"),
+        agent=SimpleNamespace(name="agent"),
+    )
+    config = CodexRuntimeConfig(workspace_root=str(tmp_path))
+    path, created = _prepare_workspace_state(config, ctx)
+    assert created
+    assert not list(Path(path).iterdir())
+    assert _prepare_workspace_state(config, ctx) == (path, False)
+    Path(path).rmdir()
+    assert _prepare_workspace_state(config, ctx) == (path, True)
+
+
+def test_mcp_reuse_default_and_environment_override(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("VEADK_CODEX_MCP_PROCESS_REUSE", raising=False)
+    assert CodexRuntimeConfig().mcp_process_reuse
+    assert CodexRuntimeConfig.from_agent(SimpleNamespace()).mcp_process_reuse
+    assert not CodexRuntimeConfig.from_agent(
+        SimpleNamespace(
+            codex_runtime_config=CodexRuntimeConfig(mcp_process_reuse=False)
+        )
+    ).mcp_process_reuse
+    monkeypatch.setenv("VEADK_CODEX_MCP_PROCESS_REUSE", "1")
+    assert CodexRuntimeConfig.from_agent(SimpleNamespace()).mcp_process_reuse
+    monkeypatch.setenv("VEADK_CODEX_MCP_PROCESS_REUSE", "0")
+    assert not CodexRuntimeConfig.from_agent(
+        SimpleNamespace(codex_runtime_config=CodexRuntimeConfig(mcp_process_reuse=True))
+    ).mcp_process_reuse
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "no"])
+def test_mcp_reuse_can_be_disabled_by_environment(monkeypatch, value):
+    monkeypatch.setenv("VEADK_CODEX_MCP_PROCESS_REUSE", value)
+    assert not CodexRuntimeConfig.from_agent(SimpleNamespace()).mcp_process_reuse
 
 
 class _FakeShim:
@@ -97,7 +141,15 @@ class _FakeTurn:
     id = "turn-1"
 
     def stream(self):
-        return _EmptyStream()
+        async def completed():
+            yield SimpleNamespace(
+                method="turn/completed",
+                payload=SimpleNamespace(
+                    turn=SimpleNamespace(id=self.id, status="completed")
+                ),
+            )
+
+        return completed()
 
     async def interrupt(self):
         return None
@@ -162,14 +214,24 @@ class _Context(SimpleNamespace):
         self.llm_call_count = getattr(self, "llm_call_count", 0) + 1
 
 
+@pytest.mark.parametrize("use_external_binary", [False, True])
 @pytest.mark.asyncio
 async def test_runtime_passes_isolated_config_and_safe_sdk_controls(
     monkeypatch,
     caplog: pytest.LogCaptureFixture,
+    tmp_path,
+    use_external_binary,
 ) -> None:
     from veadk.runtime.codex import runtime as runtime_module
 
     shim = _FakeShim()
+    if use_external_binary:
+        executable = tmp_path / "codex with spaces"
+        executable.write_text("unused by fake SDK")
+        executable.chmod(0o700)
+        monkeypatch.setenv("VEADK_CODEX_BIN", str(executable))
+    else:
+        monkeypatch.delenv("VEADK_CODEX_BIN", raising=False)
 
     async def fake_get_shim(api_base, api_key):
         assert api_base == "https://backend.invalid/v1"
@@ -222,12 +284,14 @@ async def test_runtime_passes_isolated_config_and_safe_sdk_controls(
     assert shim.registered[0]["invocation_id"] == "inv-sdk"
     assert shim.unregistered == ["opaque-turn-token"]
     sdk_config = _FakeAsyncCodex.calls["config"]
+    assert sdk_config.codex_bin == (str(executable) if use_external_binary else None)
     assert sdk_config.env["VEADK_CODEX_API_KEY"] == "opaque-turn-token"
     assert sdk_config.env["OPENAI_API_KEY"] == ""
     assert (
         _FakeAsyncCodex.calls["thread_start"]["approval_mode"] is ApprovalMode.deny_all
     )
-    assert _FakeAsyncCodex.calls["thread_start"]["sandbox"] is Sandbox.workspace_write
+    # No preset: it would replace the config's permissions profile.
+    assert _FakeAsyncCodex.calls["thread_start"]["sandbox"] is None
     # `base_instructions` *replaces* Codex's 20.9KB built-in system prompt, so
     # the runtime deliberately never sends it; the agent identity rides along
     # with the instruction on the developer channel instead.
@@ -258,8 +322,11 @@ async def test_runtime_passes_isolated_config_and_safe_sdk_controls(
     assert "opaque-turn-token" not in messages
 
 
+@pytest.mark.parametrize("invalid_binary", [False, True])
 @pytest.mark.asyncio
-async def test_runtime_unregisters_turn_when_sdk_start_fails(monkeypatch) -> None:
+async def test_runtime_unregisters_turn_when_sdk_start_fails(
+    monkeypatch, invalid_binary
+) -> None:
     from veadk.runtime.codex import runtime as runtime_module
 
     shim = _FakeShim()
@@ -274,6 +341,10 @@ async def test_runtime_unregisters_turn_when_sdk_start_fails(monkeypatch) -> Non
     )
     _FakeAsyncCodex.calls = {}
     _FakeAsyncCodex.raise_on_start = True
+    if invalid_binary:
+        monkeypatch.setenv("VEADK_CODEX_BIN", "relative-untrusted-executable")
+    else:
+        monkeypatch.delenv("VEADK_CODEX_BIN", raising=False)
 
     agent = _Agent()
     ctx = _Context(
@@ -292,12 +363,16 @@ async def test_runtime_unregisters_turn_when_sdk_start_fails(monkeypatch) -> Non
     )
 
     try:
-        with pytest.raises(RuntimeError, match="sdk start failed"):
+        error = ValueError if invalid_binary else RuntimeError
+        message = "VEADK_CODEX_BIN" if invalid_binary else "sdk start failed"
+        with pytest.raises(error, match=message):
             _ = [event async for event in CodexRuntime().run_async(agent, ctx)]
     finally:
         _FakeAsyncCodex.raise_on_start = False
 
     assert shim.unregistered == ["opaque-turn-token"]
+    if invalid_binary:
+        assert _FakeAsyncCodex.calls == {}
 
 
 def test_session_workspaces_are_stable_and_isolated(tmp_path) -> None:
@@ -343,12 +418,17 @@ def test_codex_home_pins_settings_the_pinned_cli_would_break(tmp_path) -> None:
         import tomli as tomllib
 
     from veadk.runtime.codex.model_provider import shim_route
-    from veadk.runtime.codex.runtime import _prepare_codex_home
+    from veadk.runtime.codex.runtime import _nested_read_access, _prepare_codex_home
 
+    import os
+    import tempfile
+
+    workspace = os.path.realpath(tempfile.mkdtemp(prefix="veadk-codex-ws-"))
     home = _prepare_codex_home(
         shim_route("http://127.0.0.1:9", ""),
         "model-x",
         CodexRuntimeConfig(network_access=True),
+        workspace=workspace,
     )
     try:
         with open(f"{home}/config.toml", "rb") as f:
@@ -357,6 +437,7 @@ def test_codex_home_pins_settings_the_pinned_cli_would_break(tmp_path) -> None:
         import shutil
 
         shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(workspace, ignore_errors=True)
 
     # Both default to on in the pinned CLI. Unbounded retries would turn an
     # unreachable shim into a hung invocation (this runtime has no turn
@@ -376,7 +457,25 @@ def test_codex_home_pins_settings_the_pinned_cli_would_break(tmp_path) -> None:
         "*TOKEN*",
     }
     assert config["model_providers"]["veadk"]["wire_api"] == "responses"
-    assert config["sandbox_workspace_write"]["network_access"] is True
+    # Sandboxed commands run under VeADK's permissions profile, which Codex
+    # rejects next to the legacy sandbox keys.
+    assert config["default_permissions"] == "veadk"
+    assert "sandbox_mode" not in config and "sandbox_workspace_write" not in config
+    profile = config["permissions"]["veadk"]
+    assert profile["network"]["enabled"] is True
+    assert profile["extends"] == ":read-only"
+    # Only this session's workspace is writable, and of CODEX_HOME only its
+    # skills are readable; the temp dirs every other session lives in are not.
+    tmp = os.path.realpath(tempfile.gettempdir())
+    assert profile["filesystem"][tmp] == "deny"
+    assert profile["filesystem"][os.path.realpath("/tmp")] == "deny"
+    assert profile["filesystem"][workspace] == "write"
+    assert profile["filesystem"][os.path.realpath(f"{home}/skills")] == (
+        _nested_read_access()
+    )
+    assert config["shell_environment_policy"]["set"] == {"TMPDIR": workspace}
+    # No AGENTS.md search above the workspace, whose parents are denied.
+    assert config["project_root_markers"] == []
 
 
 def test_direct_codex_home_names_the_key_env_var_but_never_holds_the_key() -> None:
@@ -390,6 +489,7 @@ def test_direct_codex_home_names_the_key_env_var_but_never_holds_the_key() -> No
     except ModuleNotFoundError:  # Python 3.10: pytest depends on tomli there.
         import tomli as tomllib
     import shutil
+    import tempfile
 
     from veadk.runtime.codex.model_provider import DIRECT_KEY_ENV
     from veadk.runtime.codex.model_provider import direct_route
@@ -401,7 +501,9 @@ def test_direct_codex_home_names_the_key_env_var_but_never_holds_the_key() -> No
         secret,
         extra_headers={"X-Client": "veadk"},
     )
-    home = _prepare_codex_home(route, "model-x", CodexRuntimeConfig())
+    home = _prepare_codex_home(
+        route, "model-x", CodexRuntimeConfig(), workspace=tempfile.gettempdir()
+    )
     try:
         with open(f"{home}/config.toml", "rb") as f:
             raw = f.read()
@@ -416,3 +518,53 @@ def test_direct_codex_home_names_the_key_env_var_but_never_holds_the_key() -> No
     assert provider["env_key"] == DIRECT_KEY_ENV
     assert provider["wire_api"] == "responses"
     assert provider["http_headers"] == {"X-Client": "veadk"}
+
+
+def test_sandbox_profile_denies_configured_host_paths(monkeypatch, tmp_path) -> None:
+    """Host files outside the temp dirs can be denied too; the workspace stays."""
+    import os
+
+    from veadk.runtime.codex.runtime import _sandbox_profile
+
+    secrets_dir, db = tmp_path / "app", tmp_path / "sessions.db"
+    workspace = tmp_path / "app" / "ws"
+    monkeypatch.setenv(
+        "VEADK_CODEX_DENY_READ_PATHS", os.pathsep.join([str(secrets_dir), str(db)])
+    )
+    profile = _sandbox_profile(CodexRuntimeConfig(), str(workspace), str(tmp_path))
+    assert profile is not None
+    filesystem = profile["permissions"]["veadk"]["filesystem"]
+    assert filesystem[os.path.realpath(secrets_dir)] == "deny"
+    assert filesystem[os.path.realpath(db)] == "deny"
+    assert filesystem[os.path.realpath(workspace)] == "write"
+    assert (
+        _sandbox_profile(
+            CodexRuntimeConfig(sandbox="full_access", network_access=True),
+            str(workspace),
+            str(tmp_path),
+        )
+        is None
+    )
+
+
+def test_linux_grants_nested_session_paths_write(monkeypatch, tmp_path) -> None:
+    """Codex's Linux sandbox cannot reach a `read` grant under a denied parent.
+
+    The session's own workspace (even for `read_only`) and its skills copy are
+    granted `write` there instead; everything else stays denied.
+    """
+    import os
+
+    from veadk.runtime.codex import runtime as runtime_module
+
+    workspace, home = tmp_path / "ws", tmp_path / "home"
+    for platform, expected in (("linux", "write"), ("darwin", "read")):
+        monkeypatch.setattr(runtime_module.sys, "platform", platform)
+        profile = runtime_module._sandbox_profile(
+            CodexRuntimeConfig(sandbox="read_only"), str(workspace), str(home)
+        )
+        assert profile is not None
+        filesystem = profile["permissions"]["veadk"]["filesystem"]
+        assert filesystem[os.path.realpath(workspace)] == expected
+        assert filesystem[os.path.realpath(home / "skills")] == expected
+        assert os.path.realpath(home) not in filesystem

@@ -238,7 +238,7 @@ def build_auth_config(
 
         # Example 2: API Key in header
         config = build_auth_config(
-            token="sk-1234567890",
+            token="EXAMPLE_API_KEY",
             auth_method="header",
             header_name="X-API-Key",
             credential_key="api_key_auth"

@@ -41,7 +41,7 @@ from veadk.runtime.codex import translate  # noqa: E402
 
 #: Pin from ``pyproject.toml``. Both string-matched surfaces below are only
 #: meaningful against a known SDK version.
-EXPECTED_SDK_VERSION = "0.159.2"
+EXPECTED_SDK_VERSION = "0.163.0"
 
 
 def _turn_notification_names() -> set[str]:

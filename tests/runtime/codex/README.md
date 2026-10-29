@@ -22,7 +22,7 @@ run therefore does **not** mean the SDK contract holds.
 To run them locally:
 
 ```bash
-uv sync --all-extras     # or: pip install 'openai-codex==0.159.2'
+uv sync --all-extras     # official SDK and bundled CLI: 0.163.0
 PYTHONPYCACHEPREFIX=/private/tmp/veadk-pycache \
   .venv/bin/python -m pytest tests/runtime/codex/test_codex_sdk_protocol.py -v
 ```
@@ -32,6 +32,53 @@ Confirm they are not skipping:
 ```bash
 .venv/bin/python -m pytest tests/runtime/codex -q -rs   # -rs lists skip reasons
 ```
+
+## Select the CLI used by native tests
+
+The current native target is Codex CLI **0.164.0**, selected separately from
+Python SDK 0.163.0 and its required packaged CLI 0.163.0. From the repository
+root, install and select the official executable before running serial tests:
+
+```bash
+npm install --prefix .codex0164 --no-save @openai/codex@0.164.0
+export VEADK_CODEX_BIN="$(pwd)/.codex0164/node_modules/.bin/codex"
+"$VEADK_CODEX_BIN" --version
+CODEX_RUN_SMOKE=1 uv run --extra dev --extra codex pytest \
+  tests/runtime/codex -m codex_smoke -p no:xdist -rs
+```
+
+Without `VEADK_CODEX_BIN`, the official SDK chooses its bundled executable;
+that does not verify 0.164.0. The mandatory final-selection, terminal-status and cleanup regressions run via `python scripts/check_codex_terminal_integrity.py`; the wheel builder and CI use the same entry point.
+The gate also exercises a trusted CLI path change through the real runtime:
+an idle process created for the previous path must close, while the stored
+thread resumes under the newly selected binary. All 25 required cases must
+execute without skips.
+
+This integration preserves mainline's process reuse, isolation and crash
+recovery. It adds the public, programmatic `provider_factory` extension and
+`shell_enabled` control, retains final-answer phase metadata, rejects
+failed/interrupted/missing terminal status as success, and waits for executor
+cleanup before releasing provider resources. A pooled cleanup timeout makes
+the process ineligible for reuse; closing it still waits for pending cleanup.
+Existing downstream imports such as `native_bridge` are not supplied by this
+SDK; those applications must migrate their provider and final-response
+contracts before replacing a wheel.
+
+CLI 0.164.0 may emit native permission/environment developer messages in
+addition to the application instruction. The workload tests check that the
+application instruction occurs exactly once in **every model request**, and
+that warm reuse does not grow developer history. They retain the result,
+request-count, concurrency and shutdown assertions. A fixed total of one
+developer message is not the compatibility contract.
+
+这些回归保留主线的进程复用、隔离和崩溃恢复，并检查终稿阶段、失败终态和工具清理。
+切换可信 CLI 路径必须关闭旧空闲进程；进程池清理超时不得提前释放 Provider。
+CLI 0.164.0 的原生权限说明可能形成独立 developer 消息，回归检查每次模型请求中的
+应用指令恰好出现一次，以及 warm 路径上下文不累积。旧 `native_bridge` 消费方仍需
+迁移应用 Provider 和终稿合同；本地模拟模型测试不代表真实业务模型质量或云端验收。
+When testing an installed wheel in a separate directory, also copy
+`examples/piagent_with_mcp/mcp_order_server.py` at the same relative location:
+the stdio MCP test actually starts this fixture as a subprocess.
 
 ## Connect to local test databases with Colima
 

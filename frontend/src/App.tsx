@@ -2309,6 +2309,7 @@ export default function App() {
   );
   const [runtimeUpdateTarget, setRuntimeUpdateTarget] = useState<{
     runtimeId: string;
+    agentCategory?: "general" | "mpa";
     mpaInstanceId?: string;
     name: string;
     region: string;
@@ -6692,6 +6693,7 @@ export default function App() {
     setFocusedWorkspaceAgentId("");
     setRuntimeUpdateTarget({
       runtimeId: target.runtimeId,
+      agentCategory: "mpa",
       mpaInstanceId: target.mpaInstanceId,
       name: target.name,
       region: target.region,
@@ -7619,6 +7621,7 @@ export default function App() {
               />
             ) : applicationsView === "mpa-channels" ? (
               <MpaChannelsAutomation
+                cloudProvider={cloudProvider}
                 role={access.role}
                 runtimeScope={access.capabilities.runtimeScope}
                 onBack={() => setApplicationsView("catalog")}
@@ -7718,6 +7721,7 @@ export default function App() {
                 loadingAgentInfo={capabilitiesLoading}
                 canCreate={canCreateRuntimeAgents}
                 canUpdate={canCreateRuntimeAgents || canManageAgents}
+                canManageCollaborators={access?.role === "admin" || access?.role === "super_admin"}
                 canViewUsage={canViewAgentUsage}
                 loadingAgents={agentLibraryLoading}
                 agentsError={agentLibraryError}
@@ -7893,6 +7897,13 @@ export default function App() {
                   setFocusedWorkspaceAgentId("");
                   setRuntimeUpdateTarget({
                     runtimeId: capability.runtime.runtimeId,
+                    agentCategory: [
+                      ...(detailAgentEntry ? [detailAgentEntry] : []),
+                      ...orderedWorkspaceAgentEntries,
+                    ].find((entry) =>
+                      entry.runtimeId === capability.runtime.runtimeId &&
+                      entry.region === capability.runtime.region,
+                    )?.agentCategory ?? "general",
                     mpaInstanceId: capability.runtime.mpaInstanceId,
                     name:
                       capability.runtime.name ||
@@ -8618,6 +8629,9 @@ export default function App() {
                 {!sandboxSession && agentInfoSelectionRef.current === appName && agentInfo?.agentCategory === "mpa" && (
                   <MpaAgentInfoRail
                     key={`${userId}:${appName}`}
+                    agentsMdTarget={studioToolRuntime && (access.role === "admin" || access.role === "super_admin")
+                      ? { runtimeId: studioToolRuntime.runtimeId, region: studioToolRuntime.region }
+                      : undefined}
                     info={agentInfo}
                     onRefresh={() => {
                       preparedAgentSelectionRef.current = null;

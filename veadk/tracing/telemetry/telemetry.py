@@ -18,6 +18,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
+from google.adk.agents.run_config import StreamingMode
 from google.adk.tools import BaseTool
 from opentelemetry import trace
 from opentelemetry.context import get_value
@@ -31,6 +32,7 @@ from veadk.tracing.telemetry.attributes.extractors.types import (
 )
 from veadk.tracing.telemetry.content_tracing import should_trace_content
 from veadk.tracing.telemetry import portal_metrics
+from veadk.tracing.telemetry.timing import mark_uninstrumented_model
 from veadk.utils.logger import get_logger
 from veadk.utils.misc import safe_json_serialize
 
@@ -338,6 +340,9 @@ def trace_tool_call(
         args: Dictionary of arguments passed to the tool function
         function_response_event: Event containing the tool's execution response
     """
+    from veadk.skills.telemetry import record_adk_load
+
+    record_adk_load(tool, function_response_event)
     span = trace.get_current_span()
 
     set_common_attributes_on_tool_span(current_span=span)  # type: ignore
@@ -388,6 +393,14 @@ def trace_call_llm(
     # Older ADK releases only pass the original four arguments.
     if span is None:
         span = trace.get_current_span()  # type: ignore
+
+    mark_uninstrumented_model(
+        span,
+        streaming=bool(
+            invocation_context.run_config
+            and invocation_context.run_config.streaming_mode != StreamingMode.NONE
+        ),
+    )
 
     from veadk.agent import Agent
 

@@ -38,6 +38,8 @@ from typing import Any
 
 import pytest
 
+from veadk.runtime.codex.config import configured_codex_binary
+
 from veadk.runtime.codex import rollout_io
 from veadk.runtime.codex.rollout_io import (
     Rollout,
@@ -254,6 +256,25 @@ _SERVER_DB_ENVS = {
 }
 DB_KINDS = ["database", *_SERVER_DB_ENVS]
 STORE_KINDS = ["memory", "localdir", *DB_KINDS]
+
+
+def test_independent_stores_have_distinct_stable_pool_namespaces():
+    a, b = InMemoryThreadStore(), InMemoryThreadStore()
+    assert a.pool_namespace is a.pool_namespace
+    assert a.pool_namespace != b.pool_namespace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", STORE_KINDS)
+async def test_current_identity_distinguishes_delete_recreate(kind, tmp_path):
+    async with _make_store(kind, tmp_path) as store:
+        assert await store.current_identity(KEY) is None
+        await store.save(KEY, TID, _rollout(), "h", expected_version=None)
+        assert await store.current_identity(KEY) == (TID, 1)
+        await store.delete(KEY)
+        other = str(uuid.uuid4())
+        await store.save(KEY, other, _rollout(tid=other), "h", expected_version=None)
+        assert await store.current_identity(KEY) == (other, 1)
 
 
 @pytest.mark.asyncio
@@ -975,7 +996,11 @@ async def test_rollout_resumes_in_fresh_codex_home_via_db_store(
 
     def codex(home: Path) -> AsyncCodex:
         env = {**os.environ, "CODEX_HOME": str(home), "STUB_KEY": "x"}
-        return AsyncCodex(config=CodexConfig(cwd=str(cwd), env=env))
+        return AsyncCodex(
+            config=CodexConfig(
+                codex_bin=configured_codex_binary(), cwd=str(cwd), env=env
+            )
+        )
 
     async with contextlib.AsyncExitStack() as stack:
         stack.push_async_callback(stub.stop)

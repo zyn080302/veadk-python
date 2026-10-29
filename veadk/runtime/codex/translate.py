@@ -650,6 +650,10 @@ def is_codex_final_text_event(event: Event) -> bool:
         return False
     if metadata.get("item_type") != "agentMessage":
         return False
+    if metadata.get("phase") not in (None, "final_answer"):
+        return False
+    if event.partial or metadata.get("status") != "completed":
+        return False
     content = event.content
     if content is None:
         return False
@@ -763,6 +767,11 @@ def _on_item_completed(
             "item_type": item.get("type"),
             "status": _scalar(item.get("status")) or "completed",
         }
+        if item.get("type") == "agentMessage":
+            phase = _scalar(item.get("phase"))
+            event.custom_metadata["phase"] = phase
+            if phase not in (None, "final_answer"):
+                event.partial = True
     return converted
 
 
