@@ -107,15 +107,24 @@ async def _settle_cancellation(config, lease, ctx, context, author, initial_hist
         author=author,
         invocation_id=context.invocation_id,
         next_timestamp=clock.next_timestamp,
+        reason=context.reason,
     )
     for event in additions:
         event.branch = ctx.branch
         await lease.append_event(event)
     # A crash from here leaves a recoverable display-only terminal journal.
-    await lease.cancel_turn(context.turn)
-    for event in [*journal[prefix:], *additions]:
+    await lease.cancel_turn(context.turn, reason=context.reason)
+    publish_terminal = context.reason == "tool_timeout"
+    for event in [
+        *journal[prefix:],
+        *(additions[:-1] if publish_terminal else additions),
+    ]:
         with anyio.fail_after(config.operation_timeout):
             await ctx.session_service.append_event(session=session, event=event)
+    if publish_terminal:
+        # Runner owns persistence after yield. Keep the terminal pending in the
+        # journal until its exact display readback; never save it twice.
+        return additions[-1]
     await _acknowledge_if_saved(
         lease, ctx.session_service, context.local_identity, config.operation_timeout
     )
@@ -297,8 +306,14 @@ class CustomerRuntime(BaseRuntime):
                         # transport failure. Only the trusted confirmer can
                         # prove cancellation; other channel failures retain
                         # their existing quarantine behavior.
-                        if isinstance(error, CustomerChannelError) and error.args != (
-                            "transport_error",
+                        tool_timeout = isinstance(
+                            error, CustomerChannelError
+                        ) and error.args == ("tool_timeout",)
+                        if isinstance(
+                            error, CustomerChannelError
+                        ) and error.args not in (
+                            ("transport_error",),
+                            ("tool_timeout",),
                         ):
                             raise
                         if bridge is not None:
@@ -326,10 +341,17 @@ class CustomerRuntime(BaseRuntime):
                             )
                         ):
                             context = CustomerCancellationContext(
-                                identity, ctx.invocation_id, binding, turn
+                                identity,
+                                ctx.invocation_id,
+                                binding,
+                                turn,
+                                reason="tool_timeout"
+                                if tool_timeout
+                                else "customer_turn_cancelled",
                             )
+                            terminal = None
                             try:
-                                await _run_cleanup(
+                                terminal = await _run_cleanup(
                                     _settle_cancellation(
                                         config,
                                         lease,
@@ -345,6 +367,15 @@ class CustomerRuntime(BaseRuntime):
                                 logging.getLogger(__name__).warning(
                                     "cancellation_settlement_failed"
                                 )
+                            if terminal is not None:
+                                yield terminal
+                                await _acknowledge_if_saved(
+                                    lease,
+                                    ctx.session_service,
+                                    identity,
+                                    config.operation_timeout,
+                                )
+                                return
                         raise
         except TimeoutError:
             raise CustomerChannelError("customer_runtime_timeout") from None

@@ -60,3 +60,7 @@ CON-3: 租约释放在 store 操作预算内（含锁等待）防御调用方重
 取消接入：`cancellation_settled(local_identity, invocation_id, record, *, engine_id)` 为只读查询。调用方仍持有外层业务占用时，确认精确取消 run 已完成历史确认并释放 SDK owner；不抢占、不重放历史。
 
 取消清理失败须保留原始 `CancelledError`/`GeneratorExit`。租约只记录固定码，保持未确认的占用隔离；不授权复用，不向已断开的消费者发布替代错误。非取消退出的失败仍传播。
+
+## 已确认工具期限结算（2026-10-30，验证待执行）
+
+精确tool_timeout在静止清理后可使用可选服务端确认。取消context的默认reason区分超时与用户取消。确认超时结算未知副作用，并通过Runner发布唯一持久化本轮interrupted终态后确认显示。未确认失败仍隔离；不重放、不放宽期限、不迁移存储。[设计](../../prd-spec/bugfixes/customer-tool-timeout-settlement/2026-10-30-customer-tool-timeout-settlement.zh.md)。

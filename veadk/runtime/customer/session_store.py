@@ -597,8 +597,12 @@ class CustomerSessionLease:
             )
             await self._session_update(connection, status="completed")
 
-    async def cancel_turn(self, record: CustomerTurnRecord):
+    async def cancel_turn(
+        self, record: CustomerTurnRecord, *, reason="customer_turn_cancelled"
+    ):
         """Record interruption only for the live original reserved run."""
+        if reason not in ("customer_turn_cancelled", "tool_timeout"):
+            raise CustomerChannelError("invalid_turn_state")
         async with self._change() as (connection, session):
             invocation = session["current_invocation"]
             turn = await self._turn(connection, invocation)
@@ -624,7 +628,7 @@ class CustomerSessionLease:
                 last is None
                 or not last.interrupted
                 or not last.turn_complete
-                or last.error_code != "customer_turn_cancelled"
+                or last.error_code != reason
             ):
                 raise CustomerChannelError("missing_cancellation_terminal")
             await connection.execute(

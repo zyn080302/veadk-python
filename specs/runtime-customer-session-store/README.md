@@ -60,3 +60,7 @@ Implemented amendment; targeted offline tests pass and full SDK/installed consum
 Cancellation integration: `cancellation_settled(local_identity, invocation_id, record, *, engine_id)` is read-only. It proves an exact cancelled run is acknowledged and its SDK owner relinquished while the caller still holds outer business ownership. No takeover or history replay.
 
 Cancellation cleanup failure must preserve the original `CancelledError`/`GeneratorExit`. The lease logs a fixed code and keeps unconfirmed ownership quarantined; it does not authorize reuse or publish a replacement error to a disconnected consumer. Non-cancelled exit failures still propagate.
+
+## Confirmed tool deadline settlement (2026-10-30, verification pending)
+
+Exact tool_timeout can use optional server-owned confirmation after quiescent cleanup. A defaulted cancellation context reason distinguishes timeout from user cancellation. Confirmed timeout pairs unknown effects and publishes one durable current interrupted terminal through Runner before display acknowledgement. Unconfirmed failures remain quarantined; no replay, deadline relaxation or storage migration. [Design](../../prd-spec/bugfixes/customer-tool-timeout-settlement/2026-10-30-customer-tool-timeout-settlement.md).

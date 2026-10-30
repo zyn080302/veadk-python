@@ -17,10 +17,15 @@ class CustomerCancellationContext:
     invocation_id: str
     binding: CustomerSessionBinding
     turn: CustomerTurnRecord
+    reason: str = "customer_turn_cancelled"
 
 
-def cancellation_events(journal, *, author, invocation_id, next_timestamp):
+def cancellation_events(
+    journal, *, author, invocation_id, next_timestamp, reason="customer_turn_cancelled"
+):
     """Pair unresolved calls without retrying them or inventing their effects."""
+    if reason not in ("customer_turn_cancelled", "tool_timeout"):
+        raise CustomerChannelError("cancellation_history_conflict")
     pending = {}
     for event in journal:
         for call in event.get_function_calls():
@@ -45,7 +50,7 @@ def cancellation_events(journal, *, author, invocation_id, next_timestamp):
                                 id=call.id,
                                 name=call.name,
                                 response={
-                                    "error": "customer_turn_cancelled",
+                                    "error": reason,
                                     "side_effects": "unknown",
                                 },
                             )
@@ -62,9 +67,17 @@ def cancellation_events(journal, *, author, invocation_id, next_timestamp):
             timestamp=next_timestamp(),
             interrupted=True,
             turn_complete=True,
-            error_code="customer_turn_cancelled",
+            error_code=reason,
             content=types.ModelContent(
-                parts=[types.Part(text="Request cancelled by the user.")]
+                parts=[
+                    types.Part(
+                        text=(
+                            "Tool execution timed out; this turn is incomplete. Completed results are preserved."
+                            if reason == "tool_timeout"
+                            else "Request cancelled by the user."
+                        )
+                    )
+                ]
             ),
         )
     )
