@@ -64,3 +64,7 @@ CON-3: 租约释放在 store 操作预算内（含锁等待）防御调用方重
 ## 已确认工具期限结算（2026-10-30，验证待执行）
 
 精确tool_timeout在静止清理后可使用可选服务端确认。取消context的默认reason区分超时与用户取消。确认超时结算未知副作用，并通过Runner发布唯一持久化本轮interrupted终态后确认显示。未确认失败仍隔离；不重放、不放宽期限、不迁移存储。[设计](../../prd-spec/bugfixes/customer-tool-timeout-settlement/2026-10-30-customer-tool-timeout-settlement.zh.md)。
+
+
+## 未完成展示终态（2026-11-06，已实现并离线验证）
+CON-6同时允许携带runtime-customer-adk-events CON-8严格校验未完成标识的无正文/空纯model final。既有错误/中断/turn_complete/final/工具/归属检查保持。完成表示传输/ACK/cleanup已收尾，不表示业务成功；readback及acknowledge_display保留标识并允许独立下一轮。缺失/非法/draft/thought/工具标识不能替代终态正文。[设计](../../prd-spec/bugfixes/customer-incomplete-terminal/2026-11-06-customer-incomplete-terminal.zh.md)；测试tests/runtime/customer/test_incomplete_terminal.py及下游真实Runtime/Runner/journal/HTTP历史，无schema/恢复变化。

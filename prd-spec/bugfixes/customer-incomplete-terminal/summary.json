@@ -1,0 +1,387 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "sdk_base": "cd3becf5358c7dbdd8fa1e8039793685c649c813",
+  "business_base": "4eb18769b0b3aaf9f3d7dfb01b2d29cc4e2dcffa",
+  "production_delta": [
+    "sdk:veadk/runtime/customer/events.py",
+    "sdk:veadk/runtime/customer/session_store.py",
+    "skyeyes:frontend/src/chat/blocks.ts"
+  ],
+  "source_sha256": {
+    "frontend/src/chat/blocks.ts": "7d0982245a8c478c6c260ffa7b9c9d18d77e3e4899be8d5a05cd73ecd532f078",
+    "frontend/tests/incomplete-terminal.test.mjs": "6c7c5e009df27e57122257696822558ee9400a61cf5ea314a4ab3d5a7a16c839",
+    "frontend/tests/incomplete-terminal.e2e.mjs": "b75475a64f96cb2708ef46524ed928e3bbe673dae2d67a4c28b8ceb7b5fd2f11",
+    "frontend/tests/final-answer-stream.e2e.mjs": "dc52ae3ee4afdfe45662b197d101fca44c6fa41b75f2323a0c44d354e9dde7d6",
+    "frontend/package.json": "cc35d87af5a3d0625f5e9dff5bd654310fb723b55942c222342d9dbaa831ec9d",
+    "backend/test_customer_incomplete_terminal.py": "574d0b06b3aa44430c0cafb5175502d5235db83d22a37ab9a27d662693e13d2d",
+    "backend/test_research_delivery_diagnostics.py": "d8f6b6578124c8e03700e8265aebc6434e511a651bb7fa890e23904422f78851",
+    "tests/customer_native_runtime/test_runtime.py": "694d2472a0040578e184af90a862dc04cb10262d4802b09b24af48975de59b45",
+    "tests/customer_native_runtime/test_quality_runtime.py": "dd9d7f7a06ce8c6c89ba66ec9c3b78b13fe01f77d235d43eede11388b0f430c2"
+  },
+  "receipts": {
+    "sdk-f04-final-red": {
+      "label": "sdk-f04-final-red",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 1,
+      "elapsed_seconds": 2.467,
+      "counts": [
+        "20 failed",
+        "6 passed"
+      ],
+      "failure_names": [
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_survives_with_local_identity_and_fresh_copy[model_tool_protocol_error-customMetadata]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_survives_with_local_identity_and_fresh_copy[model_tool_protocol_error-custom_metadata]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_survives_with_local_identity_and_fresh_copy[host_turn_budget_exhausted-customMetadata]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_survives_with_local_identity_and_fresh_copy[host_turn_budget_exhausted-custom_metadata]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_status_only_incomplete_is_held_final_not_missing_or_success[contentless]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_status_only_incomplete_is_held_final_not_missing_or_success[empty]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_prefix_is_incremental_but_incomplete_waits_for_transport_cleanup",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_malformed_reserved_result_fails_without_echoing_values[None]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_malformed_reserved_result_fails_without_echoing_values[marker1]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_malformed_reserved_result_fails_without_echoing_values[marker2]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_malformed_reserved_result_fails_without_echoing_values[marker3]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_malformed_reserved_result_fails_without_echoing_values[marker4]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_malformed_reserved_result_fails_without_echoing_values[marker5]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_cannot_claim_drafts_tools_user_or_ambiguous_metadata[partial]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_cannot_claim_drafts_tools_user_or_ambiguous_metadata[not_terminal]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_cannot_claim_drafts_tools_user_or_ambiguous_metadata[thought]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_cannot_claim_drafts_tools_user_or_ambiguous_metadata[tool]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_incomplete_marker_cannot_claim_drafts_tools_user_or_ambiguous_metadata[user]",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_late_status_only_marker_does_not_override_an_already_held_final",
+        "tests/runtime/customer/test_incomplete_terminal.py::test_contentless_journal_terminal_requires_exact_marker_and_preserves_readback[marker0]"
+      ],
+      "error_names": [],
+      "error_codes": [
+        "missing_final_response"
+      ],
+      "source_sha256": {
+        "veadk/runtime/customer/events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "veadk/runtime/customer/session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "tests/runtime/customer/test_incomplete_terminal.py": "4296b02492d07bd4bf0b826d3eefbd7e9050e79135846f7cf7e04a74c1e3e95f"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "sdk-f04-final-green": {
+      "label": "sdk-f04-final-green",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 4.37,
+      "counts": [
+        "26 passed"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "veadk/runtime/customer/events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "veadk/runtime/customer/session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "tests/runtime/customer/test_incomplete_terminal.py": "4296b02492d07bd4bf0b826d3eefbd7e9050e79135846f7cf7e04a74c1e3e95f"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "sdk-f04-affected-customer-gate": {
+      "label": "sdk-f04-affected-customer-gate",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 22.246,
+      "counts": [
+        "479 passed"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "veadk/runtime/customer/events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "veadk/runtime/customer/session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "tests/runtime/customer/test_incomplete_terminal.py": "4296b02492d07bd4bf0b826d3eefbd7e9050e79135846f7cf7e04a74c1e3e95f"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "business-f04-final-red": {
+      "label": "business-f04-final-red",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 1,
+      "elapsed_seconds": 19.519,
+      "counts": [
+        "5 7 1 0"
+      ],
+      "failure_names": [
+        "test_actual_recovery_serialization_preserves_both_reasons_and_aliases (test_customer_incomplete_terminal.CustomerIncompleteTerminalTests.test_actual_recovery_serialization_preserves_both_reasons_and_aliases) (alias=False, budget=False)",
+        "test_actual_recovery_serialization_preserves_both_reasons_and_aliases (test_customer_incomplete_terminal.CustomerIncompleteTerminalTests.test_actual_recovery_serialization_preserves_both_reasons_and_aliases) (alias=False, budget=True)",
+        "test_actual_recovery_serialization_preserves_both_reasons_and_aliases (test_customer_incomplete_terminal.CustomerIncompleteTerminalTests.test_actual_recovery_serialization_preserves_both_reasons_and_aliases) (alias=True, budget=False)",
+        "test_actual_recovery_serialization_preserves_both_reasons_and_aliases (test_customer_incomplete_terminal.CustomerIncompleteTerminalTests.test_actual_recovery_serialization_preserves_both_reasons_and_aliases) (alias=True, budget=True)",
+        "test_settled_incomplete_allows_independent_same_session_followup (test_customer_incomplete_terminal.CustomerIncompleteTerminalTests.test_settled_incomplete_allows_independent_same_session_followup)",
+        "test_incomplete_terminal_on_installed_sdk (test_runtime.RuntimeTests.test_incomplete_terminal_on_installed_sdk)",
+        "test_incomplete_terminal_on_installed_sdk (test_quality_runtime.QualityTests.test_incomplete_terminal_on_installed_sdk)"
+      ],
+      "error_names": [
+        "test_contentless_incomplete_reaches_journal_sse_and_history (test_customer_incomplete_terminal.CustomerIncompleteTerminalTests.test_contentless_incomplete_reaches_journal_sse_and_history)"
+      ],
+      "error_codes": [
+        "missing_final_response"
+      ],
+      "source_sha256": {
+        "backend/test_customer_incomplete_terminal.py": "574d0b06b3aa44430c0cafb5175502d5235db83d22a37ab9a27d662693e13d2d"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "business-f04-final-green": {
+      "label": "business-f04-final-green",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 23.202,
+      "counts": [
+        "5 0 0 0"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "backend/test_customer_incomplete_terminal.py": "574d0b06b3aa44430c0cafb5175502d5235db83d22a37ab9a27d662693e13d2d"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "business-f04-green-journal": {
+      "label": "business-f04-green-journal",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "6369a89c043c6f757d6fd4396262a5aa1c456764184fea50983b55e1811f2012",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "1acb8a89862858bc486681c2a3cb45fd13e4b9bc14c8087fda46ccb7644ca12a",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 12.069,
+      "counts": [
+        "4 0 0 0"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "backend/test_customer_incomplete_terminal.py": "574d0b06b3aa44430c0cafb5175502d5235db83d22a37ab9a27d662693e13d2d"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "business-f04-adjacent": {
+      "label": "business-f04-adjacent",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "ebfa6d69f1622137edb4a6714a424510adb58097ed8ae86ffd18b1e5cd6270f2",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 12.824,
+      "counts": [
+        "19 0 0 0"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "backend/test_customer_incomplete_terminal.py": "574d0b06b3aa44430c0cafb5175502d5235db83d22a37ab9a27d662693e13d2d"
+      },
+      "source_unchanged": true,
+      "installed_sdk_copy": "/Users/bytedance/Workspaces/VolcengineProjects/SkyEyes/BugFix3/.codex/sdk-f04-fixed-copy",
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    }
+  },
+  "same_test_red_green": {
+    "SDK": true,
+    "business": true,
+    "frontend_unit": "2 fail/2 pass ->4 pass",
+    "frontend_browser": "same incomplete-terminal.e2e.mjs:2 fail/0 cancelled ->2 pass; adjacent streaming7 pass"
+  },
+  "frontend": {
+    "build": "pass; TypeScript and Vite local validation only, no deployment image",
+    "unit": {
+      "pass": 98,
+      "fail": 0,
+      "skipped": 0
+    },
+    "browser": {
+      "pass": 9,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    }
+  },
+  "precommit": "all five hooks pass",
+  "quick": "859 Python pass; registration pass",
+  "installed_sdk_python_comparison": {
+    "files": 600,
+    "delta_from_F07": [
+      "runtime/customer/events.py",
+      "runtime/customer/session_store.py"
+    ]
+  },
+  "mandatory_gates": [
+    "existing SDK Harness tests/runtime/customer",
+    "backend/check.py automatic test_*.py discovery",
+    "standard/B14 new test_incomplete_terminal_on_installed_sdk exact3 zero skips/errors/failures",
+    "frontend npm test/check and test:final-answer-stream includes new browser tests",
+    "catalog and feedback registration"
+  ],
+  "inherited_separately": {
+    "SDK": "F07 dispatch and fixed ae982106 source; no other delta",
+    "business": "P0 person b71434dc and F07 tests 4eb18769; baseline story6/8 and V8 excluded from this fix"
+  },
+  "original_customer_root_cause_event": null,
+  "attribution": "abstain; offline mechanism reproduction only",
+  "not_run": [
+    "combined main all/standard/B14: frozen integration belongs to main/Testor",
+    "immutable wheel/lock update: main responsibility, no worker build",
+    "live original badcase/PDSA/APM: main scope; customer Runtime frozen",
+    "unrelated SDK full repository/Studio and complete frontend check: do not repeat full gates"
+  ],
+  "build_deploy_push": false,
+  "live_paid_model_MCP_calls": 0,
+  "budgets_150_240_changed": false,
+  "adjacent_business_regression": {
+    "tests": 19,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "modules": [
+      "test_research_delivery_diagnostics",
+      "test_customer_model_failure",
+      "test_customer_event_backpressure"
+    ]
+  }
+}

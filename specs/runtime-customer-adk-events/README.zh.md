@@ -59,3 +59,8 @@ SDK 实现、全仓回归及固定 Host 源码联调已验证；业务固定制�
 CON-7：仅复制 `customMetadata.skyeyes_output_purpose`（或无歧义 `custom_metadata`），构建新对象，恰好包含 `version: 1`（整数，不是 bool/float）和 `purpose: "final_answer"`。标注要求非空的模型正文 parts，不得含 thought 或工具；用户回显和无内容事件不能携带标注。非法保留值或不兼容内容以 `invalid_output_purpose` 失败；冲突别名以 `invalid_adk_event` 失败。其他 metadata 继续排除。标注仅用于展示，不改变身份、工具权限、actions、终态/清理规则或最终文本生成。批准归受信配置的 Host 负责，不由 SDK 推断。没有标注的既有调用方保持原行为。
 
 设计与待执行验证：[customer-final-answer-purpose](../../prd-spec/bugfixes/customer-final-answer-purpose/2026-10-24-customer-final-answer-purpose.zh.md)。测试：`tests/runtime/customer/test_output_purpose.py`，以及原事件/Runtime 回归。业务交付前须验证新安装 SDK 制品及下游 Host/HTTP/历史/页面链路。
+
+
+## 业务未完成终态（2026-11-06，已实现并离线验证）
+
+CON-8：扩展CON-2白名单，严格保留`skyeyes_result: {status: "incomplete", reason: "model_tool_protocol_error" | "host_turn_budget_exhausted"}`。非法标识固定报invalid_result_status，双别名歧义继续拒绝。只允许非partial且显式turnComplete=true的model纯文字（无thought/工具）、空model parts或无正文终态。无正文标识遵守CON-5暂存final/ACK/cleanup和重复/晚到拒绝。持久化完成表示传输收尾，标识表达业务未完成，不授予state/身份/权限或重试；消费者在SSE/历史如实展示并保持正常/后续invocation独立。[已批准设计](../../prd-spec/bugfixes/customer-incomplete-terminal/2026-11-06-customer-incomplete-terminal.zh.md)。测试tests/runtime/customer/test_incomplete_terminal.py由既有Harness customer目录强制执行。固定制品/下游/线上验收待完成。

@@ -38,19 +38,58 @@ def _json_size(data):
 
 def _display_metadata(raw):
     metadata = _field(raw, "customMetadata", "custom_metadata")
-    if not isinstance(metadata, dict) or "skyeyes_output_purpose" not in metadata:
+    if not isinstance(metadata, dict):
         return None
-    purpose = metadata["skyeyes_output_purpose"]
-    if (
-        not isinstance(purpose, dict)
-        or set(purpose) != {"version", "purpose"}
-        or type(purpose["version"]) is not int
-        or purpose["version"] != 1
-        or purpose["purpose"] != "final_answer"
-    ):
-        raise CustomerChannelError("invalid_output_purpose")
+    result = {}
+    if "skyeyes_output_purpose" in metadata:
+        purpose = metadata["skyeyes_output_purpose"]
+        if (
+            not isinstance(purpose, dict)
+            or set(purpose) != {"version", "purpose"}
+            or type(purpose["version"]) is not int
+            or purpose["version"] != 1
+            or purpose["purpose"] != "final_answer"
+        ):
+            raise CustomerChannelError("invalid_output_purpose")
+        result["skyeyes_output_purpose"] = {"version": 1, "purpose": "final_answer"}
+    if "skyeyes_result" in metadata:
+        marker = metadata["skyeyes_result"]
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"status", "reason"}
+            or marker["status"] != "incomplete"
+            or not isinstance(marker["reason"], str)
+            or marker["reason"]
+            not in {"model_tool_protocol_error", "host_turn_budget_exhausted"}
+        ):
+            raise CustomerChannelError("invalid_result_status")
+        result["skyeyes_result"] = {"status": "incomplete", "reason": marker["reason"]}
     # Display only: never copy approval, identity, executable state or secrets.
-    return {"skyeyes_output_purpose": {"version": 1, "purpose": "final_answer"}}
+    return result or None
+
+
+def _is_incomplete_terminal(event):
+    """Validate the display marker again at the durable completion boundary."""
+    try:
+        metadata = _display_metadata({"custom_metadata": event.custom_metadata})
+    except CustomerChannelError:
+        return False
+    return (
+        metadata is not None
+        and "skyeyes_result" in metadata
+        and not event.partial
+        and event.turn_complete is True
+        and (
+            event.content is None
+            or (
+                event.content.role == "model"
+                and all(
+                    p.text is not None and not p.thought
+                    for p in event.content.parts or []
+                )
+            )
+        )
+    )
 
 
 class _Projector:
@@ -112,9 +151,15 @@ class _Projector:
                 raise CustomerChannelError("duplicate_adk_event")
             self.seen.add(event_id)
         content = raw.get("content")
+        incomplete = metadata is not None and "skyeyes_result" in metadata
+        turn_complete = _field(raw, "turnComplete", "turn_complete")
+        if turn_complete is not None and type(turn_complete) is not bool:
+            raise CustomerChannelError("invalid_adk_event")
         if raw.get("author") == "user":
             if metadata is not None:
-                raise CustomerChannelError("invalid_output_purpose")
+                raise CustomerChannelError(
+                    "invalid_result_status" if incomplete else "invalid_output_purpose"
+                )
             if self.attachments:
                 try:
                     content = validate_user_message(content, attachments=True)
@@ -125,21 +170,32 @@ class _Projector:
             return None
         self._check_interactive(raw)
         parts, role = self._content(content, partial)
-        if metadata is not None and (
-            role != "model"
-            or not parts
-            or any(p.text is None or p.thought for p in parts)
+        if (
+            metadata is not None
+            and "skyeyes_output_purpose" in metadata
+            and (
+                role != "model"
+                or not parts
+                or any(p.text is None or p.thought for p in parts)
+            )
         ):
             raise CustomerChannelError("invalid_output_purpose")
+        if incomplete and (
+            partial
+            or turn_complete is not True
+            or role != "model"
+            or any(p.text is None or p.thought for p in parts)
+        ):
+            raise CustomerChannelError("invalid_result_status")
         usage = self._usage(raw) if not partial else None
-        if self.final is not None and content is not None:
+        if self.final is not None and (content is not None or incomplete):
             is_final = not partial and not any(
                 p.function_call or p.function_response for p in parts
             )
             raise CustomerChannelError(
                 "multiple_final_responses" if is_final else "event_after_final"
             )
-        if not parts and usage is None and content is None:
+        if not parts and usage is None and content is None and not incomplete:
             return None
         event = Event(
             **self.identity,
@@ -152,11 +208,8 @@ class _Projector:
         )
         has_tools = any(p.function_call or p.function_response for p in parts)
         has_answer = any(p.text is not None and not p.thought for p in parts)
-        turn_complete = _field(raw, "turnComplete", "turn_complete")
-        if turn_complete is not None and type(turn_complete) is not bool:
-            raise CustomerChannelError("invalid_adk_event")
         empty_answer = content is not None and not parts and turn_complete is True
-        if not partial and not has_tools and (has_answer or empty_answer):
+        if not partial and not has_tools and (has_answer or empty_answer or incomplete):
             self.final = event
             return None
         if not has_tools:

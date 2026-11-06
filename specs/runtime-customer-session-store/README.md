@@ -64,3 +64,7 @@ Cancellation cleanup failure must preserve the original `CancelledError`/`Genera
 ## Confirmed tool deadline settlement (2026-10-30, verification pending)
 
 Exact tool_timeout can use optional server-owned confirmation after quiescent cleanup. A defaulted cancellation context reason distinguishes timeout from user cancellation. Confirmed timeout pairs unknown effects and publishes one durable current interrupted terminal through Runner before display acknowledgement. Unconfirmed failures remain quarantined; no replay, deadline relaxation or storage migration. [Design](../../prd-spec/bugfixes/customer-tool-timeout-settlement/2026-10-30-customer-tool-timeout-settlement.md).
+
+
+## Incomplete display terminal (2026-11-06, implemented and offline verified)
+CON-6 also accepts a contentless/empty plain model final carrying exactly the validated runtime-customer-adk-events CON-8 incomplete marker. All existing error/interruption/turn_complete/final/tool/ownership checks remain. Completion denotes settled transport/ACK/cleanup, not business success. Readback and acknowledge_display retain the marker and permit the next independent turn. Missing, malformed, draft, thought or tool markers cannot replace terminal content. [Design](../../prd-spec/bugfixes/customer-incomplete-terminal/2026-11-06-customer-incomplete-terminal.md); tests: tests/runtime/customer/test_incomplete_terminal.py and actual downstream Runtime/Runner/journal/HTTP history. No schema or recovery changes.

@@ -561,6 +561,8 @@ class CustomerSessionLease:
 
     async def complete_turn(self):
         """Called only after verified remote success, ACKs and tool cleanup."""
+        from .events import _is_incomplete_terminal
+
         async with self._change() as (connection, session):
             if session["status"] != "running":
                 raise CustomerChannelError("invalid_turn_state")
@@ -583,10 +585,15 @@ class CustomerSessionLease:
                 or not last.is_final_response()
                 or last.get_function_calls()
                 or last.get_function_responses()
-                or not last.content
-                or not any(
-                    p.text is not None and not p.thought
-                    for p in last.content.parts or []
+                or not (
+                    (
+                        last.content
+                        and any(
+                            p.text is not None and not p.thought
+                            for p in last.content.parts or []
+                        )
+                    )
+                    or _is_incomplete_terminal(last)
                 )
             ):
                 raise CustomerChannelError("missing_final_response")
