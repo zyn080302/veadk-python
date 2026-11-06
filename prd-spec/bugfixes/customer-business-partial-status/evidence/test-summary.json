@@ -1,0 +1,69 @@
+{
+  "time": "2026-11-06T08:39:40.928271+00:00",
+  "sdk_parent": "d140455b4edc0b02f5db86e5af4d5c8361951c05",
+  "business_parent": "92bcd6b4b813475d5f9ce42f9482183c21960d92",
+  "frontend_production_commit": "74029683954afe425caa895c6932282b695effc7",
+  "frontend_registration_commit": "908087c",
+  "production_scope": [
+    "SDK events._display_metadata / _Projector.project",
+    "backend.business_delivery_status.display_status",
+    "customer_evaluation_events.summarize_events",
+    "session_history_api._visible_event",
+    "frontend.blocks.businessPartial/applyEvent"
+  ],
+  "same_test_SHA_match": true,
+  "same_test_red_green": {
+    "SDK": "27 cases: red26failed/1passed, green27passed",
+    "business": "5methods red5AssertionError records(includes two incomplete-reason subtests)/0errors/skips ->5passed",
+    "frontend_HTTP": "6 red5failed/1passed ->6passed",
+    "frontend_source_browser": "2red ->2passed"
+  },
+  "affected_SDK_customer_regression": 478,
+  "actual_native_entries": "standard+B14 two real wrappers; inner exact5 each,0errors/skips",
+  "regular_outer_entry_counts_by_added_ID": {
+    "standard": {
+      "parent": 67,
+      "candidate": 68
+    },
+    "B14": {
+      "parent": 135,
+      "candidate": 136
+    }
+  },
+  "all_green_receipts_source_unchanged": true,
+  "SDK_local_installed_copy_customer_source_sha256": {
+    "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+    "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+    "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+    "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+    "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+    "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+    "events.py": "2f4c813ab715d99b86661ae5b470a2b46c2a0cfcaa8795d6db8a82dc742a4961",
+    "messages.py": "9dc899413bda2638d5ff3fabf0115e2458d776073287b5e279fedef22009f27e",
+    "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+    "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+    "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+    "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+    "session_store.py": "878dcba04df4ad48957a02ce0a5852baba0f89ea3d91785a51527687fc0f1f6a",
+    "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+  },
+  "SDK_new_public_API_schema_or_guard_changes": false,
+  "budget_deadline_changes": false,
+  "original_root_cause_event": null,
+  "attribution": "confirmed offline mechanism; not original incident causality",
+  "cloud_MCP_paid_calls_deploy_push": false,
+  "fixed_wheel_final_combination_online": "not_run main/Testor owns",
+  "inherited_separately": {
+    "F07": "cd3becf5 dispatch only",
+    "F04": "d140455b exact two incomplete reasons",
+    "frontend": "9fca508 final compatible EOF/client predecessor; no client/sse/useChat production changes",
+    "business": "92bcd6b; current main budget delta not inherited"
+  },
+  "historical_non_final_failures_preserved": [
+    "JSON key ordering assertion fixture",
+    "ADK node_info bookkeeping equality fixture",
+    "B14 missing FIXTURE_DATABASE fixture",
+    "parallel-copy source-unchanged=false receipt excluded from evidence",
+    "frontend initial missing-dist clarification failure"
+  ]
+}

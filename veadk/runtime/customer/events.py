@@ -64,6 +64,25 @@ def _display_metadata(raw):
         ):
             raise CustomerChannelError("invalid_result_status")
         result["skyeyes_result"] = {"status": "incomplete", "reason": marker["reason"]}
+    if "skyeyes_research_delivery" in metadata:
+        delivery = metadata["skyeyes_research_delivery"]
+        if (
+            not isinstance(delivery, dict)
+            or set(delivery)
+            != {"version", "model_reported", "outcome", "requirements", "unknown"}
+            or type(delivery["version"]) is not int
+            or delivery["version"] != 1
+            or delivery["model_reported"] is not True
+            or not isinstance(delivery["outcome"], str)
+            or delivery["outcome"] not in {"answer", "partial", "clarification"}
+            or type(delivery["requirements"]) is not int
+            or not 1 <= delivery["requirements"] <= 128
+            or type(delivery["unknown"]) is not int
+            or not 0 <= delivery["unknown"] <= delivery["requirements"]
+            or (delivery["outcome"] == "answer") != (delivery["unknown"] == 0)
+        ):
+            raise CustomerChannelError("invalid_research_delivery")
+        result["skyeyes_research_delivery"] = dict(delivery)
     # Display only: never copy approval, identity, executable state or secrets.
     return result or None
 
@@ -152,13 +171,18 @@ class _Projector:
             self.seen.add(event_id)
         content = raw.get("content")
         incomplete = metadata is not None and "skyeyes_result" in metadata
+        delivery = metadata is not None and "skyeyes_research_delivery" in metadata
         turn_complete = _field(raw, "turnComplete", "turn_complete")
         if turn_complete is not None and type(turn_complete) is not bool:
             raise CustomerChannelError("invalid_adk_event")
         if raw.get("author") == "user":
             if metadata is not None:
                 raise CustomerChannelError(
-                    "invalid_result_status" if incomplete else "invalid_output_purpose"
+                    "invalid_result_status"
+                    if incomplete
+                    else "invalid_research_delivery"
+                    if delivery
+                    else "invalid_output_purpose"
                 )
             if self.attachments:
                 try:
@@ -170,6 +194,15 @@ class _Projector:
             return None
         self._check_interactive(raw)
         parts, role = self._content(content, partial)
+        if delivery and (
+            partial
+            or turn_complete is False
+            or role != "model"
+            or not parts
+            or not any(p.text and p.text.strip() for p in parts)
+            or any(p.text is None or p.thought for p in parts)
+        ):
+            raise CustomerChannelError("invalid_research_delivery")
         if (
             metadata is not None
             and "skyeyes_output_purpose" in metadata
