@@ -60,7 +60,11 @@ def _display_metadata(raw):
             or marker["status"] != "incomplete"
             or not isinstance(marker["reason"], str)
             or marker["reason"]
-            not in {"model_tool_protocol_error", "host_turn_budget_exhausted"}
+            not in {
+                "model_tool_protocol_error",
+                "host_turn_budget_exhausted",
+                "research_delivery_review_rejected",
+            }
         ):
             raise CustomerChannelError("invalid_result_status")
         result["skyeyes_result"] = {"status": "incomplete", "reason": marker["reason"]}

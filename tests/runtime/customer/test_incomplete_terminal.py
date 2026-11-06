@@ -19,7 +19,11 @@ from tests.runtime.customer.test_session_store import (
 
 stores = store_pair_fixture
 
-REASONS = ("model_tool_protocol_error", "host_turn_budget_exhausted")
+REASONS = (
+    "model_tool_protocol_error",
+    "host_turn_budget_exhausted",
+    "research_delivery_review_rejected",
+)
 RESULT = {"status": "incomplete", "reason": REASONS[0]}
 PURPOSE = {"skyeyes_output_purpose": {"version": 1, "purpose": "final_answer"}}
 
