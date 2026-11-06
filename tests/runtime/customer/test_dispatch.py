@@ -263,11 +263,12 @@ async def test_slow_consumer_has_bounded_buffer_and_cancels_host():
             for i in range(40)
         ],
     )
-    async with host.client() as client:
+    async with host.client(turn_timeout=0.04) as client:
         dispatch = CustomerToolDispatcher(client, run, {}, event_queue_size=2)
-        with pytest.raises(CustomerChannelError, match="event_backpressure"):
+        with pytest.raises(CustomerChannelError, match="^run_timeout$"):
             async with dispatch:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.08)
+                assert dispatch._queue.qsize() <= 2
                 async for _ in dispatch.events():
                     pass
     assert dispatch.quiescent and host.cancelled == 1 and host.stream.closed

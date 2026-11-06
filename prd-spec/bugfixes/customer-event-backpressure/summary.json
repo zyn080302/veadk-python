@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "sdk_base": "ae982106cc51046a9cfe7ca5f4347b70c7e2e57a",
+  "business_base": "b71434dc5fd85c8b6bc441286086bb0af9ab4217",
+  "production_delta": [
+    "veadk/runtime/customer/dispatch.py"
+  ],
+  "original_customer_root_cause_event": null,
+  "attribution": "abstain; offline mechanism reproduction only",
+  "SDK_red_green_same_test": true,
+  "business_red_green_same_test": true,
+  "business_red_green_different_sdk_only": [
+    "dispatch.py"
+  ],
+  "receipts": {
+    "sdk-event-backpressure-final-red": {
+      "label": "sdk-event-backpressure-final-red",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "497e87ca7b0d8cf727bea478c62809f505c8d5cdf1434eb6b2a33904248c8959",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 1,
+      "elapsed_seconds": 5.418,
+      "counts": [
+        "6 failed",
+        "1 passed"
+      ],
+      "failure_names": [
+        "tests/runtime/customer/test_event_backpressure.py::test_short_slow_consumer_preserves_every_event_and_terminal",
+        "tests/runtime/customer/test_event_backpressure.py::test_adk_partials_reach_slow_consumer_before_host_terminal",
+        "tests/runtime/customer/test_event_backpressure.py::test_native_batches_wait_for_durable_consumer_without_accepted_deadlock",
+        "tests/runtime/customer/test_event_backpressure.py::test_stalled_full_queue_expires_at_existing_turn_deadline",
+        "tests/runtime/customer/test_event_backpressure.py::test_iterator_close_reaps_a_producer_blocked_on_full_queue",
+        "tests/runtime/customer/test_event_backpressure.py::test_failure_remains_observable_even_when_data_queue_is_full"
+      ],
+      "error_names": [],
+      "error_codes": [
+        "event_backpressure"
+      ],
+      "source_sha256": {
+        "veadk/runtime/customer/dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "tests/runtime/customer/test_event_backpressure.py": "fed82d451aeac401ca4b5acb48ea4138be2a651347c0580fb5847ffc1223c7b9"
+      },
+      "source_unchanged": true,
+      "dispatch_copy_sha256": "497e87ca7b0d8cf727bea478c62809f505c8d5cdf1434eb6b2a33904248c8959",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "sdk-event-backpressure-final-green": {
+      "label": "sdk-event-backpressure-final-green",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 3.635,
+      "counts": [
+        "7 passed"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "veadk/runtime/customer/dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "tests/runtime/customer/test_event_backpressure.py": "fed82d451aeac401ca4b5acb48ea4138be2a651347c0580fb5847ffc1223c7b9"
+      },
+      "source_unchanged": true,
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "sdk-event-backpressure-release-suite": {
+      "label": "sdk-event-backpressure-release-suite",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 36.774,
+      "counts": [
+        "579 passed"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "veadk/runtime/customer/dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "tests/runtime/customer/test_event_backpressure.py": "fed82d451aeac401ca4b5acb48ea4138be2a651347c0580fb5847ffc1223c7b9"
+      },
+      "source_unchanged": true,
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "business-event-backpressure-bound-red": {
+      "label": "business-event-backpressure-bound-red",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "497e87ca7b0d8cf727bea478c62809f505c8d5cdf1434eb6b2a33904248c8959",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 1,
+      "elapsed_seconds": 12.259,
+      "counts": [
+        "5 3 2 0"
+      ],
+      "failure_names": [
+        "test_slow_business_sse_preserves_all_partials_before_host_terminal (test_customer_event_backpressure.CustomerEventBackpressureTests.test_slow_business_sse_preserves_all_partials_before_host_terminal)",
+        "test_event_backpressure_on_installed_sdk (test_runtime.RuntimeTests.test_event_backpressure_on_installed_sdk)",
+        "test_event_backpressure_on_installed_sdk (test_quality_runtime.QualityTests.test_event_backpressure_on_installed_sdk)"
+      ],
+      "error_names": [
+        "test_business_consumer_cancel_joins_full_queue_and_unaccepted_native_batch (test_customer_event_backpressure.CustomerEventBackpressureTests.test_business_consumer_cancel_joins_full_queue_and_unaccepted_native_batch)",
+        "test_native_burst_slow_journal_and_business_send_finish_all_accepted_pairs (test_customer_event_backpressure.CustomerEventBackpressureTests.test_native_burst_slow_journal_and_business_send_finish_all_accepted_pairs)"
+      ],
+      "error_codes": [
+        "event_backpressure"
+      ],
+      "source_sha256": {
+        "backend/test_customer_event_backpressure.py": "3ce1473cda2ddaff3b79d921991e9da3c998909136e887d81e467256f65dc0d1",
+        "backend/customer_stream_closure.py": "a7d3a49ee52f1ce32312b99e01890afedf7d148ee26d89324f55146874b2ba79",
+        "tests/customer_native_runtime/test_runtime.py": "6e821064e9b3f177655cd2b1d9ed014493296282eb17ae0a97440cc90db0c342",
+        "tests/customer_native_runtime/test_quality_runtime.py": "bf9d41a9cbd88d5cbc63cf78ddf4d17783bb290442010ba2030527321eb25f7a"
+      },
+      "source_unchanged": true,
+      "dispatch_copy_sha256": "497e87ca7b0d8cf727bea478c62809f505c8d5cdf1434eb6b2a33904248c8959",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    },
+    "business-event-backpressure-bound-green": {
+      "label": "business-event-backpressure-bound-green",
+      "actual_installed_customer_source_sha256": {
+        "__init__.py": "8145a9d4ff300083de1dfcba6328b4185687e243c58db9e2115029b6f0e69675",
+        "cancellation.py": "5d88a1fa060dd3cf96aca99977d234ebbfed32f201feaede8274e022760caf2d",
+        "cleanup.py": "d7d684e2570b689c196aa50b11dbacd1e0c5b95a83e76cbbde7aa195a6070369",
+        "client.py": "f52779a612d78a3650af9c9f6f01cd3c78d58401e5015c99e197e7edb03d37a9",
+        "config.py": "6589cf9c073104170beb1d4a9ccf7e1a3609a070c934582dd2becf090108b117",
+        "dispatch.py": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+        "events.py": "36ff4dd42d81ccbb224bc98fda174f424905057f9559265868d02fd219f35bfc",
+        "messages.py": "ade1aa72feef3eae190dd2235822b3e3a331f32d846bf2f91b1b44133e5af037",
+        "native_channel.py": "fde11b8a480995aa6bae5b740d35b246d168320db21e6045684b4f946c2e9d99",
+        "native_tools.py": "8b3111dd39bd1d02bab3f14c06ea0f8991fa2e9d8bff01436b43a706ff252038",
+        "protocol.py": "c0ddee4e633234d0ae6708cc48378fde5ffc3a757f94f7f07090fe0ac192f1a0",
+        "runtime.py": "300728c9a4225df9589a9a56bd01e8ab444857a03debecb678db153ef9d12360",
+        "session_store.py": "8ec19995e58713d5ab9a36cfa916610b6181ecba66ecedc7eaa52d234e4af3e7",
+        "sse.py": "8d85d7f44df50358afd663c62b9bbdaafacc229776bd68b83994eb8ce68f8bc4"
+      },
+      "actual_source_unchanged": true,
+      "exit_code": 0,
+      "elapsed_seconds": 13.843,
+      "counts": [
+        "5 0 0 0"
+      ],
+      "failure_names": [],
+      "error_names": [],
+      "error_codes": [],
+      "source_sha256": {
+        "backend/test_customer_event_backpressure.py": "3ce1473cda2ddaff3b79d921991e9da3c998909136e887d81e467256f65dc0d1",
+        "backend/customer_stream_closure.py": "a7d3a49ee52f1ce32312b99e01890afedf7d148ee26d89324f55146874b2ba79",
+        "tests/customer_native_runtime/test_runtime.py": "6e821064e9b3f177655cd2b1d9ed014493296282eb17ae0a97440cc90db0c342",
+        "tests/customer_native_runtime/test_quality_runtime.py": "bf9d41a9cbd88d5cbc63cf78ddf4d17783bb290442010ba2030527321eb25f7a"
+      },
+      "source_unchanged": true,
+      "dispatch_copy_sha256": "159d71e9379f3a319defe7b424661a109929a86065ee60debed07c5a5beee4ac",
+      "loopback_guard": true,
+      "live_model_MCP_calls": 0,
+      "full_cloud_acceptance": false
+    }
+  },
+  "precommit": {
+    "status": "completed",
+    "exit_code": 0,
+    "elapsed_seconds": 59.037,
+    "hooks": [
+      "ruff check...............................................................Passed",
+      "ruff format..............................................................Passed",
+      "Detect hardcoded secrets.................................................Passed",
+      "Check runtime dependency policy..........................................Passed",
+      "Detect concrete secrets in YAML..........................................Passed"
+    ],
+    "error_categories": [],
+    "inherited_changes_restored_count": 0,
+    "full_output_retained": false,
+    "source_only": true
+  },
+  "candidate_source_binding_note": "red executed isolated installed package with baseline dispatch SHA497e87ca; source_sha256 describes candidate tree/test files; actual_installed_customer_source_sha256 binds the package that executed",
+  "mandatory_gates": [
+    "SDK Harness workflow tests/runtime/customer directory",
+    "business backend/check.py automatic discovery",
+    "business standard/B14 test_event_backpressure_on_installed_sdk exactly3 with no skips/failures/errors"
+  ],
+  "capacity_changed": false,
+  "suite_budget_seconds": {
+    "standard": 150,
+    "B14": 240
+  },
+  "fixed_artifact_lock_changed": false,
+  "production_sdk_other_files_changed": false,
+  "full_main_gates": "not_run; main integration required",
+  "customer_Runtime": "frozen",
+  "paid_model_MCP_calls": 0,
+  "push_build_deploy": false,
+  "original_badcase_live_acceptance": "not_run"
+}

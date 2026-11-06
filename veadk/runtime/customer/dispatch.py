@@ -154,32 +154,34 @@ class CustomerToolDispatcher:
         if self._owner is None or self._reading or self._closed:
             raise CustomerChannelError("dispatcher_unavailable")
         self._reading = True
-        while True:
-            if self._owner.done():
-                if self._owner.cancelled():
-                    raise CustomerChannelError("dispatcher_cancelled")
-                self._owner.result()
-                if self._queue.empty():
-                    return
-            receive = asyncio.create_task(self._queue.get())
-            try:
-                await asyncio.wait(
-                    {receive, self._owner}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if self._owner.done() and not self._owner.cancelled():
+        try:
+            while True:
+                if self._owner.done():
+                    if self._owner.cancelled():
+                        raise CustomerChannelError("dispatcher_cancelled")
                     self._owner.result()
-                if receive.done():
-                    yield receive.result()
-            finally:
-                if not receive.done():
-                    receive.cancel()
-                await asyncio.gather(receive, return_exceptions=True)
+                    if self._queue.empty():
+                        return
+                receive = asyncio.create_task(self._queue.get())
+                try:
+                    await asyncio.wait(
+                        {receive, self._owner}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if self._owner.done() and not self._owner.cancelled():
+                        self._owner.result()
+                    if receive.done():
+                        yield receive.result()
+                finally:
+                    if not receive.done():
+                        receive.cancel()
+                    await asyncio.gather(receive, return_exceptions=True)
+        finally:
+            # Iterator exit revokes production even if its context stays open.
+            await self.aclose(raise_run_error=False)
 
     async def _emit(self, event):
-        try:
-            self._queue.put_nowait(copy.deepcopy(event))
-        except asyncio.QueueFull:
-            raise CustomerChannelError("event_backpressure") from None
+        # Capacity applies flow control inside the existing run deadline.
+        await self._queue.put(copy.deepcopy(event))
         # Give a ready consumer a chance even for pre-buffered HTTP chunks.
         await asyncio.sleep(0)
 
@@ -194,10 +196,8 @@ class CustomerToolDispatcher:
             copy.deepcopy(events),
             asyncio.get_running_loop().create_future(),
         )
-        try:
-            self._queue.put_nowait(batch)
-        except asyncio.QueueFull:
-            raise _LocalToolFailure("event_backpressure") from None
+        # The executor deadline covers both publication and durable acceptance.
+        await self._queue.put(batch)
         await batch.accepted
         if not self._local_active(request_id):
             raise _LocalToolFailure("native_tool_closed")
