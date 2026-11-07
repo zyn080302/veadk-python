@@ -63,10 +63,12 @@ CON-7：仅复制 `customMetadata.skyeyes_output_purpose`（或无歧义 `custom
 
 ## 业务未完成终态（2026-11-06，已实现并离线验证）
 
-CON-8：扩展CON-2白名单，严格保留`skyeyes_result: {status: "incomplete", reason: "model_tool_protocol_error" | "host_turn_budget_exhausted" | "research_delivery_review_rejected"}`。非法标识固定报invalid_result_status，双别名歧义继续拒绝。只允许非partial且显式turnComplete=true的model纯文字（无thought/工具）、空model parts或无正文终态。无正文标识遵守CON-5暂存final/ACK/cleanup和重复/晚到拒绝。持久化完成表示传输收尾，标识表达业务未完成，不授予state/身份/权限或重试；消费者在SSE/历史如实展示并保持正常/后续invocation独立。[已批准设计](../../prd-spec/bugfixes/customer-incomplete-terminal/2026-11-06-customer-incomplete-terminal.zh.md)。测试tests/runtime/customer/test_incomplete_terminal.py由既有Harness customer目录强制执行。固定制品/下游/线上验收待完成。
+CON-8：扩展CON-2白名单，严格保留`skyeyes_result: {status: "incomplete", reason: "model_tool_protocol_error" | "host_turn_budget_exhausted" | "research_delivery_review_rejected" | "model_request_failed" | "turn_deadline_exceeded" | "host_execution_failed"}`。非法标识固定报invalid_result_status，双别名歧义继续拒绝。只允许非partial且显式turnComplete=true的model纯文字（无thought/工具）、空model parts或无正文终态。无正文标识遵守CON-5暂存final/ACK/cleanup和重复/晚到拒绝。持久化完成表示传输收尾，标识表达业务未完成，不授予state/身份/权限或重试；消费者在SSE/历史如实展示并保持正常/后续invocation独立。[已批准设计](../../prd-spec/bugfixes/customer-incomplete-terminal/2026-11-06-customer-incomplete-terminal.zh.md)。测试tests/runtime/customer/test_incomplete_terminal.py由既有Harness customer目录强制执行。固定制品/下游/线上验收待完成。
 
 
 CON-9：显示白名单新增恰好五键`skyeyes_research_delivery: {version:1, model_reported:true, outcome:"answer"|"partial"|"clarification", requirements:int(1..128), unknown:int(0..requirements)}`；计数/version拒bool。answer要求unknown0，其他outcome至少1。仅非partial的model公开纯文本正文；显式远端turnComplete=false拒绝，缺远端完成标记继续兼容。等待真实传输完成/结果ACK/dispatcher成功清理后释放final，先journal再显示。非法保留字段固定`invalid_research_delivery`，不导入远端身份、state、事实或授权。消费者保留SSE/history状态，传输收尾与业务partial和独立恢复准入分开。无store schema/公开API改变。测试`tests/runtime/customer/test_business_delivery_status.py`纳既有Harness customer目录。[已授权设计](../../prd-spec/bugfixes/customer-business-partial-status/2026-11-06-customer-business-partial-status.zh.md)。
 
 
 审核拒绝原因兼容：第三个原因继续表达业务未完成，不改变终态、身份、权限或重试检查。新增强制回归：`tests/runtime/customer/test_review_rejection_terminal.py`。[已批准设计](../../prd-spec/bugfixes/customer-review-rejection-terminal/2026-11-06-customer-review-rejection-terminal.zh.md).
+
+事实收尾兼容：CON-8 另接受精确的 `model_request_failed`、`turn_deadline_exceeded`、`host_execution_failed`，状态始终 `incomplete`。标识、身份、暂存final、ACK/cleanup 与journal检查均保持。新增强制回归：`tests/runtime/customer/test_factual_closeout_terminal.py`。[已批准设计](../../prd-spec/bugfixes/customer-factual-closeout-reasons/2026-11-07-customer-factual-closeout-reasons.zh.md)。离线候选实现/验证与下游页面/API/APM验收分别记录。

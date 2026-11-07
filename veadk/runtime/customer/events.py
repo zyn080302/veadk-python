@@ -64,6 +64,9 @@ def _display_metadata(raw):
                 "model_tool_protocol_error",
                 "host_turn_budget_exhausted",
                 "research_delivery_review_rejected",
+                "model_request_failed",
+                "turn_deadline_exceeded",
+                "host_execution_failed",
             }
         ):
             raise CustomerChannelError("invalid_result_status")
