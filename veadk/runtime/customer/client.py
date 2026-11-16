@@ -76,7 +76,7 @@ class CustomerChannelClient:
         transport: httpx.AsyncBaseTransport | None = None,
         on_affinity: Callable[[SecretStr], Awaitable[None]] | None = None,
         operation_timeout: float = 30,
-        turn_timeout: float = 165,
+        turn_timeout: float | None = 165,
         cleanup_timeout: float = 5,
         max_event_bytes: int = 1024 * 1024,
         max_request_bytes: int = 2 * 1024 * 1024,
@@ -86,7 +86,8 @@ class CustomerChannelClient:
         if protocol not in ("shared", "native"):
             raise ValueError("Invalid customer protocol")
         self._protocol = protocol
-        for value in (operation_timeout, turn_timeout, cleanup_timeout):
+        for value in (operation_timeout, cleanup_timeout,
+                      *(() if turn_timeout is None else (turn_timeout,))):
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (float, int))
@@ -227,6 +228,7 @@ class CustomerChannelClient:
                     self._endpoint + path,
                     headers=await self._request_headers(),
                     content=content,
+                    timeout=httpx.Timeout(self._operation_timeout, read=None),
                 ) as response:
                     await self._check_response(response)
                     data = bytearray()
@@ -349,6 +351,7 @@ class CustomerChannelClient:
                     self._endpoint + CHANNEL_PATH + "/http-runs",
                     headers=await self._request_headers(),
                     content=content,
+                    timeout=httpx.Timeout(self._operation_timeout, read=None),
                 )
                 sent = True
                 try:

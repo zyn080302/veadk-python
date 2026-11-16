@@ -42,7 +42,7 @@ class CustomerRuntimeConfig:
     native_tools: bool = field(default=False, kw_only=True)
     headers: Callable[[], Mapping[str, str]] | None = None
     transport: httpx.AsyncBaseTransport | None = None
-    total_timeout: float = 165
+    total_timeout: float | None = 165
     operation_timeout: float = 10
     cleanup_timeout: float = 10
     max_concurrency: int = 8
@@ -50,6 +50,10 @@ class CustomerRuntimeConfig:
     confirm_cancellation: (
         Callable[[CustomerCancellationContext], Awaitable[bool]] | None
     ) = field(default=None, kw_only=True, repr=False)
+    # Server-owned callback; never deserialized from the HTTP request.
+    # CustomerFailureContext is loaded only on an actual failure to avoid cycles.
+    confirm_failure: Callable[[object], Awaitable[bool]] | None = field(
+        default=None, kw_only=True, repr=False)
     _binding_id: str = field(init=False)
 
     def __post_init__(self):
@@ -66,7 +70,8 @@ class CustomerRuntimeConfig:
             not isinstance(v, SecretStr) for v in self.environment.values()
         ):
             raise ValueError("Customer configuration requires SecretStr values")
-        for value in (self.total_timeout, self.operation_timeout, self.cleanup_timeout):
+        for value in (self.operation_timeout, self.cleanup_timeout,
+                      *(() if self.total_timeout is None else (self.total_timeout,))):
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (float, int))
@@ -88,6 +93,11 @@ class CustomerRuntimeConfig:
             raise ValueError(
                 "Cancellation confirmation requires a server asynchronous callback"
             )
+        if self.confirm_failure is not None and not (
+            inspect.iscoroutinefunction(self.confirm_failure)
+            or inspect.iscoroutinefunction(getattr(self.confirm_failure, "__call__", None))
+        ):
+            raise ValueError("Failure confirmation requires a server asynchronous callback")
         snapshot = CustomerRunRequest(
             app_name=self.remote_app,
             user_id="validation",

@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 import math
+import re
 
 from .protocol import CustomerChannelError
 
@@ -110,12 +111,12 @@ def validate_user_message(message, *, attachments=False):
         for raw in parts:
             part = _fields(
                 raw,
-                {"text", "inline_data", "part_metadata"} if attachments else {"text"},
-                {"inlineData": "inline_data", "partMetadata": "part_metadata"}
+                {"text", "inline_data", "file_data", "part_metadata"} if attachments else {"text"},
+                {"inlineData": "inline_data", "fileData": "file_data", "partMetadata": "part_metadata"}
                 if attachments
                 else None,
             )
-            if ("text" in part) == ("inline_data" in part):
+            if sum(key in part for key in ("text", "inline_data", "file_data")) != 1:
                 raise ValueError
             if "text" in part:
                 value = part["text"]
@@ -123,6 +124,17 @@ def validate_user_message(message, *, attachments=False):
                     raise ValueError
                 text_bytes += len(value.encode("utf-8"))
                 nonempty |= bool(value.strip())
+            elif "file_data" in part:
+                file = _fields(part["file_data"], {"mime_type", "file_uri"},
+                               {"mimeType": "mime_type", "fileUri": "file_uri"})
+                if (file.get("mime_type") != "application/pdf"
+                        or not isinstance(file.get("file_uri"), str)
+                        or re.fullmatch(r"file_id://file-[A-Za-z0-9_-]{1,200}", file["file_uri"]) is None
+                        or "part_metadata" in part):
+                    raise ValueError
+                part["file_data"] = file
+                blob_count += 1
+                nonempty = True
             else:
                 part["inline_data"], size = _blob(part["inline_data"])
                 blob_bytes += size

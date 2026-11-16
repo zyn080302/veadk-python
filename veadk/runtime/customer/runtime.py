@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager, suppress
 from dataclasses import replace
 from typing import AsyncGenerator, TYPE_CHECKING, cast
 from datetime import datetime, timedelta, timezone
@@ -86,7 +86,7 @@ async def _acknowledge_if_saved(lease, service, identity, timeout):
     await lease.acknowledge_display()
 
 
-async def _settle_cancellation(config, lease, ctx, context, author, initial_history):
+async def _settle_cancellation(config, lease, ctx, context, author, initial_history, *, predispatch=False):
     if await config.confirm_cancellation(context) is not True:
         return
     journal = await lease.read_running(context.invocation_id)
@@ -109,6 +109,8 @@ async def _settle_cancellation(config, lease, ctx, context, author, initial_hist
         next_timestamp=clock.next_timestamp,
         reason=context.reason,
     )
+    if predispatch and not journal and context.reason == 'customer_turn_cancelled':
+        additions[-1].custom_metadata = {'customer_predispatch_cancelled': True}
     for event in additions:
         event.branch = ctx.branch
         await lease.append_event(event)
@@ -132,6 +134,54 @@ async def _settle_cancellation(config, lease, ctx, context, author, initial_hist
 
 def _identity(ctx):
     return ctx.session.app_name, ctx.session.user_id, ctx.session.id
+
+
+_UNLIMITED_LEASE_SECONDS = 60.0
+
+
+@asynccontextmanager
+async def _runtime_lease(config, identity):
+    """Keep a live unbounded delivery fenced without an infinite DB lease."""
+    unlimited = config.total_timeout is None
+    lease_seconds = (max(_UNLIMITED_LEASE_SECONDS,
+                         4 * config.store.operation_timeout + 2 * config.cleanup_timeout)
+                     if unlimited else config.total_timeout + 2 * config.cleanup_timeout
+                     + 2 * config.store.operation_timeout + 10)
+    async with await config.store.claim(identity, engine_id=config._binding_id,
+            remote_app=config.remote_app, lease_seconds=lease_seconds) as lease:
+        lease._renewal_error = None
+        if not unlimited:
+            yield lease
+            return
+        owner = asyncio.current_task()
+
+        async def maintain():
+            while True:
+                await asyncio.sleep(lease_seconds / 3)
+                try:
+                    await lease.renew(lease_seconds)
+                except Exception as error:
+                    # Interrupt the live consumer before it can publish stale
+                    # facts. This is ownership loss, never evidence of a user stop.
+                    lease._renewal_error = error
+                    owner.cancel()
+                    return
+
+        renewal = asyncio.create_task(maintain())
+        try:
+            yield lease
+        except asyncio.CancelledError:
+            if lease._renewal_error is not None:
+                raise lease._renewal_error
+            raise
+        finally:
+            renewal.cancel()
+            async def joined():
+                with suppress(asyncio.CancelledError):
+                    await renewal
+            await _run_cleanup(joined(), timeout=config.cleanup_timeout)
+            if lease._renewal_error is not None:
+                owner.uncancel()  # remove only our own interruption
 
 
 def _new_message(ctx, *, attachments=False):
@@ -161,20 +211,13 @@ class CustomerRuntime(BaseRuntime):
                     from .native_tools import _NativeToolBridge
 
                     bridge = _NativeToolBridge(agent, ctx, config.tools)
-                async with await config.store.claim(
-                    identity,
-                    engine_id=config._binding_id,
-                    remote_app=config.remote_app,
-                    lease_seconds=config.total_timeout
-                    + 2 * config.cleanup_timeout
-                    + 2 * config.store.operation_timeout
-                    + 10,
-                ) as lease:
+                async with _runtime_lease(config, identity) as lease:
                     await _acknowledge_if_saved(
                         lease, ctx.session_service, identity, config.operation_timeout
                     )
                     display_clock = _DisplayClock(ctx.session)
                     has_turns = await lease.has_turns()
+                    initialize_remote = not has_turns or await lease.has_only_predispatch_cancellations()
                     if not has_turns and any(
                         event.author != "user"
                         or event.invocation_id != ctx.invocation_id
@@ -229,7 +272,7 @@ class CustomerRuntime(BaseRuntime):
                                 ).encode()
                             ).hexdigest()
                             turn = await lease.begin_turn(ctx.invocation_id, digest)
-                            if not has_turns:
+                            if initialize_remote:
                                 exists = await client.session_exists(
                                     binding.remote_app,
                                     binding.remote_user,
@@ -302,6 +345,8 @@ class CustomerRuntime(BaseRuntime):
                         GeneratorExit,
                         CustomerChannelError,
                     ) as error:
+                        if lease._renewal_error is not None:
+                            raise lease._renewal_error
                         # A disconnect may reach this boundary as an HTTP
                         # transport failure. Only the trusted confirmer can
                         # prove cancellation; other channel failures retain
@@ -309,6 +354,35 @@ class CustomerRuntime(BaseRuntime):
                         tool_timeout = isinstance(
                             error, CustomerChannelError
                         ) and error.args == ("tool_timeout",)
+                        failed = isinstance(error, CustomerChannelError) and error.args == ("remote_event_error",)
+                        if failed:
+                            # Projection and dispatcher contexts have already exited.
+                            # Only known, joined local execution and the exact Host
+                            # owner can settle this failed turn; no tool replay.
+                            if bridge is not None:
+                                bridge.close()
+                            if journal_write is not None and not journal_write.done():
+                                await _wait_cleanup({journal_write}, timeout=config.cleanup_timeout)
+                            confirmer = config.confirm_failure or config.confirm_cancellation
+                            if (confirmer is not None and turn is not None
+                                    and dispatcher is not None and dispatcher.quiescent
+                                    and (journal_write is None or journal_write.done()
+                                         and not journal_write.cancelled()
+                                         and journal_write.exception() is None)):
+                                from .failure import CustomerFailureContext, settle_failure
+                                context = CustomerFailureContext(identity, ctx.invocation_id, binding, turn)
+                                terminal = None
+                                try:
+                                    terminal = await _run_cleanup(settle_failure(config, lease, ctx,
+                                        context, agent.name, initial_history), timeout=config.cleanup_timeout)
+                                except Exception:
+                                    logging.getLogger(__name__).warning("failure_settlement_failed")
+                                if terminal is not None:
+                                    yield terminal
+                                    await _acknowledge_if_saved(lease, ctx.session_service, identity,
+                                        config.operation_timeout)
+                                    return
+                            raise
                         if isinstance(
                             error, CustomerChannelError
                         ) and error.args not in (
@@ -329,8 +403,10 @@ class CustomerRuntime(BaseRuntime):
                         if (
                             config.confirm_cancellation is not None
                             and turn is not None
-                            and dispatcher is not None
-                            and dispatcher.quiescent
+                            # Session lookup/create happens after begin_turn
+                            # and before dispatcher construction. Only trusted
+                            # Host atomic fencing can confirm that boundary.
+                            and (dispatcher is None or dispatcher.quiescent)
                             and (
                                 journal_write is None
                                 or (
@@ -359,6 +435,7 @@ class CustomerRuntime(BaseRuntime):
                                         context,
                                         agent.name,
                                         initial_history,
+                                        predispatch=dispatcher is None,
                                     ),
                                     timeout=config.cleanup_timeout,
                                 )
@@ -376,6 +453,16 @@ class CustomerRuntime(BaseRuntime):
                                     config.operation_timeout,
                                 )
                                 return
+                        # A real task cancellation may be represented by the
+                        # channel as transport_error during session lookup.
+                        # Keep the original cancellation when this task still
+                        # carries it; an ordinary transport error cannot use
+                        # this path and uncertain settlement stays quarantined.
+                        if (dispatcher is None and isinstance(error, CustomerChannelError)
+                                and error.args == ("transport_error",)
+                                and asyncio.current_task() is not None
+                                and asyncio.current_task().cancelling()):
+                            raise asyncio.CancelledError from None
                         raise
         except TimeoutError:
             raise CustomerChannelError("customer_runtime_timeout") from None
@@ -389,14 +476,7 @@ class CustomerRuntime(BaseRuntime):
         config = replace(cast(CustomerRuntimeConfig, agent.customer_runtime_config))
         try:
             with anyio.fail_after(config.total_timeout):
-                async with await config.store.claim(
-                    local_identity,
-                    engine_id=config._binding_id,
-                    remote_app=config.remote_app,
-                    lease_seconds=config.total_timeout
-                    + 2 * config.store.operation_timeout
-                    + 10,
-                ) as lease:
+                async with _runtime_lease(config, local_identity) as lease:
                     if lease.pending_invocation_id is None:
                         return 0
                     journal = await lease.read_completed(lease.pending_invocation_id)

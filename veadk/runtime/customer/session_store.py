@@ -206,6 +206,31 @@ class CustomerSessionStore:
             ).scalar_one_or_none()
             return row == "cancelled"
 
+    async def failure_settled(
+        self, local_identity, invocation_id, record, *, engine_id
+    ):
+        """Read-only proof for a caller that still owns its outer session guard."""
+        key = _key(local_identity)
+        async with self._transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(_turns.c.status)
+                    .join(_sessions, _sessions.c.key == _turns.c.session_key)
+                    .where(
+                        _sessions.c.key == key,
+                        _sessions.c.engine_id == engine_id,
+                        _sessions.c.owner.is_(None),
+                        _sessions.c.status == "idle",
+                        _sessions.c.current_invocation.is_(None),
+                        _turns.c.invocation_id == invocation_id,
+                        _turns.c.run_id == record.run_id,
+                        _turns.c.channel_id == record.channel_id,
+                        _turns.c.scope_id == record.scope_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return row == "failed"
+
     async def claim(
         self,
         local_identity: tuple[str, str, str],
@@ -260,7 +285,7 @@ class CustomerSessionStore:
                         if row["deadline"] > now
                         else "session_recovery_required"
                     )
-                if row["status"] not in {"idle", "completed", "cancelled"}:
+                if row["status"] not in {"idle", "completed", "cancelled", "failed"}:
                     raise CustomerChannelError("session_recovery_required")
                 values = dict(row)
                 values.update(
@@ -300,6 +325,19 @@ class CustomerSessionLease:
     @property
     def binding(self):
         return self._binding
+
+    async def renew(self, lease_seconds: float):
+        """Extend only the current, unexpired owner; never reacquire a lease.
+
+        This changes ownership expiry, not query, tool or model permissions.
+        Expired/revoked owners remain rejected by the exact transactional fence.
+        """
+        if not _positive(lease_seconds):
+            raise ValueError("Invalid customer lease duration")
+        async with self._change() as (connection, row):
+            await self._session_update(
+                connection, deadline=max(row["deadline"], self._store._clock() + lease_seconds)
+            )
 
     @property
     def affinity(self):
@@ -430,7 +468,7 @@ class CustomerSessionLease:
                     if previous["input_digest"] == input_digest
                     else "invocation_conflict"
                 )
-            if session["status"] in {"completed", "cancelled"}:
+            if session["status"] in {"completed", "cancelled", "failed"}:
                 raise CustomerChannelError("display_recovery_required")
             if session["status"] != "idle":
                 raise CustomerChannelError("session_recovery_required")
@@ -462,6 +500,29 @@ class CustomerSessionLease:
                 .limit(1)
             )
             return result.first() is not None
+
+    async def has_only_predispatch_cancellations(self):
+        """Initialization retry only after durable, trusted pre-dispatch stops.
+
+        Display metadata or an HTTP error alone cannot authorize this path.
+        Completed, failed or potentially executed turns never recreate remote
+        history. The same binding and pending-display recovery are preserved.
+        """
+        async with self._change() as (connection, _):
+            turns = (await connection.execute(select(
+                _turns.c.invocation_id, _turns.c.status
+            ).where(_turns.c.session_key == self._key))).all()
+        if not turns or any(turn.status != 'cancelled' for turn in turns):
+            return False
+        for turn in turns:
+            journal = await self.read_completed(turn.invocation_id)
+            if (len(journal) != 1 or not journal[0].interrupted
+                    or not journal[0].turn_complete
+                    or journal[0].error_code != 'customer_turn_cancelled'
+                    or journal[0].custom_metadata != {'customer_predispatch_cancelled': True}
+                    or journal[0].get_function_calls() or journal[0].get_function_responses()):
+                return False
+        return True
 
     def _journal_filter(self, invocation_id):
         return (
@@ -645,13 +706,51 @@ class CustomerSessionLease:
             )
             await self._session_update(connection, status="cancelled")
 
+    async def fail_turn(self, record: CustomerTurnRecord):
+        """Record failure only for the live original reserved run; never success/cancel."""
+        async with self._change() as (connection, session):
+            invocation = session["current_invocation"]
+            turn = await self._turn(connection, invocation)
+            if (
+                session["status"] != "running"
+                or turn is None
+                or any(
+                    turn[field] != getattr(record, field)
+                    for field in ("run_id", "channel_id", "scope_id")
+                )
+            ):
+                raise CustomerChannelError("invalid_turn_state")
+            payload = (
+                await connection.execute(
+                    select(_journal.c.payload)
+                    .where(*self._journal_filter(invocation))
+                    .order_by(_journal.c.position.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            last = self._decode(payload) if payload is not None else None
+            if (
+                last is None
+                or not last.interrupted
+                or not last.turn_complete
+                or last.error_code != "customer_turn_failed"
+                or last.error_message != "remote_event_error"
+            ):
+                raise CustomerChannelError("missing_failure_terminal")
+            await connection.execute(
+                update(_turns)
+                .where(*self._turn_filter(invocation))
+                .values(status="failed")
+            )
+            await self._session_update(connection, status="failed")
+
     async def read_running(self, invocation_id: str):
         """Read this owner's incomplete journal for cancellation settlement."""
         return await self._read_journal(invocation_id, {"running"})
 
     async def read_completed(self, invocation_id: str):
         """Recover only display Events, never remote execution or tool calls."""
-        return await self._read_journal(invocation_id, {"completed", "cancelled"})
+        return await self._read_journal(invocation_id, {"completed", "cancelled", "failed"})
 
     async def _read_journal(self, invocation_id, statuses):
         if not _identifier(invocation_id, 256):
@@ -694,7 +793,7 @@ class CustomerSessionLease:
     async def acknowledge_display(self):
         """Permit another turn only after verifying local Session persistence."""
         async with self._change() as (connection, session):
-            if session["status"] not in {"completed", "cancelled"}:
+            if session["status"] not in {"completed", "cancelled", "failed"}:
                 raise CustomerChannelError("invalid_turn_state")
             await self._session_update(
                 connection, status="idle", current_invocation=None

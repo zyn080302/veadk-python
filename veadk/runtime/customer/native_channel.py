@@ -60,6 +60,8 @@ async def _native_run(client, request):
     channel = _NativeChannel(client, request)
     client._active = True
     try:
+        # None is a trusted server option: no whole-turn deadline, while
+        # connection, control operations and individual tools stay bounded.
         with anyio.fail_after(client._turn_timeout) as deadline:
             yield channel
     except TimeoutError:
