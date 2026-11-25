@@ -213,10 +213,13 @@ class ScriptedBackend:
                 if name in namespaces:
                     call["namespace"] = namespaces[name]
                 output.append(call)
-            for chunk_index, chunk in enumerate(rnd.reply_texts):
+            # One reply with multiple text parts is one message, not several
+            # competing assistant answers. Explicit phase enables live deltas.
+            if rnd.reply_texts:
                 output.append(
                     {
-                        "id": f"msg-{index}-{chunk_index}",
+                        "id": f"msg-{index}-0",
+                        "phase": "final_answer",
                         "type": "message",
                         "role": "assistant",
                         "status": "completed",
@@ -226,6 +229,7 @@ class ScriptedBackend:
                                 "text": chunk,
                                 "annotations": [],
                             }
+                            for chunk in rnd.reply_texts
                         ],
                     }
                 )

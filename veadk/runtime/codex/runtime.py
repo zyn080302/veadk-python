@@ -123,6 +123,7 @@ from veadk.runtime.codex.translate import (
     build_turn_usage_metadata,
     backfill_event_text,
     is_codex_final_text_event,
+    select_codex_final_text_events,
     is_mcp_item_for_server,
     notification_to_events,
 )
@@ -950,6 +951,7 @@ class CodexRuntime(BaseRuntime):
                 async def _pump_codex() -> None:
                     nonlocal direct_turn_error
                     active_tool_items: set[str] = set()
+                    item_phases: dict[str, str | None] = {}
                     # MCP items for the bridge's own server. The bridge's
                     # executors already emit the ADK function_call/response
                     # events (with callbacks and state deltas applied), so
@@ -976,6 +978,7 @@ class CodexRuntime(BaseRuntime):
                                 agent.name,
                                 ctx.invocation_id,
                                 active_tool_items=active_tool_items,
+                                item_phases=item_phases,
                             ):
                                 _scope_event(event, ctx)
                                 if (
@@ -1102,7 +1105,9 @@ class CodexRuntime(BaseRuntime):
                         deferred_transfer_event = event
                         continue
                     if is_codex_final_text_event(event):
-                        final_text_events.append(event)
+                        final_text_events = select_codex_final_text_events(
+                            [*final_text_events, event]
+                        )
                         continue
                     # Partials go out immediately, even while a durable event
                     # is held back as the merge target. Parking them behind it

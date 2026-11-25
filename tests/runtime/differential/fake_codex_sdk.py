@@ -518,18 +518,23 @@ def _item_payloads(
     itype = item.get("type")
 
     if itype == "message":
-        text = "\n".join(
+        text = "".join(
             str(part.get("text") or "")
             for part in item.get("content") or []
             if isinstance(part, dict)
         )
-        thread_item = {"id": item_id, "type": "agentMessage", "text": text}
+        thread_item = {
+            "id": item_id,
+            "type": "agentMessage",
+            "text": text,
+            "phase": item.get("phase"),
+        }
         return [
             (
                 "ItemStartedNotification",
                 {
                     "turn_id": turn_id,
-                    "item": {"id": item_id, "type": "agentMessage", "text": ""},
+                    "item": {**thread_item, "text": ""},
                 },
             ),
             (

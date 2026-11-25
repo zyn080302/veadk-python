@@ -556,7 +556,7 @@ def item_to_events(item: Any, author: str, invocation_id: str) -> list[Event]:
     - tool calls (``commandExecution`` / ``mcpToolCall`` / ``dynamicToolCall``
       / ``fileChange`` / ``webSearch``) -> a ``function_call`` part plus a
       matching ``function_response`` part carrying the tool's output,
-    - ``agentMessage`` -> a durable model text part (the assistant's answer),
+    - ``agentMessage`` -> an answer candidate or a partial progress event,
     - any other text-bearing item (notably ``plan``) -> a ``partial``
       ``plan_item`` lifecycle event carrying the text,
     - ``userMessage`` (and anything else) -> nothing.
@@ -609,8 +609,30 @@ def item_to_events(item: Any, author: str, invocation_id: str) -> list[Event]:
         ]
 
     text = data.get("text")
-    if itype == "agentMessage" and text:
-        return [_event(author, invocation_id, "model", types.Part(text=str(text)))]
+    if itype == "agentMessage" and text is not None:
+        phase = _scalar(data.get("phase"))
+        metadata = {"item_id": data.get("id"), "item_type": itype, "phase": phase}
+        if phase not in (None, "final_answer"):
+            # Progress is neither private reasoning nor answer text. Keeping
+            # it out of content also protects consumers that only filter thought.
+            return [
+                _lifecycle_event(
+                    author,
+                    invocation_id,
+                    "agent_message_progress",
+                    {**metadata, "text": str(text)},
+                )
+            ]
+        return [
+            _lifecycle_event(
+                author,
+                invocation_id,
+                "item_completed",
+                metadata,
+                part=types.Part(text=str(text)),
+                partial=None,
+            )
+        ]
 
     if itype != "userMessage" and text:
         # Narration, not an answer. ``plan`` items carry ``text`` too, and
@@ -650,6 +672,8 @@ def is_codex_final_text_event(event: Event) -> bool:
         return False
     if metadata.get("item_type") != "agentMessage":
         return False
+    if metadata.get("phase") not in (None, "final_answer"):
+        return False
     content = event.content
     if content is None:
         return False
@@ -657,6 +681,23 @@ def is_codex_final_text_event(event: Event) -> bool:
         part.text is not None and not getattr(part, "thought", False)
         for part in content.parts or []
     )
+
+
+def select_codex_final_text_events(events: list[Event]) -> list[Event]:
+    """Match Codex: last explicit final, else last legacy unphased message.
+
+    Return at most one event; never concatenate intermediate assistant replies.
+    Callers may use the result as their next candidate buffer.
+    """
+    legacy = None
+    for event in reversed(events):
+        if not is_codex_final_text_event(event):
+            continue
+        if (event.custom_metadata or {}).get("phase") == "final_answer":
+            return [event]
+        if legacy is None:
+            legacy = event
+    return [legacy] if legacy is not None else []
 
 
 _ERROR_CODE_FALLBACK = "codex_error"
@@ -717,6 +758,8 @@ def _on_item_started(
         "item_type": item.get("type"),
         "status": "in_progress",
     }
+    if item.get("type") == "agentMessage":
+        metadata["phase"] = _scalar(item.get("phase"))
     call = _tool_call(item)
     if call is None:
         return [_lifecycle_event(author, invocation_id, "item_started", metadata)]
@@ -758,6 +801,7 @@ def _on_item_completed(
         # (``plan_item``); everything else is a plain completed item.
         existing = event.custom_metadata or {}
         event.custom_metadata = {
+            **existing,
             "codex_event_type": existing.get("codex_event_type") or "item_completed",
             "item_id": item_id,
             "item_type": item.get("type"),
@@ -1111,6 +1155,7 @@ def notification_to_events(
     invocation_id: str,
     *,
     active_tool_items: set[str] | None = None,
+    item_phases: dict[str, str | None] | None = None,
 ) -> list[Event]:
     """Translate a Codex lifecycle notification into observable ADK events.
 
@@ -1130,20 +1175,42 @@ def notification_to_events(
         invocation_id (str): The ADK invocation id to stamp on each event.
         active_tool_items (set[str] | None): Ids of tool items whose
             ``function_call`` part was already emitted at item start.
+        item_phases (dict[str, str | None] | None): Per-turn message phases,
+            associated by item id. Reuse this mapping across notifications.
 
     Returns:
         list[google.adk.events.event.Event]: Events for this notification;
         empty when it carries nothing observable.
     """
-    handler = _DISPATCH.get(type(payload).__name__)
+    name = type(payload).__name__
+    handler = _DISPATCH.get(name)
     if handler is None:
         return []
-    return handler(
-        _item_dict(payload),
+    data = _item_dict(payload)
+    phases = item_phases if item_phases is not None else {}
+    item = data.get("item") or {}
+    item_id = str(item.get("id") or data.get("item_id") or "")
+    if name == "ItemStartedNotification" and item.get("type") == "agentMessage":
+        if item_id:
+            phases[item_id] = _scalar(item.get("phase"))
+    events = handler(
+        data,
         author,
         invocation_id,
         active_tool_items if active_tool_items is not None else set(),
     )
+    if name == "AgentMessageDeltaNotification":
+        phase = phases.get(item_id)
+        for event in events:
+            metadata = event.custom_metadata or {}
+            metadata["phase"] = phase
+            if phase != "final_answer":
+                metadata["text"] = str(data.get("delta") or "")
+                event.content = None
+            event.custom_metadata = metadata
+    if name == "ItemCompletedNotification":
+        phases.pop(item_id, None)
+    return events
 
 
 def _lifecycle_event(
@@ -1190,8 +1257,14 @@ def result_to_events(result: Any, author: str, invocation_id: str) -> list[Event
         list[google.adk.events.event.Event]: The turn's events in order.
     """
     events: list[Event] = []
+    candidates: list[Event] = []
     for item in getattr(result, "items", None) or []:
-        events.extend(item_to_events(item, author, invocation_id))
+        for event in item_to_events(item, author, invocation_id):
+            if is_codex_final_text_event(event):
+                candidates = select_codex_final_text_events([*candidates, event])
+            else:
+                events.append(event)
+    events.extend(candidates)
 
     if events:
         return events

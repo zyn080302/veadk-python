@@ -398,3 +398,51 @@ def test_content_tracing_context_override_allows_content(monkeypatch):
             assert span.attributes["gen_ai.completion.0.content"] == "assistant secret"
     finally:
         context_api.detach(token)
+
+
+def test_thought_classification_survives_all_telemetry_exports(monkeypatch):
+    monkeypatch.setenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", "true")
+    response = _FakeLlmResponse()
+    response.content = _FakeContent(
+        "model",
+        [
+            _FakePart(text="synthetic reasoning marker", thought=True),
+            _FakePart(text="synthetic answer marker"),
+        ],
+    )
+    request = _FakeLlmRequest()
+    request.contents = [response.content]
+    with _start_test_span("call_llm") as span:
+        telemetry.trace_call_llm(_FakeInvocationContext(), "event", request, response)
+        assert span.attributes["gen_ai.completion.0.type"] == "reasoning"
+        assert span.attributes["gen_ai.completion.1.type"] == "text"
+        assistant = [e for e in span.events if e.name == "gen_ai.assistant.message"][0]
+        assert assistant.attributes["parts.0.type"] == "reasoning"
+        assert assistant.attributes["parts.1.type"] == "text"
+    with _start_test_span("invocation") as span:
+        telemetry._set_agent_output_attribute(span, response)
+        choice = [e for e in span.events if e.name == "gen_ai.choice"]
+        assert choice[0].attributes["message.parts.0.type"] == "reasoning"
+        assert choice[1].attributes["message.parts.1.type"] == "text"
+
+
+def test_thought_exports_obey_content_collection_switch(monkeypatch):
+    monkeypatch.setenv("OBSERVABILITY_OPENTELEMETRY_TRACE_CONTENT", "false")
+    response = _FakeLlmResponse()
+    response.content = _FakeContent(
+        "model",
+        [
+            _FakePart(text="synthetic reasoning marker", thought=True),
+            _FakePart(text="synthetic answer marker"),
+        ],
+    )
+    request = _FakeLlmRequest()
+    request.contents = [response.content]
+    with _start_test_span("call_llm") as span:
+        telemetry.trace_call_llm(_FakeInvocationContext(), "event", request, response)
+        telemetry._set_agent_output_attribute(span, response)
+        assert not any(k.startswith("gen_ai.completion.") for k in span.attributes)
+        assert "gen_ai.output" not in span.attributes
+        assert not any(
+            e.name in ("gen_ai.choice", "gen_ai.assistant.message") for e in span.events
+        )

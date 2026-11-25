@@ -210,7 +210,9 @@ def _set_agent_output_attribute(span: Span, llm_response: LlmResponse) -> None:
                 span.add_event(
                     "gen_ai.choice",
                     {
-                        f"message.parts.{idx}.type": "text",
+                        f"message.parts.{idx}.type": (
+                            "reasoning" if getattr(part, "thought", False) else "text"
+                        ),
                         f"message.parts.{idx}.text": part.text,
                     },
                 )

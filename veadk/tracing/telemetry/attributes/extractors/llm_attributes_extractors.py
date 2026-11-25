@@ -328,6 +328,9 @@ def llm_gen_ai_completion(params: LLMAttributesParams) -> ExtractorResponse:
             if part.text:
                 message[f"gen_ai.completion.{idx}.role"] = content.role
                 message[f"gen_ai.completion.{idx}.content"] = part.text
+                message[f"gen_ai.completion.{idx}.type"] = (
+                    "reasoning" if getattr(part, "thought", False) else "text"
+                )
             elif part.function_call:
                 message[f"gen_ai.completion.{idx}.role"] = content.role
                 message[f"gen_ai.completion.{idx}.tool_calls.0.id"] = (
@@ -464,7 +467,11 @@ def llm_gen_ai_messages(params: LLMAttributesParams) -> ExtractorResponse:
                         if part.text:
                             event["gen_ai.assistant.message"].update(
                                 {
-                                    f"parts.{idx}.type": "text",
+                                    f"parts.{idx}.type": (
+                                        "reasoning"
+                                        if getattr(part, "thought", False)
+                                        else "text"
+                                    ),
                                     f"parts.{idx}.text": part.text,
                                 }
                             )
