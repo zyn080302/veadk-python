@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 
 _INTERNAL_TOOL_NAMES = {
+    "_veadk_read_context",
     "adk_framework",
     "adk_request_confirmation",
     "adk_request_credential",

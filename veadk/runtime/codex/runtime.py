@@ -127,6 +127,7 @@ from veadk.runtime.codex.translate import (
     is_mcp_item_for_server,
     notification_to_events,
 )
+from veadk.runtime.codex.input_context import InputContext, MAX_INPUT_CHARACTERS
 from veadk.runtime.codex.workspace import (
     bind_workspace,
     bind_workspace_to_executors,
@@ -501,6 +502,7 @@ class CodexRuntime(BaseRuntime):
         # twice ("Calling end() on an ended span") and closed every MCP toolset
         # twice.
         cleanup_done = False
+        input_context = InputContext()
 
         async def _cleanup() -> None:
             nonlocal cleanup_done
@@ -519,6 +521,7 @@ class CodexRuntime(BaseRuntime):
                 finally:
                     # Workspaces survive turns; only the private Codex home
                     # belongs to this invocation.
+                    input_context.clear()
                     shutil.rmtree(codex_home, ignore_errors=True)
                     _end_span(call_llm_span)
 
@@ -602,37 +605,6 @@ class CodexRuntime(BaseRuntime):
                     runtime_call.llm_request,
                     transfer_targets,
                 )
-            # Bound here rather than by a ContextVar set for the turn: the shim
-            # and the MCP bridge both run executors on a task descended from
-            # their uvicorn server task, which snapshotted its context when the
-            # *first* invocation in the process started it, so an ambient value
-            # would be that invocation's - a silent cross-tenant leak. See
-            # `veadk.runtime.codex.workspace`.
-            bound_executors = bind_workspace_to_executors(
-                tool_bundle.executors, workspace
-            )
-            bound_executors = wrap_provider_executors(
-                provider_endpoint, bound_executors
-            )
-            if shim is not None:
-                turn_token = shim.register_turn(
-                    tool_bundle.specs,
-                    bound_executors,
-                    max_tool_iterations=runtime_config.max_tool_iterations,
-                    invocation_id=ctx.invocation_id,
-                    model_extra_config=agent.model_extra_config,
-                    on_model_call=lambda: _charge_llm_call(ctx),
-                )
-            elif bridge is not None and tool_bundle.specs:
-                bridge_token = bridge.register_turn(
-                    tool_bundle.specs,
-                    bound_executors,
-                    invocation_id=ctx.invocation_id,
-                    otel_context=_current_otel_context(),
-                    max_tool_iterations=runtime_config.max_tool_iterations,
-                    on_error=event_queue.put,
-                    on_interrupt=bridge_interrupt,
-                )
             # Keep privileged instructions out of the user transcript. The SDK
             # exposes a native developer-instruction channel for them.
             #
@@ -661,33 +633,11 @@ class CodexRuntime(BaseRuntime):
                 )
                 if block
             )
-            # Tag the turn's own user message so the shim can tell this turn's
-            # sampling requests from Codex-internal passes that reuse the same
-            # provider block and bearer token. Codex re-sends the whole history
-            # when it auto-compacts, so an untagged shim would advertise the
-            # agent's ADK tools to the summarizer and replay the turn's tool
-            # transcript into it - and would then execute a real tool a second
-            # time if the summarizer asked for one. The tag rides in the prompt
-            # text rather than a separate input item precisely because Codex
-            # preserves user-message text verbatim across compaction and
-            # reordering, where a side-channel item would be dropped. The
-            # direct transport needs no tag: ADK tools reach Codex as its own
-            # MCP tools, so a compaction pass has nothing of ours to replay.
-            input_items = _build_codex_input(
-                prompt,
-                runtime_call.llm_request,
-                workspace,
-                turn_marker=(
-                    shim.turn_marker(turn_token)
-                    if shim is not None and turn_token is not None
-                    else ""
-                ),
-            )
             # A resumed thread already holds every earlier turn Codex took
             # part in, so it gets the current message only -- plus whatever
             # other agents and the user said while this agent was not running,
             # which its thread never saw.
-            resume_input_items: list[object] = []
+            resume_prompt: str | None = None
             resume_thread_id: str | None = None
             if persistent:
                 thread_key, thread_store = _thread_binding(ctx, agent)
@@ -720,21 +670,17 @@ class CodexRuntime(BaseRuntime):
                         import_rollout, codex_home, thread_record.rollout
                     )
                     resume_thread_id = thread_record.thread_id
-                    resume_input_items = _build_codex_input(
-                        _with_backfill(
-                            build_prompt_from_llm_request(
-                                runtime_call.llm_request, include_history=False
-                            ),
-                            _turns_since_own(
-                                ctx,
-                                agent.name,
-                                thread_record.covered_invocation_id,
-                            ),
-                            _resumed_tool_results(resumed_events),
-                            workspace_reset=_workspace_is_empty(workspace),
+                    resume_prompt = _with_backfill(
+                        build_prompt_from_llm_request(
+                            runtime_call.llm_request, include_history=False
                         ),
-                        runtime_call.llm_request,
-                        workspace,
+                        _turns_since_own(
+                            ctx,
+                            agent.name,
+                            thread_record.covered_invocation_id,
+                        ),
+                        _resumed_tool_results(resumed_events),
+                        workspace_reset=_workspace_is_empty(workspace),
                     )
                 elif thread_record is not None:
                     codex_metrics.record_resume("instructions_changed")
@@ -747,6 +693,92 @@ class CodexRuntime(BaseRuntime):
                         "reason=instructions_changed",
                         ctx.invocation_id,
                     )
+            current_prompt = build_prompt_from_llm_request(
+                runtime_call.llm_request, include_history=False
+            )
+            # Register before packing: executors close over the same invocation
+            # map. The marker is known only after shim registration. Its actual
+            # length is checked below; a conservative 4096 margin only decides
+            # tool availability, never truncates or changes ordinary text.
+            needs_reader = max(len(prompt), len(resume_prompt or "")) > (
+                MAX_INPUT_CHARACTERS - 4096
+            )
+            if needs_reader:
+                add_tool_to_bundle(
+                    tool_bundle,
+                    input_context.tool(),
+                    ctx,
+                    event_sink=_emit_tool_event,
+                    timeout_seconds=runtime_config.tool_timeout_seconds,
+                )
+            # Bound here rather than by a ContextVar set for the turn: the shim
+            # and the MCP bridge both run executors on a task descended from
+            # their uvicorn server task, which snapshotted its context when the
+            # *first* invocation in the process started it, so an ambient value
+            # would be that invocation's - a silent cross-tenant leak. See
+            # `veadk.runtime.codex.workspace`.
+            bound_executors = bind_workspace_to_executors(
+                tool_bundle.executors, workspace
+            )
+            bound_executors = wrap_provider_executors(
+                provider_endpoint, bound_executors
+            )
+            if shim is not None:
+                turn_token = shim.register_turn(
+                    tool_bundle.specs,
+                    bound_executors,
+                    max_tool_iterations=runtime_config.max_tool_iterations,
+                    invocation_id=ctx.invocation_id,
+                    model_extra_config=agent.model_extra_config,
+                    on_model_call=lambda: _charge_llm_call(ctx),
+                )
+            elif bridge is not None and tool_bundle.specs:
+                bridge_token = bridge.register_turn(
+                    tool_bundle.specs,
+                    bound_executors,
+                    invocation_id=ctx.invocation_id,
+                    otel_context=_current_otel_context(),
+                    max_tool_iterations=runtime_config.max_tool_iterations,
+                    on_error=event_queue.put,
+                    on_interrupt=bridge_interrupt,
+                )
+            marker = (
+                shim.turn_marker(turn_token)
+                if shim is not None and turn_token is not None
+                else ""
+            )
+            marker_suffix = f"\n\n<veadk_turn>{marker}</veadk_turn>" if marker else ""
+            original_prompt_characters = len(prompt)
+            prompt = input_context.pack(
+                prompt, current=current_prompt, reserve=len(marker_suffix)
+            )
+            input_items = _build_codex_input(
+                prompt,
+                runtime_call.llm_request,
+                workspace,
+                turn_marker=marker,
+            )
+            if len(prompt) != original_prompt_characters:
+                logger.info(
+                    "codex_input_packed original_characters=%d input_characters=%d",
+                    original_prompt_characters,
+                    len(prompt) + len(marker_suffix),
+                )
+            resume_input_items: list[object] = []
+            if resume_prompt is not None:
+                # The thread may contain an expired reference from an earlier
+                # turn. Always supply the current authorized source when the
+                # full history required packing, even on an otherwise short resume.
+                resume_prompt += input_context.notice()
+                resume_prompt = input_context.pack(
+                    resume_prompt,
+                    current=current_prompt,
+                )
+                resume_input_items = _build_codex_input(
+                    resume_prompt,
+                    runtime_call.llm_request,
+                    workspace,
+                )
             logger.info(
                 "codex_runtime_start invocation_id=%s agent=%s model=%s "
                 "transport=%s sandbox=%s approval_mode=%s network_access=%s "
@@ -2235,6 +2267,8 @@ def _build_codex_input(
     """
     if turn_marker:
         prompt = f"{prompt}\n\n<veadk_turn>{turn_marker}</veadk_turn>"
+    if len(prompt) > MAX_INPUT_CHARACTERS:
+        raise ValueError("Codex text input exceeds the RPC character limit")
     items: list[object] = [TextInput(prompt)]
     for attachment in build_input_attachments_from_llm_request(llm_request, workspace):
         kind = attachment["kind"]
